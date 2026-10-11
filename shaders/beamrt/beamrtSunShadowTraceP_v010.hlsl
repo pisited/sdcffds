@@ -213,7 +213,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         rayOrigin, sun, max(shadowRayDistance, 0.5));
     if (shadowTraceDiagnostic > 2.5)
         return float4(worldBoxHit ? 1.0 : 0.0, 0.0, 0.0, 1.0);
-    if (worldBoxHit)
+    if (worldBoxHit && shadowTraceDiagnostic < 1.5)
     {
         // Only augment. Existing screen-space model modes run unchanged
         // whenever no supplied off-screen proxy intersects this ray.
