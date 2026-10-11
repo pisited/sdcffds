@@ -371,3 +371,43 @@ If rawdifference is also largely black while both classification views share
 the same false red patches, the cause probably lies in their common underlying
 sun-ray/depth reconstruction or the limitations of screen-space geometry,
 not the later validation filters.
+
+## Independent model-pass proof (trace v008 + preview v006)
+
+If raw visibility difference is entirely black, first establish that the
+comparison target and shader constants are independent. The model-ID view
+temporarily bypasses ray tracing and outputs a constant for each hit model:
+legacy = 0.125, refined = 0.375, validated = 0.625, geometric = 0.875.
+
+```lua
+beamrt_shadowRenderer.compareModels("validated", "refined", 0.5)
+beamrt_shadowRenderer.setModelSplitView("modelid")
+```
+
+**Expected:** a noticeably lighter gray on the LEFT than the RIGHT.
+The split divider is still visible. Switching either model immediately changes
+only its assigned half:
+
+```lua
+beamrt_shadowRenderer.setModelSplitLeft("legacy")
+beamrt_shadowRenderer.setModelSplitRight("geometric")
+```
+
+If left and right remain the same shade, or either side is black, investigate
+post-effect scheduling, per-instance shader constants, named-target sampling,
+and callbacks before treating rawdifference as evidence the algorithms agree.
+The comparison PostEffect now registers its own shader-constant callback.
+
+To resume actual tracing, switch back:
+
+```lua
+beamrt_shadowRenderer.setModelSplitView("rawdifference")
+-- or:
+beamrt_shadowRenderer.setModelSplitView("classification")
+```
+
+`modelid` is an intentionally synthetic infrastructure test; the output is
+not a real visibility buffer while that view is selected. The special mode
+only runs when a model-vs-model split is active. It neither alters GI nor
+production renderer settings, and normal tracing resumes as soon as the
+model-ID view is exited.
