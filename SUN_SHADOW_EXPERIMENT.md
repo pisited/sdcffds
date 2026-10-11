@@ -202,3 +202,44 @@ compare old/new algorithms is to switch models while the scene stays fixed.
   merging.
 - `getStatus().hitModel` identifies the current method.
 
+
+## Depth-neighborhood validation (trace v006, experimental)
+
+`setHitModel` now supports a third mode:
+
+```lua
+beamrt_shadowRenderer.setHitModel("legacy")    -- v004 coarse hit rule
+beamrt_shadowRenderer.setHitModel("refined")   -- v005 depth-bisection rule
+beamrt_shadowRenderer.setHitModel("validated") -- v006 depth-coherence check
+```
+
+The **default after extension load is validated**. No GI or final-lighting
+composition is modified. In validated mode, a candidate that already passed
+refined hit-depth checks samples the depth buffer at four adjacent screen
+locations. Two or more neighbors with similar depth certify the obstruction
+as *more supported* (solid red in classification). A candidate with one
+agreeing neighbor remains visible, but low-confidence (red plus blue appears
+purple). An isolated candidate is treated as **uncertain**, not as a confirmed
+occlusion or definitively sunlit. The coverage/confidence channel (G) reflects
+that uncertainty, and the current debug view highlights it with blue.
+
+This does not provide a definitive test for thin geometry: an isolated valid
+fence wire can have no supporting neighbors, so it may become *unknown* instead
+of red. Conversely, multiple agreeing depth samples do not prove correct
+3D occlusion. Use the existing split-screen debugger and toggle modes with a
+stationary camera before judging fidelity. The four extra depth samples happen
+only at candidate intersections in validated mode.
+
+Suggested initial test:
+
+```lua
+beamrt_shadowRenderer.setQuality("cinematic")
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+beamrt_shadowRenderer.setHitModel("refined")   -- screenshot
+beamrt_shadowRenderer.setHitModel("validated") -- same view, screenshot
+dump(beamrt_shadowRenderer.getStatus())
+```
+
+Avoid integrating this shadow target into lighting/GI until its screen-space
+confidence, thin-geometry behavior, and native-mask interpretation have been
+validated in-game. It still cannot trace hidden/off-screen shadow casters.
