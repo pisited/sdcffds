@@ -4,12 +4,20 @@ on:
     paths:
       - "tools/beamrt_scene_import.py"
       - "tools/beamrt_scene_align.py"
+      - "tools/beamrt_bvh_pack.py"
+      - "tools/beamrt_native_sun_hook.py"
+      - "tools/tests/test_native_sun_hook.py"
+      - "tools/tests/test_bvh_pack.py"
       - "tools/tests/test_scene_align.py"
       - ".github/workflows/beamrt-scene-import.yml"
   pull_request:
     paths:
       - "tools/beamrt_scene_import.py"
       - "tools/beamrt_scene_align.py"
+      - "tools/beamrt_bvh_pack.py"
+      - "tools/beamrt_native_sun_hook.py"
+      - "tools/tests/test_native_sun_hook.py"
+      - "tools/tests/test_bvh_pack.py"
       - "tools/tests/test_scene_align.py"
       - ".github/workflows/beamrt-scene-import.yml"
 jobs:
@@ -28,3 +36,7 @@ jobs:
         run: python tools/beamrt_scene_import.py --self-test
       - name: Node selection, transforms, material evidence and BVH regression tests
         run: python -B tools/tests/test_scene_align.py
+      - name: Packed GPU-data layout and stackless traversal checks
+        run: python -B tools/tests/test_bvh_pack.py
+      - name: Reversible native-sun integration contract
+        run: python -B tools/tests/test_native_sun_hook.py

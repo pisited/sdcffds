@@ -5,6 +5,7 @@ outward. Preorder escape links allow stackless traversal. No triangle reduction,
 no guessed opacity, no textureCube assumption, and no GPU verification claim.
 """
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -89,7 +90,8 @@ def main():
     package=json.loads(Path(args.input).read_text(encoding='utf-8'))
     pixels,meta=pack(package)
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
-    name=output.stem+'.data.png'
+    digest=hashlib.sha256(bytes(c for p in pixels for c in p)).hexdigest()[:16]
+    name=output.stem+'_'+digest+'.data.png'
     png(output.parent/name,pixels,meta['width'],meta['height'])
     meta['texture']='/art/beamrt/alignment/'+name
     package['gpuData']=meta

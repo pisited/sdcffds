@@ -10,7 +10,11 @@ local quality='playable'
 local sunSign=-1 -- Consistent with the earlier WORLD-space caster probe only.
 local testLight=false -- Explicit synthetic geometry calibration, not a game light.
 local errorMessage
+local savedWireMode
 local owned={}
+local materialPolicy=require('ge/extensions/beamrt/meshMaterialPolicy')
+local materialAware=true
+local policyFrame=0
 local function find(suffix) return scenetree.findObject(prefix..suffix) end
 local function logError(text) errorMessage=text;if log then log('E','BeamRT.MeshBVH',text) end;return false,text end
 local function register(object,suffix) object:registerObject(prefix..suffix);owned[#owned+1]=prefix..suffix;return object end
@@ -39,6 +43,7 @@ local function apply()
   trace:setShaderConst('$meshSunSign',sunSign)
   trace:setShaderConst('$meshBindingView',binding and 1 or 0)
   trace:setShaderConst('$meshMaxDistance',200)
+  M.applySceneConsts(trace,scene,true)
   trace:setShaderConst('$meshTestLightEnabled',testLight and 1 or 0)
   local center={};for i=1,3 do center[i]=gpu.quantMin[i]+gpu.quantExtent[i]*.5 end
   local light=placement.apply(scene.placement.basis,center)
@@ -57,7 +62,7 @@ local function objects()
   state.blendDefined=true;state.blendEnable=false;state.samplersDefined=true
   for i=0,2 do state:setField('samplerStates',i,'SamplerClampPoint') end
   register(state,'State')
-  for _,s in ipairs({{'TraceShader','shaders/beamrt/beamrtMeshBVHTraceP_v001.hlsl',{'prepassTex','prepassDepthTex','meshDataTex'}},
+  for _,s in ipairs({{'TraceShader','shaders/beamrt/beamrtMeshBVHTraceP_v002.hlsl',{'prepassTex','prepassDepthTex','meshDataTex'}},
                       {'PreviewShader','shaders/beamrt/beamrtMeshBVHPreviewP_v001.hlsl',{'backBufferTex','meshVisibilityTex'}}}) do
     local shader=createObject('ShaderData');shader.DXVertexShaderFile=s[2];shader.DXPixelShaderFile=s[2];shader.pixVersion=5
     for i,name in ipairs(s[3]) do shader:setField('samplerNames',i-1,name) end
@@ -81,7 +86,7 @@ local function objects()
     rawset(_G,prefix..suffix..'Callbacks',{onEnabled=function() return true end,setShaderConsts=apply})
   end
 end
-function M.enable()
+function M.prepareScene()
   if not alignment() then extensions.load('beamrt_meshAlignment') end
   local status=alignment().getStatus()
   if not status.active then
@@ -122,15 +127,33 @@ function M.enable()
     return logError('unsupported or inconsistent packed-data layout')
   end
   if not FS:fileExists(gpu.texture) then return logError('packed texture unavailable: '..gpu.texture) end
+  candidate.policy,err=materialPolicy.capture(gpu.materialNames)
+  if not candidate.policy then return logError(err) end
   scene=candidate;errorMessage=nil
+  if log then
+    log('I','BeamRT.MeshMaterials',string.format('Native declarations: opaque=%d mask=%d blend=%d unknown=%d; texture opacity not sampled',
+      scene.policy.opaque,scene.policy.masked,scene.policy.blended,scene.policy.unknown))
+    for _,record in ipairs(scene.policy.records) do
+      log('I','BeamRT.MeshMaterials',record.name..': '..record.reason)
+    end
+  end
+  return true,scene
+end
+function M.enable()
+  local ready,why=M.prepareScene();if not ready then return false,why end
+  local gpu=scene.gpuData
   local ok,why=pcall(objects);if not ok then M.disable();return logError('GPU object creation failed: '..tostring(why)) end
   find('TraceFx'):setField('texture',2,gpu.texture)
   apply();find('TraceFx'):enable();find('PreviewFx'):enable();active=true
+  if not savedWireMode then savedWireMode=alignment().getStatus().mode end
+  alignment().setMode('off')
   return true,M.getStatus()
 end
 function M.disable()
   active=false
   for _,suffix in ipairs({'TraceFx','PreviewFx'}) do local fx=find(suffix);if fx then fx:disable() end end
+  if savedWireMode and alignment() and alignment().getStatus().mode=='off' then alignment().setMode(savedWireMode) end
+  savedWireMode=nil
   return true
 end
 function M.setView(value)
@@ -152,6 +175,45 @@ function M.setTestLightEnabled(value)
   if type(value)~='boolean' then return false end
   testLight=value;apply();return true
 end
+function M.setMaterialAwareEnabled(value)
+  if type(value)~='boolean' then return false end
+  materialAware=value;apply();return true
+end
+function M.refreshMaterials()
+  if not scene then return false,'no scene prepared' end
+  local policy,err=materialPolicy.capture(scene.gpuData.materialNames)
+  if not policy then return logError(err) end
+  scene.policy=policy;apply();return true
+end
+function M.getSceneBinding()
+  if not scene then return nil,'scene not prepared' end
+  local status=alignment() and alignment().getStatus()
+  if not status or not status.active or status.objectId~=scene.objectId
+    or not placement.same(scene.placement,status.placement) then return nil,'geometry is stale' end
+  policyFrame=policyFrame+1
+  if policyFrame%30==0 then
+    local policy,err=materialPolicy.capture(scene.gpuData.materialNames)
+    if not policy then return nil,err end
+    scene.policy=policy
+  end
+  return scene
+end
+function M.applySceneConsts(effect,data,enabled)
+  local gpu=data.gpuData
+  effect:setShaderConst('$meshOrigin',vecText(data.placement.basis.origin))
+  for i,key in ipairs({'X','Y','Z'}) do effect:setShaderConst('$meshInv'..key,vecText(data.inverse[i])) end
+  effect:setShaderConst('$meshQuantMin',vecText(gpu.quantMin));effect:setShaderConst('$meshQuantExtent',vecText(gpu.quantExtent))
+  effect:setShaderConst('$meshAtlasSize',string.format('%d %d',gpu.width,gpu.height))
+  effect:setShaderConst('$meshNodeCount',gpu.nodeCount);effect:setShaderConst('$meshTriangleCount',gpu.triangleCount)
+  effect:setShaderConst('$meshTriangleOffset',gpu.triangleOffset)
+  effect:setShaderConst('$meshVisibilityEnabled',enabled and 1 or 0)
+  effect:setShaderConst('$meshMaterialPolicyEnabled',1)
+  if effect==find('TraceFx') then effect:setShaderConst('$meshMaterialPolicyEnabled',materialAware and 1 or 0) end
+  for bank=0,3 do
+    local values={};for i=1,4 do values[i]=tostring(data.policy.modes[bank*4+i]) end
+    effect:setShaderConst('$meshMaterialModes'..bank,table.concat(values,' '))
+  end
+end
 function M.getStatus()
   return {enabled=active,quality=quality,error=errorMessage,split=split,
     view=binding and 'binding' or 'classification',objectId=scene and scene.objectId,
@@ -161,11 +223,10 @@ function M.getStatus()
     gpuExecutionVerified=false,opacityTexturesSampled=false,completeScene=false,
     productionLightingChanged=false,geometryOnly=true}
 end
+function M.getMaterialStatus()return scene and scene.policy or {opaque=0,unknown=0,status='scene not prepared'} end
 function M.onPreRender()
   if not active then return end
-  local status=alignment() and alignment().getStatus()
-  if not status or not status.active or status.objectId~=scene.objectId
-    or not placement.same(scene.placement,status.placement) then
+  if not M.getSceneBinding() then
     M.disable();logError('aligned instance is stale/changed; capture and enable again')
   end
 end

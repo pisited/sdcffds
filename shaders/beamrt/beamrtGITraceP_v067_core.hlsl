@@ -1413,6 +1413,14 @@ void beamrtTraceLightingSample(
 
             if (visibilityConfidence > 0.0001)
             {
+#ifdef BEAMRT_SHARED_MESH_GI
+                // Native-declared opaque full mesh may reject this bounce.
+                // Unknown alpha/data/budget/missing scene retains existing GI.
+                if(beamrtMeshBlockedSegment(rayOrigin,surfelPosition))
+                {
+                    sampleRadiance=0.0;sampleConfidence=0.0;return;
+                }
+#endif
 #ifdef BEAMRT_SCENE_VISIBILITY_GI
                 // A verified opaque blocker between receiver and cached
                 // world surfel forbids bounced light from crossing this path.

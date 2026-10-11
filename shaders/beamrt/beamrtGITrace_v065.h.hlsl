@@ -9,7 +9,11 @@ uniform_sampler2D(backBufferTex, 2);
 #ifdef BEAMRT_SIX_INPUT_BINDINGS
 uniform_sampler2D(lightInfoTex, 3);
 uniform_sampler2D(auxiliaryTex, 4);
+#ifdef BEAMRT_SHARED_MESH_GI
+uniform_sampler2D(meshDataTex, 5);
+#else
 uniform_sampler2D(materialSpecTex, 5);
+#endif
 #else
 #ifdef BEAMRT_DIRECT_DIFFUSE_SOURCE
 #ifdef BEAMRT_LIGHTINFO_SLOT3
@@ -223,10 +227,25 @@ cbuffer perDraw : register(b0)
     uniform float4 sceneVisTri11B;
     uniform float4 sceneVisTri11C;
 #endif
+#ifdef BEAMRT_SHARED_MESH_GI
+    #include "beamrtMeshBVHUniforms.h.hlsl"
+#endif
     POSTFX_UNIFORMS
 };
 
 #include "shaders/common/postFx/postFx.hlsl"
+
+#ifdef BEAMRT_SHARED_MESH_GI
+float beamrtSharedRetro(float2 prepassUv)
+{
+    float2 viewport=(prepassUv-rtParams0.xy)/rtParams0.zw;
+    float2 uv=viewportCoordToRenderTarget(viewport,rtParams3);
+    uint width,height;lightInfoTexTex.GetDimensions(width,height);
+    int2 p=clamp((int2)floor(uv*float2(width,height)),int2(0,0),int2(width,height)-1);
+    return lightInfoTexTex.Load(int3(p,0)).a;
+}
+#include "beamrtMeshBVHCommon.h.hlsl"
+#endif
 
 #ifdef BEAMRT_SIX_INPUT_BINDINGS
 // Each panel is copied without color encoding. The first two panels use GI

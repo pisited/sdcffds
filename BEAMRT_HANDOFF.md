@@ -4411,3 +4411,100 @@ explain selectiondistance and futureGPUupload/alpha/shadowpersistence limits.
 Optional focusPreview/restoreCamera added using verified core_camera free APIs;
 only explicit commands move camera, nevervehicle. Missionchange dropsoldcamera
 snapshot. Seventh Lua fixture verifies focus only explicit and mode restore.
+
+## 121. Oct 11: full guardhouse GPU BVH preview prepared
+
+User posted front-view wire screenshot: plausible doors/walls/roof/lamps/base
+alignment, not proof of depth/GPU/shadows. After explanation user saidalright to
+nextstage. Implementedisolated meshBVH module, not productionlighting changes.
+New packer full776faces/255nodes,256x28RGBA8 PNG;16bitmodelcoords error<.03mm,
+outwardBVHbounds,preorderescapelinks stacklesstraversal,no12facetruncation.
+Privatepackages ignored; no installation or GitHub writes. Sourcechanges local.
+
+Trace3inputs normals/depth/data, preview2inputs scene/result. Exactbyteheaders
+includingalpha verify resource decoding;SRGB-view inversehandled;invaliddata
+magenta, traversal4096ceiling unknown, no certifyingwhole-mapvisibility onmiss.
+Worldray inverse capturedbasis rows, localdirNOTnormalized worlddistancekept.
+Allopacityunknown ->orangepossiblemeshblockers, not certifiedopaquecastshadows.
+
+Explicit synthetictestpointlight makesgeometryfootprint inspectable atnight;
+doesnotspawnlightorchangegamebrightness/time. Engine-sun signselectalso retained.
+Qualityhalf/fullreceivergrid,fullgeometryboth,performanceunmeasured. Default
+nativeleft/classificationright;bindingproofgreen/cyanorinvalidmagenta. Newobjects
+registerfieldbeforeonAdd,ownedcleanup,onmission/stale disables. NoGIsampling or
+reflectioncomposer changed. Wirehiddenwhilepreview andrestoredondisable unless
+userchangedmode. Supportsoldloadedalignmentgetterlessmodulewithoutunload/camera
+snapshotloss. NoautomaticGPUverifiedflagfromCPUstate.
+
+9 pack/traversaltests (249 rays vsbruteforce),5Lua controlfixtures,4strictFXCstages,
+Lua51/JIT55 compilepass. CPUchecks notGPUproof. README/MESH_BVH_MILESTONE.md usercmd:
+extensions.load("beamrt_meshBVH"); beamrt_meshBVH.setQuality("cinematic");
+beamrt_meshBVH.setTestLightEnabled(true); beamrt_meshBVH.enable(). Awaitactualimage,
+thenoffscreenpersistence check,thenalpha/material/lightquality integration. No
+commit/pushauthorized yet. Previous Gitworkflow question unanswered explicitly.
+
+## 122. Standing development rules — explicit user request, Oct 11
+
+The objective is a hybrid renderer, not an expanding collection of debug tools.
+Investigate Git history, code, logs and previous results before a new hypothesis.
+Do not ask the user to repeat completed tests. At most TWO meaningful in-game
+tests per hypothesis; each must name its expected result and the implementation
+decision that follows. Once a cause is identified, implement the fix rather than
+adding a reconfirmation diagnostic. If repeated fixes fail, revisit architecture
+instead of stacking filters, tolerances or workarounds.
+
+Prioritize geometry, materials, GPU acceleration, persistent shadows and GI
+visibility. Make related changes as one batch, review compilation, compatibility
+and regressions locally, and preserve working algorithms with fallbacks. Request
+in-game testing only for facts unavailable from code, with one compact command
+set. Every development cycle reports: what was wrong/missing; what changed; what
+functionality is implemented; what remains unverified; next substantial milestone.
+
+Evidence ledger: user's real guardhouse wire screenshot and log object40430 /
+776faces /1196edges establish plausible visible alignment. Do NOT restart that
+alignment-test cycle. Latest available log contains no meshBVH execution result.
+GPU data loading/ray correctness remains one unresolved hardware question; the
+existing compact BVH run is sufficient to address it, not a reason for another
+probe. Materials/opacity and native-preserving production composition are not
+implemented by the classification preview. Next substantial milestone is a
+material-aware persistent shadow path with native fallback, then shared GI
+visibility. Do not claim either production feature is already finished.
+
+## 123. Oct 11: v0.103 full-mesh GI guard and identified-code fixes
+
+User handles Git manually. Explicit continue authorized local implementation.
+Reviewed existing code/history/logs; no new in-game test performed. Last log has
+alignment40430 only, no BVH run. Do not repeat alignment/CPU self-test requests.
+
+Implemented live native material declarations (standard Material, matching mapTo,
+alphaTest/translucent explicitfalse andfullcoloralpha ->opaque). Mask/blend/custom/
+incomplete ->fallback;16identitiesmax,no truncation. Shared stackless BVH header
+used byshadow002 andGI083,full776faces. Uncertainhit doesn'thide lateropaquehit;
+invalid/budget ->no falseocclusion. Shadow remains separate visibility output.
+
+Opt-in sharedMeshGI checksreceiver->WORLDsurfel segment. Screen estimator/noise/
+temporal/presets unchanged. Native lightRGB+retroA packedfull-resR32F onepass,
+frees slot5,retains6inputs, auxSTBN atlas untouched. Active onlyGIrendering+world
+source+positiveworldstrength+opaque+currentgeometry. DefaultsOFF;inactive restores
+082/native3&5,stops/releasespack. Key changes clearGIhistory. Bound/effective kept
+separate toavoid stale sampler layout afterdisable/re-enable. UI showsinactive
+reason. Sourcepack~52.9MiB at2560x1353,performanceunmeasured. No directshadows or
+synthetictestlight influence onGI. Native masks notmultipliedinto finishedscene.
+
+Knownfixes: cachedvisibility getters/status/query resolveactualmodule fallback;
+unconditionalmagenta inreflection026/filter001 removed;new033/002 entries restore
+composer andexistingvarianceweight. VarianceOFForiginalgraph,no3wastedpasses.
+Explicitvariance setterrecreatesgraph;oldforwarddeleteObjectnil bugfixedbylocal
+find+delete. No newdenoiser activated. PackedPNGnowcontent-addressed;private
+package regenerated. User's external commit2e5bfd4 preserved,noassistantpush.
+
+25Lua integration/retainedmotion,7alignment,5BVHcontrols,23packingpass; native
+Lua51/JIT55 compilepass. Newentries strictFXCpass;082GI/062cache/001meshVSPS
+exactbaseline. Graphfixture stubs unrelatedphysicsacquisition due plain tablevecs,
+not productionbug. Live native material flags/GPUdecoding/appearance/FPS pending.
+
+SHARED_MESH_GI_MILESTONE.md +README give required5cycleitems andone normalrender
+activation:save/reloadmain+unloadoldmeshBVH,applytuning,enable,HYBRID+world.35
+explicitly,enableguard+dumpstatus. No debugviews/camera/time/vehiclechange. Scope
+onebuilding/worldGI only;noSSRnoise/nativecubemap/wholemapclaim. NextalphaUVtexture
+queries +moreinstances,thenselective native-preserving light/shadow integration.

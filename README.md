@@ -1,3 +1,38 @@
+# BeamRT v0.103 — shared material-aware mesh visibility for GI
+
+Full imported guardhouse geometry now has an opt-in WORLD-surfel GI visibility
+path using live native opaque declarations, rather than only a debug preview.
+Screen GI and native lighting stay on their existing paths; unsupported opacity
+and unavailable data fall back. No final-scene darkening pretends to replace shadows.
+
+This batch also removes leftover magenta returns, restores existing reflection
+composition/filter code, makes variance OFF remove its three experiment passes,
+and fixes stale visibility-provider lookup. Local regressions and compilation pass;
+live GPU loading, appearance and frame cost are not yet verified.
+
+One normal-render activation and exact scope:
+[SHARED_MESH_GI_MILESTONE.md](SHARED_MESH_GI_MILESTONE.md).
+
+---
+
+# BeamRT v0.102 — one-building GPU BVH preview
+
+Full imported guardhouse geometry now has an isolated GPU BVH traversal path,
+not a 12-triangle truncation or box proxy. Live GPU correctness is still pending.
+In GE Lua, while parked near the current alignment capture:
+
+```lua
+extensions.load("beamrt_meshBVH"); beamrt_meshBVH.setQuality("cinematic"); beamrt_meshBVH.setTestLightEnabled(true); beamrt_meshBVH.enable()
+```
+
+Native scene is left; geometry intersections right. Orange = mesh blocks a ray
+to a fixed **synthetic test light**, green = no hit against this mesh, magenta =
+data failure. This is geometry proof, not finished lighting or alpha-aware shadows.
+No scene light/time change, GI/reflection toggle, or camera move occurs.
+Stop with `beamrt_meshBVH.disable()`. Details: [MESH_BVH_MILESTONE.md](MESH_BVH_MILESTONE.md).
+
+---
+
 # BeamRT v0.102 — real building alignment preview
 
 The next geometry milestone is implemented: a selected real West Coast guardhouse

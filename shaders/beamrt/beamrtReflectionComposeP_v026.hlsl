@@ -13,12 +13,6 @@
 
 float4 mainP(PFXVertToPix IN) : SV_Target0
 {
-        //magenta thung
-     return float4(
-     hdrEncode(float3(10.0, 0.0, 10.0)),
-    1.0
-);
-
 #ifdef BEAMRT_REFLECTION_DIAGNOSTICS
     int diagnosticMode = (int)clamp(reflectionDebugMode, 0.0, 9.0);
     bool diagnosticContribution = diagnosticMode == 6;
