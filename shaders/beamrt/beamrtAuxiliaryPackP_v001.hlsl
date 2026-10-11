@@ -51,7 +51,13 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     if (noisePixel.y >= 0 && noisePixel.y < 1024)
     {
         if (noisePixel.x < 1024)
+        {
+#ifdef BEAMRT_SKIP_STBN_BANK
+            return 0.0;
+#else
             return stbnNoiseTexTex.Load(int3(noisePixel, 0));
+#endif
+        }
         if (noisePixel.x < 1152 && noisePixel.y < 128)
             return blueNoiseTexTex.Load(int3(noisePixel - int2(1024, 0), 0));
         return 0.0;

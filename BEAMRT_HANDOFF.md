@@ -4778,3 +4778,27 @@ has full GE Lua reload preserving tuning and unloading BeamRT before clearing
 helper caches; no reload is necessary for offline-only source/tests/docs.
 Next substantial milestone: verified no-ReShade host adapter plus real lighting
 consumer, not further standalone renderer expansion. DLL loading alone is not it.
+
+## 134. v0.107 handles rejected optional STBN resource; no noise-quality claim
+
+Latest log startup5.47 rejects v094 DDS despite local DDPF_RGB0x40/native-style
+header. This follows v092DX10/v093RGBA/v094RGB-only fixes. Do not repeat header
+gambling/old reflection/source tests. User's current source=beamng, worldGI0,
+ptgimaxreflect andGGX; rejectedAtlas was still unconditionally bound on startup.
+
+MainVERSION0.107 adds M.noiseSourcePolicy (no new top-level local). Actual Lua
+resolver refuses STBN/beamrt/spatiotemporal aliases with reason and no mutation/
+history reset; native aliases keep original mode0. Auxiliary t3 uses knownnative
+PNG insteadof failedDDS; v002wrapper clearsunusedSTBNbank. Native bank/history/
+velocity/surfel layout/six-input ABI unchanged. v001defaultkept forrollback.
+GUI says experimental atlas unavailable insteadof offering false activation.
+DDS/PNG assets untouched. SavedSTBN may warn/refuse butother tuningapplies;
+noJSON tuningwrite. This fixes optionaldependency handling, NOT custom atlas
+decoding, GI correctness or reflection squares/noise. Reflection stillhashGGX.
+
+6newactualLua/mainsetter/sourcecontracts; 95suite tests pass. MainLua51/JIT compile
+andv001/v002 VSPSstrictFXC compilepass. NewCI suitewired. Freshv107liveuptake/noNEW
+DDSrequestunverified; historical errorsremaininlog. NOISE_SOURCE_V0107.md +README
+recordscope andsingle-line fullreload. No newdiagnostic/photos/scenerequest.
+Nextsubstantialmilestone remainsno-ReShadegame resourceconnection; workerstill
+offline, notinstalled/attached. User's intervening commit da46cd6 ispreserved.

@@ -1,31 +1,26 @@
-# Native worker progress / current reload (2026-10-11)
+# BeamRT v0.107 — reliable native-noise baseline
+
+The rejected experimental DDS atlas is no longer a mandatory startup input.
+Custom STBN selection now reports unavailable; native BeamNG noise is preserved.
+No reflection/GI filter, sampling sequence, lighting strength or geometry tracing
+changed. This handles a failed optional resource; it does not fix STBN loading
+or promise less reflection noise. See [NOISE_SOURCE_V0107.md](NOISE_SOURCE_V0107.md).
+
+## Native worker progress / current reload (2026-10-11)
 
 A no-ReShade D3D12 GPU worker is now implemented and validated **offline** using
 the existing real guardhouse BVH. It is not attached to BeamNG and does not alter
 the running renderer. No native DLL, loader or injector has been installed.
 See [native/worker/README.md](native/worker/README.md) for exact results/limitations.
-The runtime remains v0.106; this batch changes native source, tests and docs only.
+That offline-worker batch left runtime v0.106 unchanged; the subsequent optional
+noise-resource handling update above is v0.107.
 
 For future Lua/HLSL updates, this full GE Lua reload preserves unsaved tuning,
 unloads BeamRT extensions before clearing their helper-module cache, and recreates
 the main effects. Experimental native-shadow hooks stay off; it never loads a DLL:
 
 ```lua
-do
-  local savedBeamRT = beamrt_main and beamrt_main.getSettings()
-  local loadedBeamRT = extensions.getLoadedExtensionsNames()
-  if beamrt_main then beamrt_main.disable() end
-  extensions.unload("beamrt_main")
-  for _, name in ipairs(loadedBeamRT) do
-    if name:match("^beamrt_") then extensions.unload(name) end
-  end
-  for key in pairs(package.loaded) do
-    if type(key)=="string" and key:match("^ge/extensions/beamrt/") then package.loaded[key]=nil end
-  end
-  extensions.load("beamrt_main")
-  if savedBeamRT then beamrt_main.applySettings(savedBeamRT); beamrt_main.enable(); beamrt_main.openTuner()
-  else beamrt_main.start() end
-end
+do local saved=beamrt_main and beamrt_main.getSettings(); local loaded=extensions.getLoadedExtensionsNames(); if beamrt_main then beamrt_main.disable() end; extensions.unload("beamrt_main"); for _,name in ipairs(loaded) do if name:match("^beamrt_") then extensions.unload(name) end end; for key in pairs(package.loaded) do if type(key)=="string" and key:match("^ge/extensions/beamrt/") then package.loaded[key]=nil end end; extensions.load("beamrt_main"); if saved then beamrt_main.applySettings(saved); beamrt_main.enable(); beamrt_main.openTuner() else beamrt_main.start() end end
 ```
 
 ---

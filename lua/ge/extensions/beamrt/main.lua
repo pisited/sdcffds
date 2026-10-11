@@ -1,7 +1,8 @@
--- BeamRT v0.103: opt-in shared material-aware mesh visibility for world GI.
+-- BeamRT v0.107: preserve native noise; refuse the engine-rejected optional atlas.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
+M.noiseSourcePolicy = require("ge/extensions/beamrt/noiseSourcePolicy")
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
@@ -12,7 +13,7 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.106"
+local VERSION = "0.107"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -146,7 +147,7 @@ local PROGRESSIVE = {
     receiverEffectName = "BeamRT_ReceiverResponseFx",
     receiverTarget = "#BeamRT_ReceiverResponse",
     auxiliaryShaderName = "BeamRT_AuxiliaryPackShader",
-    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v001.hlsl",
+    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v002.hlsl",
     auxiliaryEffectName = "BeamRT_AuxiliaryPackFx",
     auxiliaryTarget = "#BeamRT_AuxiliaryInputs",
     stateName = "BeamRT_SixInputState",
@@ -2285,10 +2286,10 @@ function PROGRESSIVE.inputPrep.createEffects()
   auxiliary:setField("texture", 0, "#BeamRT_HistoryGI")
   auxiliary:setField("texture", 1, "#BeamRT_HistoryMoments")
   auxiliary:setField("texture", 2, "#VelocityBuffer")
-  -- Match the shipped native RGB32 DDS layout; the loader rejects both DX10
-  -- and alpha-format headers. BGRX storage preserves the decoded R/G samples.
-  auxiliary:setField("texture", 3, "/shaders/beamrt/beamrtSTBN_128x128x64_rgb_atlas_linear_v094.dds")
-  auxiliary:setField("texture", 4, "/shaders/common/postFx/gtao/noiseBlue.png")
+  -- The v094 RGB-only DDS is still rejected. Its inactive bank is cleared by
+  -- v002; normal startup must not load that broken optional dependency.
+  auxiliary:setField("texture", 3, M.noiseSourcePolicy.atlasBinding())
+  auxiliary:setField("texture", 4, M.noiseSourcePolicy.nativeTexture)
   auxiliary:setField("texture", 5, "#BeamRT_SurfelRadianceCurrent")
   auxiliary:setField("target", 0, PROGRESSIVE.inputPrep.auxiliaryTarget)
   auxiliary:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
@@ -5083,26 +5084,15 @@ function M.setBlueNoiseStrength(value)
 end
 
 function M.setBlueNoiseSource(value)
-  if type(value) ~= "string" then
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
+  local selected, reason = M.noiseSourcePolicy.resolve(value)
+  if not selected then
+    beamrtLog("W", reason)
     return false
   end
-  local token = string.lower(value):gsub("[%s_%-]", "")
-  if token == "stbn" or token == "beamrt" or token == "spatiotemporal" then
-    PROGRESSIVE.blueNoiseMode = 1
-    PROGRESSIVE.blueNoiseSource = "stbn"
-  elseif token == "beamng" or token == "gtao" or token == "native" then
-    PROGRESSIVE.blueNoiseMode = 0
-    PROGRESSIVE.blueNoiseSource = "beamng"
-  else
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
-    return false
-  end
+  PROGRESSIVE.blueNoiseMode = selected.mode
+  PROGRESSIVE.blueNoiseSource = selected.name
   resetTemporalHistory("blue-noise source changed", false)
   beamrtLog("I", "blue-noise source set to " .. PROGRESSIVE.blueNoiseSource)
-  if PROGRESSIVE.blueNoiseMode == 1 then
-    beamrtLog("W", "custom scalar atlas is experimental; directional STBN quality is not validated")
-  end
   return true
 end
 
@@ -6669,8 +6659,8 @@ local function drawTuningWindow()
     tuningSliderFloat("Blue-noise sampling", tuningPointers.blueNoiseStrength, 0.0, 1.0, "%.2f", M.setBlueNoiseStrength,
       "Zero restores legacy hash directions. One uses only the selected noise sequence. Intermediate values choose between complete strategies without interpolating ray coordinates.")
     im.TextUnformatted("Noise source: " .. PROGRESSIVE.blueNoiseSource)
-    if im.Button("EXPERIMENTAL ATLAS") then M.setBlueNoiseSource("stbn"); syncTuningPointers() end
-    tuningTooltip("Custom scalar RG atlas, not validated directional STBN. Its 64 slices now receive a fresh phase each cycle. Native noise remains the recommended baseline.")
+    im.TextUnformatted("Experimental atlas unavailable (DDS rejected)")
+    tuningTooltip(M.noiseSourcePolicy.atlasReason .. ". No change to native noise or reflection filtering.")
     im.SameLine()
     if im.Button("NATIVE NOISE") then M.setBlueNoiseSource("beamng"); syncTuningPointers() end
     tuningTooltip("Recommended: BeamNG's 2D blue-noise mask with integer Weyl phases over 4096 frames. Better transformed-direction metrics than the custom atlas; game appearance settings are unchanged.")
