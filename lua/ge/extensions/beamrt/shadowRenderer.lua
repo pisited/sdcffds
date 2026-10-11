@@ -2,6 +2,8 @@
 -- Load separately: extensions.load("beamrt_shadowRenderer")
 -- Produces #BeamRT_SunShadowVisibility without changing BeamRT GI or final lighting.
 local M = {}
+local worldBoxCasters = require("ge/extensions/beamrt/worldBoxCasters")
+local offscreenEnabled = false
 local TRACE_SHADER = "BeamRT_SunShadowTraceShader"
 local PREVIEW_SHADER = "BeamRT_SunShadowPreviewShader"
 local STATE = "BeamRT_SunShadowState"
@@ -20,12 +22,14 @@ local views = {
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
   hybrid = 13, hybridweight = 14, hybridsource = 15, hybridscene = 16,
+  worldbox = 17,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
   incidence = 3, difference = 4, rawdifference = 5, modelid = 6,
   hitdistance = 7, deptherror = 8, selfplane = 9}
 local telemetryViews = {hitdistance = true, deptherror = true, selfplane = true}
+local worldBoxViews = {worldbox = true}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 -- Experimental preview only: native mask semantics are not yet calibrated.
@@ -104,10 +108,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v009.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v010.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v009.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v010.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -179,8 +183,17 @@ local function telemetryRequested()
   return telemetryViews[view] == true
 end
 
+local function worldBoxDiagnosticRequested()
+  if view == "split" and split.enabled and split.kind == "views" then
+    return worldBoxViews[split.left] == true or
+           worldBoxViews[split.right] == true
+  end
+  return worldBoxViews[view] == true
+end
+
 local function currentTraceDiagnostic()
   if modelComparisonActive() and split.modelView == "modelid" then return 1 end
+  if worldBoxDiagnosticRequested() then return 3 end
   return telemetryRequested() and 2 or 0
 end
 
@@ -201,6 +214,19 @@ local function applyTracerConsts(trace, settings, model)
   -- Diagnostic 0 stores visibility, 1 stores a unique model ID, and
   -- 2 stores per-hit telemetry. Other modes retain the original RGBA layout.
   trace:setShaderConst("$shadowTraceDiagnostic", currentTraceDiagnostic())
+  local slots = worldBoxCasters.getSlots()
+  trace:setShaderConst("$shadowWorldBoxEnabled", offscreenEnabled and 1 or 0)
+  trace:setShaderConst("$shadowWorldBoxCount",
+    offscreenEnabled and #slots or 0)
+  for index = 0, 3 do
+    local b = slots[index + 1]
+    local lo = b and b.lo or {0, 0, 0}
+    local hi = b and b.hi or {0, 0, 0}
+    trace:setShaderConst("$shadowWorldBoxMin" .. index,
+      string.format("%.5f %.5f %.5f 0", lo[1], lo[2], lo[3]))
+    trace:setShaderConst("$shadowWorldBoxMax" .. index,
+      string.format("%.5f %.5f %.5f 0", hi[1], hi[2], hi[3]))
+  end
 end
 
 local function apply()
