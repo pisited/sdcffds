@@ -18,11 +18,13 @@ local modes = {
 local views = {
   off = -1, classification = 0, visibility = 1, beamrt = 1, coverage = 2,
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
-  scene = 8, split = 9,
+  scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
-  incidence = 3, difference = 4, rawdifference = 5, modelid = 6}
+  incidence = 3, difference = 4, rawdifference = 5, modelid = 6,
+  hitdistance = 7, deptherror = 8, selfplane = 9}
+local telemetryViews = {hitdistance = true, deptherror = true, selfplane = true}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 local view = "off"
@@ -99,10 +101,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v008.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v009.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v006.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v007.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -163,6 +165,22 @@ local function modelComparisonActive()
     split.kind == "models"
 end
 
+local function telemetryRequested()
+  if modelComparisonActive() then
+    return telemetryViews[split.modelView] == true
+  end
+  if view == "split" and split.enabled and split.kind == "views" then
+    return telemetryViews[split.left] == true or
+           telemetryViews[split.right] == true
+  end
+  return telemetryViews[view] == true
+end
+
+local function currentTraceDiagnostic()
+  if modelComparisonActive() and split.modelView == "modelid" then return 1 end
+  return telemetryRequested() and 2 or 0
+end
+
 local function updateEffectStates()
   setEnabled(TRACE_FX, active)
   setEnabled(COMPARE_FX, modelComparisonActive())
@@ -177,10 +195,9 @@ local function applyTracerConsts(trace, settings, model)
   trace:setShaderConst("$shadowThickness", settings.thickness)
   trace:setShaderConst("$shadowHitModel", hitModels[model])
   trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
-  -- When modelid is active, the tracer writes only a unique model constant.
-  -- This proves independent shader-constant binding and texture routing.
-  trace:setShaderConst("$shadowTraceDiagnostic",
-    modelComparisonActive() and split.modelView == "modelid" and 1 or 0)
+  -- Diagnostic 0 stores visibility, 1 stores a unique model ID, and
+  -- 2 stores per-hit telemetry. Other modes retain the original RGBA layout.
+  trace:setShaderConst("$shadowTraceDiagnostic", currentTraceDiagnostic())
 end
 
 local function apply()
@@ -293,6 +310,9 @@ end
 
 function M.setSplitLeft(requested)
   if not validComparisonMode(requested) then return false end
+  -- One trace can't output both telemetry and visibility simultaneously.
+  if telemetryViews[requested] ~= telemetryViews[split.right] and
+     requested ~= "scene" and split.right ~= "scene" then return false end
   split.left = requested
   apply()
   return true
@@ -300,6 +320,8 @@ end
 
 function M.setSplitRight(requested)
   if not validComparisonMode(requested) then return false end
+  if telemetryViews[requested] ~= telemetryViews[split.left] and
+     requested ~= "scene" and split.left ~= "scene" then return false end
   split.right = requested
   apply()
   return true
@@ -335,6 +357,15 @@ function M.compare(left, right, position)
     return false
   end
   if position ~= nil and not finiteNumber(position) then return false end
+  -- A single output target cannot simultaneously encode a normal visibility
+  -- mask and per-hit metrics; scene can share either encoding.
+  if telemetryViews[left] ~= telemetryViews[right] and
+     left ~= "scene" and right ~= "scene" then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "Use two telemetry modes together or pair one with scene")
+    end
+    return false
+  end
   split.left, split.right = left, right
   split.kind = "views"
   if position ~= nil then split.position = clamp(position, 0, 1) end
@@ -391,6 +422,7 @@ function M.getStatus()
     traceObject = find(TRACE_FX) ~= nil, previewObject = find(PREVIEW_FX) ~= nil,
     compareTraceObject = find(COMPARE_FX) ~= nil,
     compareTraceEnabled = modelComparisonActive(),
+    traceDiagnostic = currentTraceDiagnostic(),
     split = {enabled = split.enabled, position = split.position,
       kind = split.kind, left = split.left, right = split.right,
       modelLeft = split.modelLeft, modelRight = split.modelRight,
