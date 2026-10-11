@@ -158,22 +158,39 @@ local function makeObjects()
   end
 end
 
+local function modelComparisonActive()
+  return active and view == "split" and split.enabled and
+    split.kind == "models"
+end
+
+local function updateEffectStates()
+  setEnabled(TRACE_FX, active)
+  setEnabled(COMPARE_FX, modelComparisonActive())
+  setEnabled(PREVIEW_FX, active and view ~= "off")
+end
+
+local function applyTracerConsts(trace, settings, model)
+  if not trace then return end
+  trace:setShaderConst("$shadowRaySteps", settings.steps)
+  trace:setShaderConst("$shadowRayDistance", settings.distance)
+  trace:setShaderConst("$shadowNormalBias", settings.bias)
+  trace:setShaderConst("$shadowThickness", settings.thickness)
+  trace:setShaderConst("$shadowHitModel", hitModels[model])
+  trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
+end
+
 local function apply()
-  local trace = find(TRACE_FX)
   local preview = find(PREVIEW_FX)
   local settings = modes[quality]
-  if trace then
-    trace:setShaderConst("$shadowRaySteps", settings.steps)
-    trace:setShaderConst("$shadowRayDistance", settings.distance)
-    trace:setShaderConst("$shadowNormalBias", settings.bias)
-    trace:setShaderConst("$shadowThickness", settings.thickness)
-    trace:setShaderConst("$shadowHitModel",
-      hitModel == "legacy" and 0 or
-        (hitModel == "refined" and 1 or (hitModel == "validated" and 2 or 3)))
-    trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
-  end
+  -- The primary target contains the left algorithm during model A/B;
+  -- otherwise it holds the globally selected hit model as before.
+  applyTracerConsts(find(TRACE_FX), settings,
+    modelComparisonActive() and split.modelLeft or hitModel)
+  applyTracerConsts(find(COMPARE_FX), settings, split.modelRight)
   if preview then
     preview:setShaderConst("$shadowViewMode", math.max(views[view], 0))
+    preview:setShaderConst("$modelSplitEnabled", modelComparisonActive() and 1 or 0)
+    preview:setShaderConst("$modelSplitViewMode", modelSplitViews[split.modelView])
     preview:setShaderConst("$splitEnabled", split.enabled and 1 or 0)
     preview:setShaderConst("$splitPosition", split.position)
     preview:setShaderConst("$splitLeftMode", views[split.left])
@@ -194,16 +211,14 @@ rawset(_G, PREVIEW_FX .. "Callbacks", callbacks)
 function M.enable()
   makeObjects()
   active = true
-  setEnabled(TRACE_FX, true)
-  setEnabled(PREVIEW_FX, view ~= "off")
+  updateEffectStates()
   apply()
   return true
 end
 
 function M.disable()
   active = false
-  setEnabled(PREVIEW_FX, false)
-  setEnabled(TRACE_FX, false)
+  updateEffectStates()
   return true
 end
 
@@ -213,9 +228,11 @@ function M.setQuality(requested)
     return false
   end
   quality = requested
-  local trace = find(TRACE_FX)
-  if trace then
-    trace:setField("targetScale", 0, modes[quality].scale)
+  for _, name in ipairs({TRACE_FX, COMPARE_FX}) do
+    local trace = find(name)
+    if trace then
+      trace:setField("targetScale", 0, modes[quality].scale)
+    end
   end
   apply()
   return true
