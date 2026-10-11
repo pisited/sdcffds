@@ -3,6 +3,7 @@
 -- The small fixed budget avoids silently dropping or decimating mesh geometry.
 local M = {}
 local triangles = {}
+local generation = 0
 local LIMIT = 12
 local function finite(x)
   x = tonumber(x)
@@ -25,9 +26,9 @@ local function validate(a,b,c)
   if areaSq(a,b,c) < 0.00000001 then return false, "triangle has near-zero area" end
   return true
 end
-function M.clear() triangles = {}; return true end
+function M.clear() triangles = {}; generation=generation+1; return true end
 function M.getStatus()
-  return {count = #triangles, limit = LIMIT, screenIndependent = true,
+  return {count = #triangles, generation=generation, limit = LIMIT, screenIndependent = true,
           modelType = "world-space triangles", automaticMeshExtraction = false}
 end
 function M.getTriangles()
@@ -48,6 +49,7 @@ function M.set(index,ax,ay,az,bx,by,bz,cx,cy,cz)
   local ok, err = validate(a,b,c)
   if not ok then return false,err end
   triangles[index]={a=a,b=b,c=c,alphaMode="unknown"}
+  generation=generation+1
   return true
 end
 function M.load(list)
@@ -76,6 +78,7 @@ function M.load(list)
       source=type(t.source)=="string" and t.source or nil}
   end
   triangles=candidate -- all-or-nothing; never leave partially loaded geometry
+  generation=generation+1
   return true
 end
 -- Only explicitly declared opaque geometry can be used as a *definite*
@@ -101,6 +104,7 @@ function M.setAlphaMode(index, mode, materialName)
   end
   triangles[i].alphaMode=mode
   if type(materialName)=="string" then triangles[i].materialName=materialName end
+  generation=generation+1
   return true
 end
 
