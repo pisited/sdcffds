@@ -10,8 +10,8 @@ local PREVIEW_FX = "BeamRT_SunShadowPreviewFx"
 local TARGET = "#BeamRT_SunShadowVisibility"
 
 local modes = {
-  playable = {steps = 24, distance = 18.0, bias = 0.055, thickness = 0.24, scale = "0.5 0.5"},
-  cinematic = {steps = 96, distance = 55.0, bias = 0.035, thickness = 0.12, scale = "1 1"},
+  playable = {steps = 24, distance = 18.0, bias = 0.055, thickness = 0.24, refineSteps = 3, scale = "0.5 0.5"},
+  cinematic = {steps = 96, distance = 55.0, bias = 0.035, thickness = 0.12, refineSteps = 5, scale = "1 1"},
 }
 local views = {
   off = -1, classification = 0, visibility = 1, beamrt = 1, coverage = 2,
@@ -19,6 +19,7 @@ local views = {
   scene = 8, split = 9,
 }
 local quality = "playable"
+local hitModel = "refined" -- legacy (v004) or refined (v005), same tracing budget
 local view = "off"
 local active = false
 local split = {
@@ -89,7 +90,7 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v004.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v005.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
     "shaders/beamrt/beamrtSunShadowPreviewP_v003.hlsl",
@@ -138,6 +139,8 @@ local function apply()
     trace:setShaderConst("$shadowRayDistance", settings.distance)
     trace:setShaderConst("$shadowNormalBias", settings.bias)
     trace:setShaderConst("$shadowThickness", settings.thickness)
+    trace:setShaderConst("$shadowHitModel", hitModel == "refined" and 1 or 0)
+    trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
   end
   if preview then
     preview:setShaderConst("$shadowViewMode", math.max(views[view], 0))
@@ -184,6 +187,20 @@ function M.setQuality(requested)
   if trace then
     trace:setField("targetScale", 0, modes[quality].scale)
   end
+  apply()
+  return true
+end
+
+-- Toggle identical tracing inputs and budgets to compare the v004 hit rule
+-- against the refined depth-bracket solver. This does not run two GPU passes.
+function M.setHitModel(requested)
+  if requested ~= "legacy" and requested ~= "refined" then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "Expected hit model 'legacy' or 'refined'")
+    end
+    return false
+  end
+  hitModel = requested
   apply()
   return true
 end
@@ -271,6 +288,7 @@ end
 
 function M.getStatus()
   return {enabled = active, quality = quality, view = view, target = TARGET,
+    hitModel = hitModel, refineSteps = modes[quality].refineSteps,
     steps = modes[quality].steps, distance = modes[quality].distance,
     traceObject = find(TRACE_FX) ~= nil, previewObject = find(PREVIEW_FX) ~= nil,
     split = {enabled = split.enabled, position = split.position,
