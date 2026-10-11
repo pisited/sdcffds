@@ -281,3 +281,63 @@ beamrt_shadowRenderer.setHitModel("geometric") -- screenshot 2
 
 The default after reload remains `validated`; the new model is opt-in.
 Its shader must still compile and be visually checked in BeamNG.
+
+
+## True hit-model A/B split-screen (preview v004)
+
+You can compare **two different tracing algorithms in the same frame**.
+Unlike `compare("scene","classification")`, which presents two
+visualizations of one result, `compareModels` creates a second full-frame
+shadow trace target with its own `shadowHitModel` shader constant.
+
+```lua
+beamrt_shadowRenderer.compareModels("validated", "refined", 0.5)
+-- equivalent:
+beamrt_shadowRenderer.compare("validated", "refined", 0.5)
+```
+
+- Left half shows the **validated** algorithm, right half **refined**.
+- The dividing line is still movable with `setSplitPosition(0.35)`.
+- The scene, camera, resolution, ray budget and sample distance are shared.
+- Both algorithms run against the same prepass in the same frame, so the
+  moving divider compares matching pixels rather than different screenshots.
+- Default model display is `classification`, matching the previous red/
+  green/blue/gray legend. Both sides use the same legend.
+
+```lua
+beamrt_shadowRenderer.setModelSplitLeft("geometric")
+beamrt_shadowRenderer.setModelSplitRight("legacy")
+beamrt_shadowRenderer.setModelSplitView("visibility")    -- grayscale, 1=lit
+beamrt_shadowRenderer.setModelSplitView("coverage")      -- confidence only
+beamrt_shadowRenderer.setModelSplitView("incidence")     -- N dot L
+beamrt_shadowRenderer.setModelSplitView("classification")
+beamrt_shadowRenderer.setModelSplitView("difference")    -- red=left-only hit,
+                                                       -- green=right-only hit
+```
+
+All four hit models (`legacy`, `refined`, `validated`, `geometric`) may
+be used on either side. `difference` is a full-frame comparison map, with
+the vertical divider retained for consistency. Mismatches are confidence
+weighted and do not necessarily establish which result is correct.
+
+To return to inexpensive, single-tracer comparisons:
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+-- or:
+beamrt_shadowRenderer.setSplitEnabled(false)
+```
+
+The second post effect (`BeamRT_SunShadowCompareFx`) is only enabled while a
+model-vs-model split is active. The normal single-view `setHitModel(...)`
+continues to control non-model comparisons and is not overwritten by changing
+the A/B pair. The `getStatus()` result includes `compareTraceEnabled` and
+`split.modelLeft`, `split.modelRight`, `split.modelView`.
+
+**Performance:** true A/B rendering involves two separate full-frame screen-
+space shadow traces; expect substantially more GPU work than single-tracer
+view splits. Cinematic (96-step full-resolution) is particularly expensive.
+Use Playable while moving the camera, then Cinematic for static inspection.
+
+This is experimental GitHub code and still requires a shader compilation and
+render-order test inside BeamNG. No changes to production lighting/GI.
