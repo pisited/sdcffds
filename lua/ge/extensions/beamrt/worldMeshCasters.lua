@@ -33,7 +33,8 @@ end
 function M.getTriangles()
   local copy = {}
   for i,t in ipairs(triangles) do
-    copy[i] = {a={unpack(t.a)},b={unpack(t.b)},c={unpack(t.c)}}
+    copy[i] = {a={unpack(t.a)},b={unpack(t.b)},c={unpack(t.c)},
+      alphaMode=t.alphaMode or "unknown", materialName=t.materialName, source=t.source}
   end
   return copy
 end
@@ -46,7 +47,7 @@ function M.set(index,ax,ay,az,bx,by,bz,cx,cy,cz)
   local a,b,c = vec3(ax,ay,az),vec3(bx,by,bz),vec3(cx,cy,cz)
   local ok, err = validate(a,b,c)
   if not ok then return false,err end
-  triangles[index]={a=a,b=b,c=c}
+  triangles[index]={a=a,b=b,c=c,alphaMode="unknown"}
   return true
 end
 function M.load(list)
@@ -64,11 +65,45 @@ function M.load(list)
                 vec3(t.c[1],t.c[2],t.c[3])
     local ok,err=validate(a,b,c)
     if not ok then return false,"triangle "..i..": "..err end
-    candidate[i]={a=a,b=b,c=c}
+    local mode = t.alphaMode or "unknown"
+    if mode ~= "opaque" and mode ~= "mask" and mode ~= "blend"
+       and mode ~= "unknown" then
+      return false, "triangle "..i..": alphaMode must be opaque/mask/blend/unknown"
+    end
+    candidate[i]={a=a,b=b,c=c,
+      alphaMode=mode,
+      materialName=type(t.materialName)=="string" and t.materialName or nil,
+      source=type(t.source)=="string" and t.source or nil}
   end
   triangles=candidate -- all-or-nothing; never leave partially loaded geometry
   return true
 end
+-- Only explicitly declared opaque geometry can be used as a *definite*
+-- occluder for GI. Alpha-masked / blended / unknown materials need their
+-- UVs and opacity textures, so they must not be treated as solid blockers.
+function M.getOpaqueTriangles()
+  local result={}
+  for _,triangle in ipairs(M.getTriangles()) do
+    if triangle.alphaMode == "opaque" then
+      result[#result+1]=triangle
+    end
+  end
+  return result
+end
+
+function M.setAlphaMode(index, mode, materialName)
+  local i=finite(index)
+  if not i or i%1~=0 or i<1 or i>#triangles then
+    return false,"triangle index unavailable"
+  end
+  if mode~="opaque" and mode~="mask" and mode~="blend" and mode~="unknown" then
+    return false,"mode must be opaque/mask/blend/unknown"
+  end
+  triangles[i].alphaMode=mode
+  if type(materialName)=="string" then triangles[i].materialName=materialName end
+  return true
+end
+
 function M.loadJson(path)
   if type(path)~="string" or path=="" then return false,"supply file path" end
   if type(jsonReadFile) ~= "function" then
