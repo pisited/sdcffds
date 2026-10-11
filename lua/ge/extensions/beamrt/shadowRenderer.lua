@@ -266,7 +266,7 @@ function M.setView(requested)
     if requested ~= "off" then split.restoreView = requested end
   end
   view = requested
-  if active then setEnabled(PREVIEW_FX, view ~= "off") end
+  updateEffectStates()
   apply()
   return true
 end
@@ -319,6 +319,10 @@ function M.setSplitLineColor(r, g, b, a)
 end
 
 function M.compare(left, right, position)
+  -- Also accept hit-model names directly for the intuitive A/B command.
+  if hitModels[left] ~= nil and hitModels[right] ~= nil then
+    return M.compareModels(left, right, position)
+  end
   if not validComparisonMode(left) or not validComparisonMode(right) then
     if type(log) == "function" then
       log("E", "BeamRT.Shadow", "Split sources must be scene, beamrt, native, classification, difference, coverage, incidence, sun, or identity")
@@ -327,9 +331,50 @@ function M.compare(left, right, position)
   end
   if position ~= nil and not finiteNumber(position) then return false end
   split.left, split.right = left, right
+  split.kind = "views"
   if position ~= nil then split.position = clamp(position, 0, 1) end
   M.setView("split")
   if not active then M.enable() end
+  apply()
+  return true
+end
+
+-- Two full-frame shadow traces in the SAME frame: primary = left model,
+-- secondary = right model. Disable the secondary pass in other views.
+function M.compareModels(left, right, position)
+  if hitModels[left] == nil or hitModels[right] == nil then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "Expected legacy/refined/validated/geometric for both sides")
+    end
+    return false
+  end
+  if position ~= nil and not finiteNumber(position) then return false end
+  split.modelLeft, split.modelRight = left, right
+  split.kind = "models"
+  if position ~= nil then split.position = clamp(position, 0, 1) end
+  M.setView("split")
+  if not active then M.enable() end
+  apply()
+  return true
+end
+
+function M.setModelSplitLeft(requested)
+  if hitModels[requested] == nil then return false end
+  split.modelLeft = requested
+  apply()
+  return true
+end
+
+function M.setModelSplitRight(requested)
+  if hitModels[requested] == nil then return false end
+  split.modelRight = requested
+  apply()
+  return true
+end
+
+function M.setModelSplitView(requested)
+  if modelSplitViews[requested] == nil then return false end
+  split.modelView = requested
   apply()
   return true
 end
@@ -339,9 +384,12 @@ function M.getStatus()
     hitModel = hitModel, refineSteps = modes[quality].refineSteps,
     steps = modes[quality].steps, distance = modes[quality].distance,
     traceObject = find(TRACE_FX) ~= nil, previewObject = find(PREVIEW_FX) ~= nil,
+    compareTraceObject = find(COMPARE_FX) ~= nil,
+    compareTraceEnabled = modelComparisonActive(),
     split = {enabled = split.enabled, position = split.position,
-      left = split.left, right = split.right,
-      lineWidth = split.lineWidth}}
+      kind = split.kind, left = split.left, right = split.right,
+      modelLeft = split.modelLeft, modelRight = split.modelRight,
+      modelView = split.modelView, lineWidth = split.lineWidth}}
 end
 
 function M.onExtensionLoaded()
@@ -354,7 +402,8 @@ end
 
 function M.onExtensionUnloaded()
   M.disable()
-  for _, name in ipairs({PREVIEW_FX, TRACE_FX, PREVIEW_SHADER, TRACE_SHADER, STATE}) do
+  for _, name in ipairs({PREVIEW_FX, COMPARE_FX, TRACE_FX,
+      PREVIEW_SHADER, TRACE_SHADER, STATE}) do
     local object = find(name)
     if object then object:delete() end
   end
