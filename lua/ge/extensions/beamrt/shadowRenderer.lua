@@ -579,6 +579,15 @@ function M.loadOffscreenTrianglesJson(path)
   return ok,err
 end
 
+-- Material-provenance safety: only explicitly opaque triangles become
+-- blockers of GI surfel rays. Masked/transparent/unknown faces remain
+-- possible intersections until UV/opacity sampling is implemented.
+function M.setOffscreenTriangleAlphaMode(index, mode, materialName)
+  local ok,err=worldMeshCasters.setAlphaMode(index,mode,materialName)
+  if ok then apply() end
+  return ok,err
+end
+
 function M.setOffscreenMeshEnabled(enabled)
   if type(enabled)~="boolean" then return false,"enabled must be boolean" end
   offscreenMeshEnabled = enabled
