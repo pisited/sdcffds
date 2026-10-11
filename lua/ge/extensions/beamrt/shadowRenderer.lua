@@ -19,6 +19,7 @@ local views = {
   off = -1, classification = 0, visibility = 1, beamrt = 1, coverage = 2,
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
+  hybrid = 13, hybridweight = 14, hybridsource = 15,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
@@ -27,6 +28,8 @@ local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
 local telemetryViews = {hitdistance = true, deptherror = true, selfplane = true}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
+-- Experimental preview only: native mask semantics are not yet calibrated.
+local hybrid = {nativePolarity = "normal", minConfidence = 0.95, detailStrength = 0.35}
 local view = "off"
 local active = false
 local split = {
@@ -104,7 +107,7 @@ local function makeObjects()
     "shaders/beamrt/beamrtSunShadowTraceP_v009.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v007.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v008.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -210,6 +213,10 @@ local function apply()
   applyTracerConsts(find(COMPARE_FX), settings, split.modelRight)
   if preview then
     preview:setShaderConst("$shadowViewMode", math.max(views[view], 0))
+    preview:setShaderConst("$hybridInvertNative",
+      hybrid.nativePolarity == "inverted" and 1 or 0)
+    preview:setShaderConst("$hybridMinConfidence", hybrid.minConfidence)
+    preview:setShaderConst("$hybridDetailStrength", hybrid.detailStrength)
     preview:setShaderConst("$modelSplitEnabled", modelComparisonActive() and 1 or 0)
     preview:setShaderConst("$modelSplitViewMode", modelSplitViews[split.modelView])
     preview:setShaderConst("$splitEnabled", split.enabled and 1 or 0)
@@ -415,6 +422,29 @@ function M.setModelSplitView(requested)
   return true
 end
 
+-- Native shadow encoding is NOT established by the existing source buffer.
+-- Compare the raw "native" view before enabling hybrid as a diagnostic.
+function M.setHybridNativePolarity(requested)
+  if requested ~= "normal" and requested ~= "inverted" then return false end
+  hybrid.nativePolarity = requested
+  apply()
+  return true
+end
+
+function M.setHybridMinConfidence(value)
+  if not finiteNumber(value) then return false end
+  hybrid.minConfidence = clamp(value, 0.0, 0.999)
+  apply()
+  return true
+end
+
+function M.setHybridDetailStrength(value)
+  if not finiteNumber(value) then return false end
+  hybrid.detailStrength = clamp(value, 0.0, 1.0)
+  apply()
+  return true
+end
+
 function M.getStatus()
   return {enabled = active, quality = quality, view = view, target = TARGET,
     hitModel = hitModel, refineSteps = modes[quality].refineSteps,
@@ -423,6 +453,10 @@ function M.getStatus()
     compareTraceObject = find(COMPARE_FX) ~= nil,
     compareTraceEnabled = modelComparisonActive(),
     traceDiagnostic = currentTraceDiagnostic(),
+    hybrid = {nativePolarity = hybrid.nativePolarity,
+      minConfidence = hybrid.minConfidence,
+      detailStrength = hybrid.detailStrength,
+      diagnosticOnly = true},
     split = {enabled = split.enabled, position = split.position,
       kind = split.kind, left = split.left, right = split.right,
       modelLeft = split.modelLeft, modelRight = split.modelRight,
