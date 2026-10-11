@@ -39,6 +39,14 @@ end
 local function assetExt(path)
   return tostring(path):lower():match("%.([a-z0-9]+)$") or "unknown"
 end
+local function safeText(value)
+  local kind=type(value)
+  if kind=="string" or kind=="number" or kind=="boolean" then
+    return tostring(value)
+  end
+  -- Never serialize game-object userdata or a nested property table.
+  return nil
+end
 local function parseInstance(obj,token)
   local class=identity(obj,"getClassName")
   if class~="TSStatic" then return nil end
@@ -56,8 +64,11 @@ local function parseInstance(obj,token)
     scale=scale,scaleRaw=scaleRaw,
     transformRaw=transformRaw,
     worldBoundsRaw=worldBoundsRaw,
-    materialHint=member(obj,"material"),
-    materialsHint=member(obj,"materials"),
+    materialHint=safeText(member(obj,"material")),
+    materialsHint=safeText(member(obj,"materials")),
+    positionField=safeText(member(obj,"position")),
+    -- materialHint is metadata only; TSStatic may have per-submesh
+    -- materials that require Collada instance bind_material resolution.
     -- MATRIX CONVENTION IS NOT VERIFIED. Never use transformRaw to place
     -- triangles until BeamNG matrix row/column and pivot are confirmed.
     transformVerified=false,meshTrianglesAvailable=false,
