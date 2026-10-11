@@ -14,8 +14,13 @@ local function finite(x)
   return x
 end
 local function vec(v)
-  if type(v)~="table" then return nil end
-  local a,b,c=finite(v[1] or v.x),finite(v[2] or v.y),finite(v[3] or v.z)
+  if v == nil then return nil end
+  -- Supports both ordinary test tables and BeamNG Point3F userdata.
+  local ok,a,b,c=pcall(function()
+    return v.x or v[1], v.y or v[2], v.z or v[3]
+  end)
+  if not ok then return nil end
+  a,b,c=finite(a),finite(b),finite(c)
   if a and b and c then return {a,b,c} end
 end
 local function sub(a,b) return {a[1]-b[1],a[2]-b[2],a[3]-b[3]} end
