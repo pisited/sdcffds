@@ -3,6 +3,8 @@
 -- Produces #BeamRT_SunShadowVisibility without changing BeamRT GI or final lighting.
 local M = {}
 local worldBoxCasters = require("ge/extensions/beamrt/worldBoxCasters")
+local worldMeshCasters = require("ge/extensions/beamrt/worldMeshCasters")
+local offscreenMeshEnabled = false
 local offscreenEnabled = false
 -- Probe v011 showed hits with the reversed engine sun vector. Limit this
 -- correction to opt-in world-box geometry until screen-space is revalidated.
@@ -25,14 +27,14 @@ local views = {
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
   hybrid = 13, hybridweight = 14, hybridsource = 15, hybridscene = 16,
-  worldbox = 17, worldboxprobe = 18,
+  worldbox = 17, worldboxprobe = 18, worldmesh = 19,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
   incidence = 3, difference = 4, rawdifference = 5, modelid = 6,
   hitdistance = 7, deptherror = 8, selfplane = 9}
 local telemetryViews = {hitdistance = true, deptherror = true, selfplane = true}
-local worldBoxViews = {worldbox = true, worldboxprobe = true}
+local worldBoxViews = {worldbox = true, worldboxprobe = true, worldmesh = true}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 -- Experimental preview only: native mask semantics are not yet calibrated.
@@ -111,10 +113,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v012.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v013.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v011.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v012.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -202,8 +204,16 @@ local function worldBoxProbeRequested()
   return view == "worldboxprobe"
 end
 
+local function worldMeshDiagnosticRequested()
+  if view == "split" and split.enabled and split.kind == "views" then
+    return split.left == "worldmesh" or split.right == "worldmesh"
+  end
+  return view == "worldmesh"
+end
+
 local function currentTraceDiagnostic()
   if modelComparisonActive() and split.modelView == "modelid" then return 1 end
+  if worldMeshDiagnosticRequested() then return 5 end
   if worldBoxProbeRequested() then return 4 end
   if worldBoxDiagnosticRequested() then return 3 end
   return telemetryRequested() and 2 or 0
@@ -232,6 +242,19 @@ local function applyTracerConsts(trace, settings, model)
     offscreenEnabled and #slots or 0)
   trace:setShaderConst("$shadowWorldBoxSunSign",
     offscreenSunDirection == "reversed" and -1 or 1)
+  local mesh = worldMeshCasters.getTriangles()
+  trace:setShaderConst("$shadowMeshEnabled", offscreenMeshEnabled and 1 or 0)
+  trace:setShaderConst("$shadowMeshTriangleCount",
+    offscreenMeshEnabled and #mesh or 0)
+  for i = 0, 11 do
+    local tri = mesh[i + 1]
+    local zero = {0, 0, 0}
+    for _, part in ipairs({"A", "B", "C"}) do
+      local vertex = tri and tri[part:lower()] or zero
+      trace:setShaderConst("$shadowMeshTri" .. i .. part,
+        string.format("%.5f %.5f %.5f 0", vertex[1], vertex[2], vertex[3]))
+    end
+  end
   for index = 0, 3 do
     local b = slots[index + 1]
     local lo = b and b.lo or {0, 0, 0}
@@ -431,7 +454,7 @@ function M.compare(left, right, position)
   if worldBoxViews[left] and worldBoxViews[right] and
      left ~= right then
     if type(log) == "function" then
-      log("E", "BeamRT.Shadow", "worldbox and worldboxprobe use different encodings; pair either with scene")
+      log("E", "BeamRT.Shadow", "worldbox/worldboxprobe/worldmesh have different encodings; pair with scene")
     end
     return false
   end
@@ -507,6 +530,56 @@ function M.setHybridDetailStrength(value)
   return true
 end
 
+-- Actual triangle geometry, separate from coarse box placeholders.
+-- World-space vertices: static mesh positions, not camera-space coordinates.
+function M.setOffscreenTriangle(index, ax, ay, az, bx, by, bz, cx, cy, cz)
+  local ok,err = worldMeshCasters.set(index,ax,ay,az,bx,by,bz,cx,cy,cz)
+  if ok then offscreenMeshEnabled = true; apply() end
+  return ok,err
+end
+
+function M.loadOffscreenTriangles(triangleList)
+  local ok,err = worldMeshCasters.load(triangleList)
+  if ok then offscreenMeshEnabled = true; apply() end
+  return ok,err
+end
+
+function M.loadOffscreenTrianglesJson(path)
+  local ok,err = worldMeshCasters.loadJson(path)
+  if ok then offscreenMeshEnabled = true; apply() end
+  return ok,err
+end
+
+function M.setOffscreenMeshEnabled(enabled)
+  if type(enabled)~="boolean" then return false,"enabled must be boolean" end
+  offscreenMeshEnabled = enabled
+  apply()
+  return true
+end
+
+function M.clearOffscreenTriangles()
+  offscreenMeshEnabled = false
+  worldMeshCasters.clear()
+  apply()
+  return true
+end
+
+-- Validates the GPU triangle path using EXACTLY the previously selected box.
+-- This is a calibration test, not extraction of the object's visual mesh.
+function M.testTrianglesFromOffscreenBox(index)
+  local i = tonumber(index) or 1
+  if i % 1 ~= 0 then return false,"integer box index required" end
+  local box = worldBoxCasters.getSlots()[i]
+  local ok,err = worldMeshCasters.testFromBox(box)
+  if ok then
+    -- Avoid double-counting the same box through two ray paths.
+    offscreenEnabled = false
+    offscreenMeshEnabled = true
+    apply()
+  end
+  return ok,err
+end
+
 -- World-box sunlight polarity, independent from screen-space trace settings.
 -- Does not change the original forward/reversed worldboxprobe channels.
 function M.setOffscreenSunDirection(direction)
@@ -576,6 +649,8 @@ function M.getStatus()
       detailStrength = hybrid.detailStrength,
       diagnosticOnly = true},
     offscreen = {enabled = offscreenEnabled,
+      meshEnabled = offscreenMeshEnabled,
+      mesh = worldMeshCasters.getStatus(),
       sunDirection = offscreenSunDirection,
       probeActive = currentTraceDiagnostic() == 4,
       proxyCasters = worldBoxCasters.getStatus(),
