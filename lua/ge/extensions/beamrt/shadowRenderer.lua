@@ -6,8 +6,10 @@ local TRACE_SHADER = "BeamRT_SunShadowTraceShader"
 local PREVIEW_SHADER = "BeamRT_SunShadowPreviewShader"
 local STATE = "BeamRT_SunShadowState"
 local TRACE_FX = "BeamRT_SunShadowFx"
+local COMPARE_FX = "BeamRT_SunShadowCompareFx"
 local PREVIEW_FX = "BeamRT_SunShadowPreviewFx"
 local TARGET = "#BeamRT_SunShadowVisibility"
+local COMPARE_TARGET = "#BeamRT_SunShadowVisibilityCompare"
 
 local modes = {
   playable = {steps = 24, distance = 18.0, bias = 0.055, thickness = 0.24, refineSteps = 3, scale = "0.5 0.5"},
@@ -18,6 +20,9 @@ local views = {
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9,
 }
+local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
+local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
+  incidence = 3, difference = 4}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 local view = "off"
@@ -30,6 +35,10 @@ local split = {
   lineWidth = 2.0,
   lineColor = {1.0, 1.0, 1.0, 1.0},
   restoreView = "classification",
+  kind = "views",
+  modelLeft = "validated",
+  modelRight = "refined",
+  modelView = "classification",
 }
 
 local function validComparisonMode(name)
@@ -93,8 +102,8 @@ local function makeObjects()
     "shaders/beamrt/beamrtSunShadowTraceP_v007.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v003.hlsl",
-    {"shadowDataTex", "backBufferTex", "nativeSunTex"})
+    "shaders/beamrt/beamrtSunShadowPreviewP_v004.hlsl",
+    {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
     local fx = createObject("PostEffect")
@@ -114,6 +123,24 @@ local function makeObjects()
     fx:registerObject(TRACE_FX)
   end
 
+  if not find(COMPARE_FX) then
+    local fx = createObject("PostEffect")
+    fx.isEnabled = false
+    fx.allowReflectPass = false
+    fx.renderPriority = 10009
+    fx:setField("renderTime", 0, "PFXAfterDiffuse")
+    fx:setField("shader", 0, TRACE_SHADER)
+    fx:setField("stateBlock", 0, STATE)
+    fx:setField("texture", 0, "#prepass[RT0]")
+    fx:setField("texture", 1, "#prepass[Depth]")
+    fx:setField("target", 0, COMPARE_TARGET)
+    fx:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
+    fx:setField("targetScale", 0, modes[quality].scale)
+    fx:setField("targetClear", 0, "PFXTargetClear_OnCreate")
+    fx:setField("targetClearColor", 0, "1 0 0 0")
+    fx:registerObject(COMPARE_FX)
+  end
+
   if not find(PREVIEW_FX) then
     local fx = createObject("PostEffect")
     fx.isEnabled = false
@@ -125,6 +152,7 @@ local function makeObjects()
     fx:setField("texture", 0, TARGET)
     fx:setField("texture", 1, "$backBuffer")
     fx:setField("texture", 2, "#sunShadowMask[RT0]")
+    fx:setField("texture", 3, COMPARE_TARGET)
     fx:setField("target", 0, "$backBuffer")
     fx:registerObject(PREVIEW_FX)
   end
