@@ -1,0 +1,38 @@
+name: BeamRT offline native GPU worker
+on:
+  push:
+    paths:
+      - 'native/worker/**'
+      - 'tools/beamrt_native_fixture.py'
+      - 'tools/beamrt_bvh_pack.py'
+      - 'tools/beamrt_scene_import.py'
+      - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_native_fixture.py'
+      - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
+      - '.github/workflows/beamrt-native-worker.yml'
+  pull_request:
+    paths:
+      - 'native/worker/**'
+      - 'tools/beamrt_native_fixture.py'
+      - 'tools/beamrt_bvh_pack.py'
+      - 'tools/beamrt_scene_import.py'
+      - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_native_fixture.py'
+      - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
+      - '.github/workflows/beamrt-native-worker.yml'
+permissions:
+  contents: read
+jobs:
+  native-worker:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Existing packed-scene fixture regressions
+        run: python -B tools/tests/test_native_fixture.py
+      - name: Compile DLL and compute shader; run isolated WARP validation
+        shell: pwsh
+        run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp
+      # WARP tests correctness only, not BeamNG integration or GPU performance.

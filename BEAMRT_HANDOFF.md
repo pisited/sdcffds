@@ -4705,3 +4705,76 @@ no t14overwrite). Ifnotexposed,explainnativebridge requiresapproval/scope decisi
 doNOTguessstaticfields,forcebackendoff,blindVFSoverride/nativeinstallwrites,or
 floodwithconsoletests. Existinggeometryregistry/privateMeshscene/BVH reusable.
 DocsREADME updatedclearlySTAGED/CLUSTEREDBLOCKED. No in-game shadowsfixedclaim.
+## 131. Clustered dispatch interface audit completed (2026-10-11)
+
+User's getBackendInfo result: exposed table with only ___type/__index/__newindex.
+Read-only, no activation; do not request again. Presence is not active-backend
+proof, and proxy enumeration is not proof that no additional API exists.
+Installed Lua exposes six clustered quality controls and a developer UI opener,
+not a verified mesh texture/structured-buffer binding. Executable strings confirm
+the native cluster_shade.cs.hlsl path; shader compilation utilities are not a
+general resource-binding API. No engine edits or native bridge installed.
+Compute t14/t15 already own the shadow atlas/views. An unused register does not
+provide a script binding. Additional mesh visibility must follow the native
+shadowStrength lerp, otherwise no-shadow lights bypass it. Native disableShadows
+view semantics, contributions and fallback must remain intact.
+UNDERGROUND_LOCAL_LIGHTS_V0106.md records the completed lookup and specific
+remaining boundary. Supported engine integration is preferred; unsupported
+native integration needs a separate user scope decision. No new visual test.
+
+## 132. Native feasibility investigation authorized and completed (2026-10-11)
+
+User said yes to investigating native integration, explicitly before any
+installation/injection. No binary built/loaded, no game files changed, no DLL
+injection, sandbox/quality changes or process memory writes. Earlier staged CI
+fixes remain user-owned and untouched.
+Installed game 0.39.4.0.20972 / current log D3D12 RTX4070. Read-only PE inspection:
+exe 18 named exports (debug draw/UI/SSL/preferences), no clustered/device-binding
+API; libbeamng.x64.dll only getBeamEngine/destroyBeamEngine/getBeamEngineRevision.
+No usable renderer SDK located. Official ROS2 cpp API inspected at
+f684d48eec39c9f2a49f884a175c1aea7dd82ca6: sensor/shmem/control ABI, not render access.
+Do not treat DLL loading or GPU sensor streams as engine graphics integration.
+
+ReShade upstream 7bf9de8b33bcc76c3177007e65d73c72dd0f34c0 API/events/reference and
+06-shader_replace example expose compute pipeline/layout/resource/dispatch
+capabilities. This is a credible D3D12 add-on route without engine memory offsets,
+not a proven game-compatible hook. Host installation requires separate approval.
+NATIVE_RENDERER_FEASIBILITY.md gives exact evidence, source hash, candidate design,
+root-signature/state/lifetime gates, risks and next offline implementation slice.
+No new in-game command/test requested. Clustered guard unchanged; ambient and GI
+are separate milestones. Next implementation is a complete offline-buildable
+default-off one-mesh add-on slice, not another stand-alone pass-discovery logger.
+
+## 133. No-ReShade native GPU worker implemented; no game attachment (2026-10-11)
+
+User rejected ReShade dependency, then requested continuation and unload/reload
+commands when runtime updates occur. Do NOT continue the earlier ReShade-host
+plan. Keep the engine integration milestone gated on all five conditions.
+
+vswhere located installed MSVC under E:\New folder (3), not the default C: tree.
+native/worker now implements a versioned C ABI DLL with caller-owned D3D12 device,
+owned queue/resources/layout/PSO, lossless packed RGBA8 upload, shared existing
+BVH compute traversal, world transforms and explicit material modes. No new
+importer, DXR, injector, loader, engine-memory scan or ReShade dependency.
+Input validation and fence/resource retention prevent invalid replacements or
+uncompleted work from being treated as success. Synchronous CPU readback is
+offline validation only; no production gameplay/composition bridge exists.
+
+Strict FXC cs_5_0 /Ges /WX and MSVC /W4 /WX compilation passed. Real guardhouse
+776 triangles/255 nodes: three 128-ray batches (controlled opaque/unknown policy,
+translated nonuniform transform) matched independent CPU brute-force categories
+on RTX4070. Invalid layout/header/NaN/ray inputs, corrupt root escape link,
+recovery, destroy and recreate checked. Synthetic WARP also passed. Debug layer
+unavailable locally; device-loss/timeouts/live integration not exercised.
+tools/beamrt_native_fixture.py reuses packer/test reference; its all-opaque policy
+is controlled fixture input, NOT evidence about live guardhouse materials.
+Six fixture regressions + new Windows workflow compile/run WARP, no game assets
+published. Workflow result pending publication. Artifacts remain Git-ignored.
+
+No DLL loaded into BeamNG or installed in Bin64. No camera/depth/game-device
+access or consumption of native output by BeamNG proven. Preserve clustered guard.
+Runtime remains v0.106: no main/rendering algorithm changed this cycle. README
+has full GE Lua reload preserving tuning and unloading BeamRT before clearing
+helper caches; no reload is necessary for offline-only source/tests/docs.
+Next substantial milestone: verified no-ReShade host adapter plus real lighting
+consumer, not further standalone renderer expansion. DLL loading alone is not it.

@@ -46,8 +46,6 @@ jobs:
         run: python -B tools/tests/test_underground_prepare.py
       - name: Syntax check all offline tools and test fixtures
         run: python -m compileall -q tools
-      - name: Critical renderer source ABI and Lua compilation-budget checks
-        run: python -B tools/tests/test_renderer_contracts.py
   lua-contracts:
     runs-on: ubuntu-latest
     steps:
@@ -57,8 +55,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Lua 5.1 runtime for BeamRT module fixtures
+      - name: Install Lua 5.1 and LuaJIT runtimes for BeamRT checks
         run: python -m pip install "lupa>=2.4,<3"
+      - name: Compile main.lua and verify the complete six-input GI binding
+        run: python -B tools/tests/test_renderer_contracts.py
       - name: Real Lua module unit tests
         run: |
           python -B tools/tests/test_light_provider.py

@@ -1,3 +1,35 @@
+# Native worker progress / current reload (2026-10-11)
+
+A no-ReShade D3D12 GPU worker is now implemented and validated **offline** using
+the existing real guardhouse BVH. It is not attached to BeamNG and does not alter
+the running renderer. No native DLL, loader or injector has been installed.
+See [native/worker/README.md](native/worker/README.md) for exact results/limitations.
+The runtime remains v0.106; this batch changes native source, tests and docs only.
+
+For future Lua/HLSL updates, this full GE Lua reload preserves unsaved tuning,
+unloads BeamRT extensions before clearing their helper-module cache, and recreates
+the main effects. Experimental native-shadow hooks stay off; it never loads a DLL:
+
+```lua
+do
+  local savedBeamRT = beamrt_main and beamrt_main.getSettings()
+  local loadedBeamRT = extensions.getLoadedExtensionsNames()
+  if beamrt_main then beamrt_main.disable() end
+  extensions.unload("beamrt_main")
+  for _, name in ipairs(loadedBeamRT) do
+    if name:match("^beamrt_") then extensions.unload(name) end
+  end
+  for key in pairs(package.loaded) do
+    if type(key)=="string" and key:match("^ge/extensions/beamrt/") then package.loaded[key]=nil end
+  end
+  extensions.load("beamrt_main")
+  if savedBeamRT then beamrt_main.applySettings(savedBeamRT); beamrt_main.enable(); beamrt_main.openTuner()
+  else beamrt_main.start() end
+end
+```
+
+---
+
 # BeamRT v0.103 — shared material-aware mesh visibility for GI
 
 Full imported guardhouse geometry now has an opt-in WORLD-surfel GI visibility

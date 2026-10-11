@@ -88,7 +88,7 @@ illumination vanishes: legitimate bounce, emissive/reflections, unsupported
 material coverage and existing GI leakage can remain. Avoid interpreting the
 night image as exact daytime ground truth. No settings are forced downward.
 
-## Current blocking interface lookup
+## Completed interface audit / remaining integration blocker
 
 Installed clusteredQuality.lua configures ClusteredShading, and cluster_shade.cs.hlsl
 has its own compute accumulation/shadow atlas and structured-buffer inputs. Its
@@ -97,19 +97,44 @@ AL_Point/Spot CustomMaterial bindings are therefore not evidence of integration
 with this alternative renderer. Do not guess a setting, disable the optimized
 backend, pad into lossy texture cooking, or modify the native installation.
 
-One bounded read-only metadata lookup is needed because the clustered bindings
-are not described in the installed Lua source. It lists names/types only, does
-not call getters, and cannot enable an effect or change any rendering state:
+The user completed the bounded read-only metadata lookup. It returned only
+`___type`, `__index` and `__newindex`; it did not activate anything. Do not ask
+for this lookup or the previous unchanged-image comparison again. Proxy member
+enumeration does not prove that no additional API exists, and an exposed
+ClusteredShading namespace does not prove which backend the current view uses.
 
-```lua
-extensions.load("beamrt_meshLocalLights"); dump(beamrt_meshLocalLights.getBackendInfo())
-```
+Read-only review of the installed Lua, clustered shader and executable strings
+found the native shade source path and six quality controls, but no verified Lua
+API for binding BeamRT geometry to its dispatch. Engine.Render's installed shader
+precompilation script changes compilation scheduling, not dispatch resources.
+An unused shader register (such as t5) does not mean that the engine binds our
+texture there. Replacing the HLSL alone is therefore not a completed integration.
 
-The implementation decision is whether a supported Lua shader/resource binding
-interface exists. If it does, connect the prepared geometry to that actual
-dispatch. If it does not, report the need for an explicitly authorized native
-bridge rather than asking for more shadow screenshots. This is a new specific
-interface blocker, not another guardhouse/day-night rendering diagnostic.
+The matching compute integration needs all of the following:
+
+- A supported way to attach geometry and instance/material state to the actual
+  native dispatch, without displacing its existing buffers, cookies or atlas.
+- Additional definite-opaque visibility applied **after** the native
+  `lerp(unshadowedNLAtt, shadowedNLAtt, shadowStrength)`. Modifying evalShadow
+  alone has no effect when shadowStrength is zero. Preserve the view's explicit
+  disableShadows behavior and the native diffuse/specular/retro contribution.
+- A default-off binding with reliable restoration and stale-scene invalidation.
+
+No clustered override, guessed property, quality change, compiled native bridge
+or DLL injection was installed. A supported engine API remains the preferred
+route; investigating an unsupported native integration is a separate scope
+decision. Do not count the prepared legacy shaders as working clustered shadows.
+
+The official [PostFX documentation](https://documentation.beamng.com/modding/postfx/)
+also distinguishes generic Lua graphics PostEffects from engine-side specialized
+compute passes. It does not document a clustered resource-binding interface.
+
+The user subsequently authorized native-integration **feasibility investigation**.
+[NATIVE_RENDERER_FEASIBILITY.md](NATIVE_RENDERER_FEASIBILITY.md) records its result:
+a Direct3D 12 ReShade native add-on is a credible prototype route, not a proven
+BeamNG integration. It requires a private matched pipeline/layout and explicit
+resource/state lifetime handling. No add-on, DLL or host was installed; legacy
+activation remains guarded. Do not confuse this with a ReShade screen filter.
 
 ## Legacy-only normal-render activation (not for the current exposed clustered backend)
 
