@@ -5,6 +5,7 @@ M.dependencies = {"ui_imgui"}
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
+local worldMeshCasters = require("ge/extensions/beamrt/worldMeshCasters")
 local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 
 -- The companion helper is a normal required module, so an extension reload
@@ -319,7 +320,7 @@ local SURFEL_CACHE_CALLBACKS_NAME = SURFEL_CACHE_EFFECT_NAME .. "Callbacks"
 local REFLECTION_CALLBACKS_NAME = REFLECTION_EFFECT_NAME .. "Callbacks"
 
 local DEBUG_SHADER_ENTRY = "shaders/beamrt/beamrtDebugP_v011.hlsl"
-local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v081.hlsl"
+local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v082.hlsl"
 local TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtTemporalP_v071.hlsl"
 local COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtLightingComposeP_v079.hlsl"
 local COPY_SHADER_ENTRY = "shaders/beamrt/beamrtCopyP_v005.hlsl"
@@ -605,6 +606,11 @@ local surfelScanPosition = nil
 local surfelTraceDistance = 75.0
 local surfelBaseRadius = 1.75
 local giSourceMode = 0 -- 0 hybrid, 1 screen-space only, 2 world surfels only
+-- Opt-in world-surfel GI visibility through the same verified opaque mesh
+-- dataset as the experimental off-screen shadow geometry. Disabled by default.
+local sceneVisibilityGIEnabled = false
+local sceneVisibilityGIRevision = -1
+local sceneVisibilityGILastEnabled = nil
 local worldGIStrength = 1.15
 local worldLeakSuppression = 0.85
 local radianceCleanup = 1.0
@@ -1368,6 +1374,34 @@ local function uploadSurfelGeometry(effect)
   end
 end
 
+local function uploadGISceneVisibility(effect,force)
+  if not effect then return end
+  local status=worldMeshCasters.getStatus()
+  local generation=status.generation or 0
+  if not force and sceneVisibilityGIRevision==generation
+      and sceneVisibilityGILastEnabled==sceneVisibilityGIEnabled then
+    return
+  end
+  local triangles=sceneVisibilityGIEnabled
+    and worldMeshCasters.getOpaqueTriangles() or {}
+  -- Partial map geometry is never presumed complete. The GI shader may
+  -- reject paths proven blocked, but lack of a hit cannot certify a path.
+  effect:setShaderConst("$sceneVisibilityEnabled",
+    sceneVisibilityGIEnabled and #triangles>0 and 1 or 0)
+  effect:setShaderConst("$sceneVisibilityTriangleCount",#triangles)
+  for i=0,11 do
+    local tri=triangles[i+1]
+    local zero={0,0,0}
+    for _,part in ipairs({"A","B","C"}) do
+      local v=tri and tri[part:lower()] or zero
+      effect:setShaderConst("$sceneVisTri"..i..part,
+        string.format("%.6f %.6f %.6f 0",v[1],v[2],v[3]))
+    end
+  end
+  sceneVisibilityGIRevision=generation
+  sceneVisibilityGILastEnabled=sceneVisibilityGIEnabled
+end
+
 local function applyGIShaderConsts(forceGeometryRebind)
   local traceEffect = findObject(GI_EFFECT_NAME)
   if not traceEffect then
@@ -1414,6 +1448,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   traceEffect:setShaderConst("$giEmissiveSeparation", PROGRESSIVE.emissiveSeparation)
   traceEffect:setShaderConst("$surfelVisibilityTolerance", surfelVisibilityTolerance)
   traceEffect:setShaderConst("$surfelCacheReset", surfelCacheResetFrames > 0 and 1 or 0)
+  uploadGISceneVisibility(traceEffect,forceGeometryRebind)
   if forceGeometryRebind or surfelGeometryDirtyGI then
     traceEffect:setShaderConst("$surfelCount", #surfels)
     traceEffect:setShaderConst("$surfelMaxDistance", surfelTraceDistance)
@@ -6880,6 +6915,37 @@ function M.rebuildSceneDatabase(providerName, options)
     beamrtLog("E", "scene provider rebuild failed: " .. tostring(result))
   end
   return ok, result
+end
+
+-- Conservative opt-in: secondary GI paths to cached world surfels are
+-- rejected ONLY when a manually verified opaque world triangle intersects.
+-- Legacy GI and screen-space paths are not otherwise reweighted.
+function M.setSceneVisibilityGIEnabled(enabled)
+  if type(enabled) ~= "boolean" then
+    return false,"enabled must be boolean"
+  end
+  sceneVisibilityGIEnabled=enabled
+  sceneVisibilityGIRevision=-1
+  applyGIShaderConsts(true)
+  beamrtLog("I", "GI opaque-triangle visibility " ..
+    (enabled and "enabled (experimental)" or "disabled"))
+  return true
+end
+
+function M.getSceneVisibilityGIStatus()
+  local provider=sceneDatabase.getProvider("visibility")
+  local status=provider.getStats()
+  status.enabled=sceneVisibilityGIEnabled
+  status.shader="beamrtGITraceP_v082.hlsl"
+  status.effectiveOpaqueTriangles=sceneVisibilityGIEnabled
+    and #worldMeshCasters.getOpaqueTriangles() or 0
+  status.scope="cached world surfel bounce rays only"
+  return status
+end
+
+function M.querySceneVisibility(fromWorld,toWorld,opts)
+  local provider=sceneDatabase.getProvider("visibility")
+  return provider.traceSegment(fromWorld,toWorld,opts)
 end
 
 function M.getSceneDatabaseStats()
