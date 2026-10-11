@@ -14,12 +14,36 @@ local modes = {
   cinematic = {steps = 96, distance = 55.0, bias = 0.035, thickness = 0.12, scale = "1 1"},
 }
 local views = {
-  off = -1, classification = 0, visibility = 1, coverage = 2,
+  off = -1, classification = 0, visibility = 1, beamrt = 1, coverage = 2,
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
+  scene = 8, split = 9,
 }
 local quality = "playable"
 local view = "off"
 local active = false
+local split = {
+  enabled = false,
+  position = 0.5,
+  left = "classification",
+  right = "difference",
+  lineWidth = 2.0,
+  lineColor = {1.0, 1.0, 1.0, 1.0},
+  restoreView = "classification",
+}
+
+local function validComparisonMode(name)
+  return type(name) == "string" and views[name] ~= nil
+     and name ~= "off" and name ~= "split"
+end
+
+local function finiteNumber(v)
+  return type(v) == "number" and v == v
+     and v ~= math.huge and v ~= -math.huge
+end
+
+local function clamp(v, lo, hi)
+  return math.max(lo, math.min(hi, v))
+end
 
 local function find(name)
   return scenetree and scenetree.findObject and scenetree.findObject(name) or nil
@@ -68,7 +92,7 @@ local function makeObjects()
     "shaders/beamrt/beamrtSunShadowTraceP_v004.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v002.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v003.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex"})
 
   if not find(TRACE_FX) then
@@ -117,6 +141,15 @@ local function apply()
   end
   if preview then
     preview:setShaderConst("$shadowViewMode", math.max(views[view], 0))
+    preview:setShaderConst("$splitEnabled", split.enabled and 1 or 0)
+    preview:setShaderConst("$splitPosition", split.position)
+    preview:setShaderConst("$splitLeftMode", views[split.left])
+    preview:setShaderConst("$splitRightMode", views[split.right])
+    preview:setShaderConst("$splitLineWidth", split.lineWidth)
+    preview:setShaderConst("$splitLineColor",
+      string.format("%.5f %.5f %.5f %.5f",
+        split.lineColor[1], split.lineColor[2],
+        split.lineColor[3], split.lineColor[4]))
   end
 end
 
@@ -160,8 +193,78 @@ function M.setView(requested)
     if type(log) == "function" then log("E", "BeamRT.Shadow", "Unknown view: " .. tostring(requested)) end
     return false
   end
+  if requested == "split" then
+    if view ~= "split" and view ~= "off" then split.restoreView = view end
+    split.enabled = true
+  else
+    split.enabled = false
+    if requested ~= "off" then split.restoreView = requested end
+  end
   view = requested
   if active then setEnabled(PREVIEW_FX, view ~= "off") end
+  apply()
+  return true
+end
+
+function M.setSplitEnabled(enabled)
+  if type(enabled) ~= "boolean" then return false end
+  if enabled then
+    return M.setView("split")
+  end
+  return M.setView(split.restoreView)
+end
+
+function M.setSplitPosition(position)
+  if not finiteNumber(position) then return false end
+  split.position = clamp(position, 0.0, 1.0)
+  apply()
+  return true
+end
+
+function M.setSplitLeft(requested)
+  if not validComparisonMode(requested) then return false end
+  split.left = requested
+  apply()
+  return true
+end
+
+function M.setSplitRight(requested)
+  if not validComparisonMode(requested) then return false end
+  split.right = requested
+  apply()
+  return true
+end
+
+function M.setSplitLineWidth(width)
+  if not finiteNumber(width) then return false end
+  split.lineWidth = clamp(width, 0.0, 32.0)
+  apply()
+  return true
+end
+
+function M.setSplitLineColor(r, g, b, a)
+  if a == nil then a = 1.0 end
+  if not finiteNumber(r) or not finiteNumber(g)
+    or not finiteNumber(b) or not finiteNumber(a) then return false end
+  split.lineColor = {
+    clamp(r, 0, 1), clamp(g, 0, 1),
+    clamp(b, 0, 1), clamp(a, 0, 1)}
+  apply()
+  return true
+end
+
+function M.compare(left, right, position)
+  if not validComparisonMode(left) or not validComparisonMode(right) then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "Split sources must be scene, beamrt, native, classification, difference, coverage, incidence, sun, or identity")
+    end
+    return false
+  end
+  if position ~= nil and not finiteNumber(position) then return false end
+  split.left, split.right = left, right
+  if position ~= nil then split.position = clamp(position, 0, 1) end
+  M.setView("split")
+  if not active then M.enable() end
   apply()
   return true
 end
@@ -169,7 +272,10 @@ end
 function M.getStatus()
   return {enabled = active, quality = quality, view = view, target = TARGET,
     steps = modes[quality].steps, distance = modes[quality].distance,
-    traceObject = find(TRACE_FX) ~= nil, previewObject = find(PREVIEW_FX) ~= nil}
+    traceObject = find(TRACE_FX) ~= nil, previewObject = find(PREVIEW_FX) ~= nil,
+    split = {enabled = split.enabled, position = split.position,
+      left = split.left, right = split.right,
+      lineWidth = split.lineWidth}}
 end
 
 function M.onExtensionLoaded()
