@@ -5,7 +5,6 @@ M.dependencies = {"ui_imgui"}
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
-local worldMeshCasters = require("ge/extensions/beamrt/worldMeshCasters")
 local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 
 -- The companion helper is a normal required module, so an extension reload
@@ -608,9 +607,7 @@ local surfelBaseRadius = 1.75
 local giSourceMode = 0 -- 0 hybrid, 1 screen-space only, 2 world surfels only
 -- Opt-in world-surfel GI visibility through the same verified opaque mesh
 -- dataset as the experimental off-screen shadow geometry. Disabled by default.
-local sceneVisibilityGIEnabled = false
-local sceneVisibilityGIRevision = -1
-local sceneVisibilityGILastEnabled = nil
+M.sceneGIVisibility = {enabled = false, revision = -1, lastEnabled = nil}
 local worldGIStrength = 1.15
 local worldLeakSuppression = 0.85
 local radianceCleanup = 1.0
@@ -1374,20 +1371,21 @@ local function uploadSurfelGeometry(effect)
   end
 end
 
-local function uploadGISceneVisibility(effect,force)
+function M._uploadGISceneVisibility(effect,force)
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
   if not effect then return end
   local status=worldMeshCasters.getStatus()
   local generation=status.generation or 0
-  if not force and sceneVisibilityGIRevision==generation
-      and sceneVisibilityGILastEnabled==sceneVisibilityGIEnabled then
+  if not force and M.sceneGIVisibility.revision==generation
+      and M.sceneGIVisibility.lastEnabled==M.sceneGIVisibility.enabled then
     return
   end
-  local triangles=sceneVisibilityGIEnabled
+  local triangles=M.sceneGIVisibility.enabled
     and worldMeshCasters.getOpaqueTriangles() or {}
   -- Partial map geometry is never presumed complete. The GI shader may
   -- reject paths proven blocked, but lack of a hit cannot certify a path.
   effect:setShaderConst("$sceneVisibilityEnabled",
-    sceneVisibilityGIEnabled and #triangles>0 and 1 or 0)
+    M.sceneGIVisibility.enabled and #triangles>0 and 1 or 0)
   effect:setShaderConst("$sceneVisibilityTriangleCount",#triangles)
   for i=0,11 do
     local tri=triangles[i+1]
@@ -1398,8 +1396,8 @@ local function uploadGISceneVisibility(effect,force)
         string.format("%.6f %.6f %.6f 0",v[1],v[2],v[3]))
     end
   end
-  sceneVisibilityGIRevision=generation
-  sceneVisibilityGILastEnabled=sceneVisibilityGIEnabled
+  M.sceneGIVisibility.revision=generation
+  M.sceneGIVisibility.lastEnabled=M.sceneGIVisibility.enabled
 end
 
 local function applyGIShaderConsts(forceGeometryRebind)
@@ -1448,7 +1446,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   traceEffect:setShaderConst("$giEmissiveSeparation", PROGRESSIVE.emissiveSeparation)
   traceEffect:setShaderConst("$surfelVisibilityTolerance", surfelVisibilityTolerance)
   traceEffect:setShaderConst("$surfelCacheReset", surfelCacheResetFrames > 0 and 1 or 0)
-  uploadGISceneVisibility(traceEffect,forceGeometryRebind)
+  M._uploadGISceneVisibility(traceEffect,forceGeometryRebind)
   if forceGeometryRebind or surfelGeometryDirtyGI then
     traceEffect:setShaderConst("$surfelCount", #surfels)
     traceEffect:setShaderConst("$surfelMaxDistance", surfelTraceDistance)
@@ -6924,8 +6922,8 @@ function M.setSceneVisibilityGIEnabled(enabled)
   if type(enabled) ~= "boolean" then
     return false,"enabled must be boolean"
   end
-  sceneVisibilityGIEnabled=enabled
-  sceneVisibilityGIRevision=-1
+  M.sceneGIVisibility.enabled=enabled
+  M.sceneGIVisibility.revision=-1
   applyGIShaderConsts(true)
   beamrtLog("I", "GI opaque-triangle visibility " ..
     (enabled and "enabled (experimental)" or "disabled"))
@@ -6933,11 +6931,12 @@ function M.setSceneVisibilityGIEnabled(enabled)
 end
 
 function M.getSceneVisibilityGIStatus()
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
   local provider=sceneDatabase.getProvider("visibility")
   local status=provider.getStats()
-  status.enabled=sceneVisibilityGIEnabled
+  status.enabled=M.sceneGIVisibility.enabled
   status.shader="beamrtGITraceP_v082.hlsl"
-  status.effectiveOpaqueTriangles=sceneVisibilityGIEnabled
+  status.effectiveOpaqueTriangles=M.sceneGIVisibility.enabled
     and #worldMeshCasters.getOpaqueTriangles() or 0
   status.scope="cached world surfel bounce rays only"
   return status
