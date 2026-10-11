@@ -22,7 +22,7 @@ local views = {
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
-  incidence = 3, difference = 4}
+  incidence = 3, difference = 4, rawdifference = 5}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 local view = "off"
@@ -102,7 +102,7 @@ local function makeObjects()
     "shaders/beamrt/beamrtSunShadowTraceP_v007.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v004.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v005.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
