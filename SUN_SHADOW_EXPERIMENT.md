@@ -411,3 +411,72 @@ not a real visibility buffer while that view is selected. The special mode
 only runs when a model-vs-model split is active. It neither alters GI nor
 production renderer settings, and normal tracing resumes as soon as the
 model-ID view is exited.
+
+
+## Ray-hit telemetry and self-intersection diagnostics (trace v009, preview v007)
+
+The shadow renderer can now measure **where accepted ray hits occur** instead
+of repeatedly changing the hit-validation heuristics. These are explicitly
+selected diagnostic modes and never replace ordinary lighting/GI outputs.
+The usual tracer R/G/B/A channels are restored immediately upon returning to
+`classification`, `visibility`, or another standard view.
+
+In GE Lua:
+
+```lua
+beamrt_shadowRenderer.setQuality("cinematic")
+beamrt_shadowRenderer.setHitModel("validated")
+beamrt_shadowRenderer.compare("scene", "hitdistance", 0.5)
+beamrt_shadowRenderer.compare("scene", "deptherror", 0.5)
+beamrt_shadowRenderer.compare("scene", "selfplane", 0.5)
+```
+
+Or compare **two distinct tracing algorithms** with the same measurements:
+
+```lua
+beamrt_shadowRenderer.compareModels("validated", "refined", 0.5)
+beamrt_shadowRenderer.setModelSplitView("hitdistance")
+beamrt_shadowRenderer.setModelSplitView("deptherror")
+beamrt_shadowRenderer.setModelSplitView("selfplane")
+beamrt_shadowRenderer.setModelSplitView("classification") -- normal shadows
+```
+
+Interpretation:
+- **hitdistance**: red = short ray travel to accepted caster, green/cyan =
+  farther along the ray, scaled by the chosen quality's maximum ray reach
+  (18 m Playable, 55 m Cinematic). The stored R channel is travel divided
+  by ray reach, not the world-space XYZ coordinates.
+- **deptherror**: green = small residual between projected ray depth and
+  camera depth, red = residual approaching the permitted thickness at the
+  accepted intersection. The stored G channel is `abs(residual)/tolerance`,
+  clamped to 0..1, *not* a world-space distance by itself.
+- **selfplane**: red = candidate caster is nearly coplanar with receiver
+  and their normals agree, green = measurable separation or distinct normals.
+  The stored B channel is the plane offset divided by 0.25 metres when the
+  normals align (otherwise 1). Red areas suggest possible self-shadowing,
+  not proof that the caster and receiver are the same mesh.
+- Black = no accepted hit; dim purple tint = low-confidence candidate hit.
+  Diagnostics do not show *rejected* intersections and cannot determine
+  whether geometry beyond the camera view is occluded.
+
+When telemetry is active, R/G/B/A of the private shadow target are
+temporarily reinterpreted as **hit travel**, **depth residual**,
+**receiver-plane separation**, and **hit status**, respectively. For this
+reason, comparing a standard classification and a telemetry mode in the same
+single-trace split is disallowed (except pairing telemetry with `scene`).
+Two telemetry views may share one split, and model-vs-model splits use both
+traces with the *same* requested telemetry layout. The existing
+`modelid` test remains available.
+
+All telemetry adds G-buffer reads **only for accepted/candidate hits while
+enabled**, so normal rendering keeps its existing measurement-free tracing.
+For diagnostic fidelity, use Cinematic while stationary, but avoid treating
+these debug views as a trustworthy, fully ray-traced shadow map.
+`getStatus().traceDiagnostic` is 0 (visibility), 1 (model ID), or
+2 (hit telemetry). To return to regular visualization:
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+-- or in model A/B:
+beamrt_shadowRenderer.setModelSplitView("classification")
+```
