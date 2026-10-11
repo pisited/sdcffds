@@ -65,10 +65,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v002.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v003.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v001.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v002.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex"})
 
   if not find(TRACE_FX) then
