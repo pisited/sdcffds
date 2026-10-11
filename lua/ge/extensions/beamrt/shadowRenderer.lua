@@ -22,7 +22,7 @@ local views = {
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
-  incidence = 3, difference = 4, rawdifference = 5}
+  incidence = 3, difference = 4, rawdifference = 5, modelid = 6}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 local view = "off"
@@ -99,10 +99,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v007.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v008.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v005.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v006.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -177,6 +177,10 @@ local function applyTracerConsts(trace, settings, model)
   trace:setShaderConst("$shadowThickness", settings.thickness)
   trace:setShaderConst("$shadowHitModel", hitModels[model])
   trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
+  -- When modelid is active, the tracer writes only a unique model constant.
+  -- This proves independent shader-constant binding and texture routing.
+  trace:setShaderConst("$shadowTraceDiagnostic",
+    modelComparisonActive() and split.modelView == "modelid" and 1 or 0)
 end
 
 local function apply()
@@ -206,6 +210,7 @@ end
 local callbacks = {}
 callbacks.setShaderConsts = apply
 rawset(_G, TRACE_FX .. "Callbacks", callbacks)
+rawset(_G, COMPARE_FX .. "Callbacks", callbacks)
 rawset(_G, PREVIEW_FX .. "Callbacks", callbacks)
 
 function M.enable()
@@ -408,6 +413,7 @@ function M.onExtensionUnloaded()
     if object then object:delete() end
   end
   rawset(_G, TRACE_FX .. "Callbacks", nil)
+  rawset(_G, COMPARE_FX .. "Callbacks", nil)
   rawset(_G, PREVIEW_FX .. "Callbacks", nil)
 end
 
