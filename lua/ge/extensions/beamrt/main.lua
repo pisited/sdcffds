@@ -1,8 +1,9 @@
--- BeamRT v0.107: preserve native noise; refuse the engine-rejected optional atlas.
+-- BeamRT v0.108: explicit unavailable local-light UI; existing rendering retained.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
 M.noiseSourcePolicy = require("ge/extensions/beamrt/noiseSourcePolicy")
+M.localLightAvailability = require("ge/extensions/beamrt/localLightAvailability")
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
@@ -13,7 +14,7 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.107"
+local VERSION = "0.108"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -6625,12 +6626,18 @@ local function drawTuningWindow()
     if im.Button("Restore hybrid sun shadows") then M.setMeshSunShadowComparison('hybrid') end
     tuningTooltip("Same-frame direct-sun comparison: LEFT native shadows, RIGHT BeamRT-only mesh shadows. Not two independent GI/reflection renders. Ambient, local-light shadows and cloud lighting remain unchanged. Disable restores native shading.")
     if M.getMeshSunShadowStatus().error then im.TextUnformatted("Mesh sun: "..M.getMeshSunShadowStatus().error) end
-    if im.Button(M.getMeshLocalLightStatus().enabled and "Underground local-light visibility ON" or "Underground local-light visibility OFF") then
-      local ok,why=M.setMeshLocalLightsEnabled(not M.getMeshLocalLightStatus().enabled)
-      if not ok then beamrtLog('E',tostring(why)) end
+    local localLights=M.getMeshLocalLightStatus()
+    if localLights.enabled or localLights.canEnable then
+      if im.Button(localLights.enabled and "Underground local-light visibility ON" or "Underground local-light visibility OFF") then
+        local ok,why=M.setMeshLocalLightsEnabled(not localLights.enabled)
+        if not ok then beamrtLog('E',tostring(why)) end
+      end
+      tuningTooltip("Opt-in one imported sewer/underground section on the supported legacy point/spot path. Does not suppress ambient lighting or support alpha textures. Native worker output is not connected to BeamNG yet.")
+      if localLights.error then im.TextUnformatted('Mesh local: '..localLights.error) end
+    else
+      im.TextUnformatted("Underground local-light visibility: unavailable")
+      im.TextUnformatted(localLights.unavailableReason)
     end
-    tuningTooltip("Opt-in one imported sewer/underground section. World-space triangle visibility inside native point/spot lighting, including its NO_SHADOW path. Preserves light brightness/color and native fallback. Does not suppress sky/ambient lighting or support alpha textures yet.")
-    if M.getMeshLocalLightStatus().error then im.TextUnformatted('Mesh local: '..M.getMeshLocalLightStatus().error) end
     im.PopItemWidth()
   end
 
@@ -7128,15 +7135,22 @@ end
 function M.setMeshLocalLightsEnabled(value)
   if type(value)~='boolean'then return false,'enabled must be boolean'end
   if not extensions then return not value,'extensions unavailable'end
-  if value and not extensions.beamrt_meshLocalLights then extensions.load('beamrt_meshLocalLights')end
-  local lights=extensions.beamrt_meshLocalLights
+  local status=M.getMeshLocalLightStatus()
+  if value and not status.enabled and not status.canEnable then return false,status.unavailableReason end
+  if value and not rawget(extensions,'beamrt_meshLocalLights') then extensions.load('beamrt_meshLocalLights')end
+  local lights=rawget(extensions,'beamrt_meshLocalLights')
   if not lights then return not value,'local mesh-light integration unavailable'end
   if value then return lights.enable()end
   return lights.disable()
 end
 function M.getMeshLocalLightStatus()
-  local lights=extensions and extensions.beamrt_meshLocalLights
-  return lights and lights.getStatus()or{enabled=false}
+  -- Reading tuner availability must not trigger extensions.__index auto-load.
+  local lights=extensions and rawget(extensions,'beamrt_meshLocalLights')
+  local status=lights and lights.getStatus()or{enabled=false}
+  local availability=M.localLightAvailability.resolve(status,ClusteredShading~=nil)
+  status.canEnable=availability.canEnable; status.canDisable=availability.canDisable
+  status.unavailableReason=availability.reason
+  return status
 end
 
 function M.captureVehicleGeometry(vehicleId)

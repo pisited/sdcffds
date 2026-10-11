@@ -29,7 +29,7 @@ $beamrtShader = Join-Path $beamrtOutput 'trace.cso'
 if ($LASTEXITCODE) { throw 'Native compute shader compilation failed' }
 Push-Location $beamrtOutput
 try {
-    & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD /LD (Join-Path $PSScriptRoot 'beamrt_worker.cpp') /Febeamrt_native_worker.dll /link d3d12.lib
+    & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD /LD (Join-Path $PSScriptRoot 'beamrt_worker.cpp') /Febeamrt_native_worker.dll /link d3d12.lib dxgi.lib
     if ($LASTEXITCODE) { throw 'Native DLL compilation failed' }
     & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD (Join-Path $PSScriptRoot 'self_test.cpp') /Febeamrt_worker_test.exe /link beamrt_native_worker.lib d3d12.lib dxgi.lib
     if ($LASTEXITCODE) { throw 'Native self-test compilation failed' }

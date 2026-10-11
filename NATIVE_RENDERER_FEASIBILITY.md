@@ -5,6 +5,12 @@ ReShade add-on assessment below is retained as evidence, not the selected plan.
 A direct BeamNG rendering plug-in is not supported by any verified interface
 we have found. Resource access remains the unproven part of the native milestone.
 
+Update v0.108: exact-adapter D3D12 candidate acquisition and resource-owner device
+checks are implemented/tested offline, using documented SDK calls rather than
+engine exports. [NATIVE_DEVICE_BOOTSTRAP_V0108.md](NATIVE_DEVICE_BOOTSTRAP_V0108.md)
+records the route and its limits. Real frame resource access is still missing;
+device acquisition alone does not pass the in-game integration gate.
+
 The user subsequently asked to continue. A small no-ReShade native BVH GPU worker
 has now been built and loaded **only in its separate offline self-test process**.
 The real guardhouse GPU queries passed on the RTX 4070; synthetic WARP tests also

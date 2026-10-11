@@ -4802,3 +4802,32 @@ DDSrequestunverified; historical errorsremaininlog. NOISE_SOURCE_V0107.md +READM
 recordscope andsingle-line fullreload. No newdiagnostic/photos/scenerequest.
 Nextsubstantialmilestone remainsno-ReShadegame resourceconnection; workerstill
 offline, notinstalled/attached. User's intervening commit da46cd6 ispreserved.
+
+## 135. v0.108 exact-adapter bootstrap + unavailable UI, no game attachment
+
+User asked to continue native connection work; source93a835a updated by user.
+Microsoft D3D12CreateDevice docs: normally same-process singleton per adapter.
+This is a concrete SDK device-bootstrap route, not a BeamNG renderer export.
+WorkerABI2 adds exactLUID+explicitcandidateCreationAllowed (mayCREATE ifnone),
+device metadata/acquisition provenance andcanonicalGetDevice/IUnknown ownercheck.
+No rawgamepointerguesses, private memoryscan, injector/proxy/ReShade or install.
+Original worker ABI functions/scene layouts preserved; no logging-only helper.
+
+RTX4070 offlinehost: candidate reusesexistinghostdevice andmatcheshostresource;
+foreignWARP resource rejected. Explicit opt-in/unknownLUID/nullargs/provenance
+checks +realguardhouseGPU batches pass. WARP test also passes. StrictMSVC/FXC
+build passes; debuglayerunavailable. No BeamNG device/depth/view/queue captured.
+
+Mainv108 UI availability policy removes blocked local-light activation button,
+preflights beforeload, usesrawget toavoidextensionautoload fromstatusread. Existing
+legacyhooks remain disableable. Exposure notactivebackendproof. SevennewrealLua/
+main/drawtests;102 regressions pass;Lua51/JITmaincompiles. ExistingNOISEv107 fix
+retained. Native legacy enable safeguard stillunchanged. No newshadernoise/math.
+NATIVE_DEVICE_BOOTSTRAP_V0108.md +README/worker/feasibilitydocs exactscope.
+
+The actual missing boundary now: acquire validgame-owned frame resources and
+view/camera, synchronizeproducer/consumer, affectintendedlighting andrestore.
+Do NOT ask a LUID-only game test withouta realresourceownercheck; itcannotprove
+attachment. No new oldsun/guardhouse/reflection diagnostic requested. Singleline
+reload updatesv108tuner only, neverloadsDLL. Futureloading/integrationrequires
+separatereview. Preservecurrentrenderer,avoidstandaloneexpansionbeforeconnection.

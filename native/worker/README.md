@@ -2,7 +2,7 @@
 
 **Not a BeamNG bridge, loader, injector or ReShade add-on.** This is the small
 native worker portion of the proposed integration. It uses a caller-supplied
-ID3D12Device and its own command queue/resources. It has no engine discovery,
+ID3D12Device (supplied or exact-adapter candidate) and its own command queue/resources. It has no engine discovery,
 device interception, sandbox changes or automatic DLL loading.
 
 It reuses `beamrt_bvh_pack.py` and the existing
@@ -27,7 +27,7 @@ The default fixture uses the existing private guardhouse package. CI uses
 WARP is explicit and is not hardware performance evidence. RunTest starts only
 the separate self-test executable, never BeamNG. No files go into game Bin64.
 
-The DLL ABI rejects a missing host device; successful standalone creation is
+The original supplied-device entry rejects a missing device; successful candidate creation is
 not a game attachment. The self-test owns a separate device, loads the worker
 in that test process, and checks GPU results against CPU brute-force queries on
 the exact packed triangles. Controlled opaque/unknown policies are test inputs,
@@ -35,6 +35,9 @@ not a claim about the guardhouse's live alpha materials.
 
 ## Implemented
 
+- ABI v2 exact-adapter candidate acquisition and canonical resource-owner device
+  checks; see [NATIVE_DEVICE_BOOTSTRAP_V0108.md](../../NATIVE_DEVICE_BOOTSTRAP_V0108.md).
+  An adapter candidate may create a device and is not a game attachment.
 - Versioned C ABI, caller-device retention, owned compute queue/root layout/PSO.
 - Existing packed texture upload, explicit world instance/material constants,
   batched GPU ray traversal and deterministic category/visit results.
@@ -67,3 +70,7 @@ Next step is a separately approved, verified host adapter that supplies the
 actual game device/resources, synchronization and a real lighting consumer.
 Do not install this worker with ffi.load and call it integrated: loading a DLL
 does not provide those missing capabilities. No ReShade dependency is introduced.
+
+The v0.108 offline run additionally proves that adapter acquisition reuses the
+existing test host's device and that a different device's resource is rejected.
+This does not supply or validate any BeamNG texture, queue, view or camera.

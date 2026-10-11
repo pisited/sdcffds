@@ -26,6 +26,16 @@ static std::vector<uint8_t> file(const wchar_t* path) {
     require(size>0 && size<=16*1024*1024,"shader bytecode size invalid");
     std::vector<uint8_t> data(static_cast<size_t>(size)); stream.seekg(0); read(stream,data.data(),data.size()); return data;
 }
+static ComPtr<ID3D12Resource> ownerResource(ID3D12Device* device) {
+    D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{}; desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width=256; desc.Height=1; desc.DepthOrArraySize=1; desc.MipLevels=1;
+    desc.SampleDesc.Count=1; desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> resource;
+    require(SUCCEEDED(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+        D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&resource))),"host ownership resource creation failed");
+    return resource;
+}
 int wmain(int argc, wchar_t** argv) {
     BeamRTWorker* worker=nullptr;
     try {
@@ -61,9 +71,28 @@ int wmain(int argc, wchar_t** argv) {
         std::vector<int32_t> expected(rays.size()); read(stream,expected.data(),expected.size()*sizeof(int32_t));
         require(stream.peek()==std::char_traits<char>::eof(),"unexpected fixture bytes");
         auto shader=file(argv[2]); std::vector<BeamRTHit> actual(rays.size());
-        require(BeamRT_WorkerAbiVersion()==1,"worker ABI mismatch");
+        require(BeamRT_WorkerAbiVersion()==2,"worker ABI mismatch");
         require(BeamRT_WorkerCreate(nullptr,shader.data(),shader.size(),&worker)!=0 && !worker,"missing device must not fabricate an engine attachment");
-        success(BeamRT_WorkerCreate(device.Get(),shader.data(),shader.size(),&worker));
+        const LUID hostLuid=device->GetAdapterLuid();
+        require(BeamRT_WorkerCreateOnAdapter(hostLuid.LowPart,hostLuid.HighPart,0,shader.data(),shader.size(),&worker)!=0 && !worker,"candidate created without explicit permission");
+        require(BeamRT_WorkerCreateOnAdapter(UINT32_MAX,INT32_MAX,1,shader.data(),shader.size(),&worker)!=0 && !worker,"unknown adapter fell back silently");
+        success(BeamRT_WorkerCreateOnAdapter(hostLuid.LowPart,hostLuid.HighPart,1,shader.data(),shader.size(),&worker));
+        BeamRTDeviceInfo info{}; success(BeamRT_WorkerGetDeviceInfo(worker,&info));
+        require(info.luidLow==hostLuid.LowPart && info.luidHigh==hostLuid.HighPart && info.acquisition==2 && info.reserved==0,"candidate identity/provenance mismatch");
+        auto hostResource=ownerResource(device.Get()); uint32_t matches=0;
+        success(BeamRT_WorkerDeviceMatchesResource(worker,hostResource.Get(),&matches));
+        require(matches==1,"candidate did not reuse the existing offline host device");
+        require(BeamRT_WorkerDeviceMatchesResource(worker,nullptr,&matches)!=0 && matches==0,"null native resource accepted");
+        require(BeamRT_WorkerDeviceMatchesResource(worker,hostResource.Get(),nullptr)!=0,"null ownership output accepted");
+        if (!warp) {
+            ComPtr<IDXGIAdapter> foreignAdapter; require(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&foreignAdapter))),"foreign WARP adapter unavailable");
+            ComPtr<ID3D12Device> foreignDevice;
+            require(SUCCEEDED(D3D12CreateDevice(foreignAdapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&foreignDevice))),"foreign device unavailable");
+            auto foreignResource=ownerResource(foreignDevice.Get());
+            success(BeamRT_WorkerDeviceMatchesResource(worker,foreignResource.Get(),&matches));
+            require(matches==0,"foreign-device resource accepted as ours");
+        }
+        std::cout << "Adapter candidate reuses offline host device; resource owner identity verified\n";
         require(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data())!=0,"unprepared scene accepted");
         for (int pass=0;pass<3;++pass) {
             BeamRTScene params=scene; auto query=rays;
@@ -121,6 +150,7 @@ int wmain(int argc, wchar_t** argv) {
         for (size_t i=0;i<actual.size();++i) require(actual[i].category==expected[i],"worker did not recover");
         success(BeamRT_WorkerDestroy(&worker)); require(!worker,"worker not cleared"); success(BeamRT_WorkerDestroy(&worker));
         success(BeamRT_WorkerCreate(device.Get(),shader.data(),shader.size(),&worker));
+        success(BeamRT_WorkerGetDeviceInfo(worker,&info)); require(info.acquisition==1,"legacy caller-device provenance changed");
         success(BeamRT_WorkerUpload(worker,&scene,pixels.data(),pixels.size()));
         success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
         for (size_t i=0;i<actual.size();++i) require(actual[i].category==expected[i],"recreated worker mismatch");

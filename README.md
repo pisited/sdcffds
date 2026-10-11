@@ -1,4 +1,13 @@
-# BeamRT v0.107 — reliable native-noise baseline
+# BeamRT v0.108 — native device bootstrap and honest feature availability
+
+The offline no-ReShade worker now supports exact-adapter device acquisition and
+resource-owner identity checks. These passed on the RTX 4070 and WARP; they do
+not establish a game attachment or expose game depth/lighting resources.
+The tuner now labels blocked underground local-light visibility unavailable,
+with no failing activation button. Existing rendering/fallback stays intact.
+See [NATIVE_DEVICE_BOOTSTRAP_V0108.md](NATIVE_DEVICE_BOOTSTRAP_V0108.md).
+
+## v0.107 — reliable native-noise baseline (retained)
 
 The rejected experimental DDS atlas is no longer a mandatory startup input.
 Custom STBN selection now reports unavailable; native BeamNG noise is preserved.
@@ -13,7 +22,7 @@ the existing real guardhouse BVH. It is not attached to BeamNG and does not alte
 the running renderer. No native DLL, loader or injector has been installed.
 See [native/worker/README.md](native/worker/README.md) for exact results/limitations.
 That offline-worker batch left runtime v0.106 unchanged; the subsequent optional
-noise-resource handling update above is v0.107.
+noise-resource handling update is retained in current runtime v0.108.
 
 For future Lua/HLSL updates, this full GE Lua reload preserves unsaved tuning,
 unloads BeamRT extensions before clearing their helper-module cache, and recreates

@@ -8,7 +8,7 @@
 #endif
 
 // Offline native GPU worker ABI, NOT a BeamNG loader or renderer attachment.
-// The caller must supply a valid ID3D12Device pointer; no process discovery.
+// Explicit supplied-device or exact-adapter candidate acquisition; no process discovery.
 struct BeamRTWorker;
 struct BeamRTScene {
     float origin[4], inverseX[4], inverseY[4], inverseZ[4];
@@ -22,6 +22,12 @@ struct BeamRTRay {
     float direction[3], startBias; // unit world direction; distances in world metres
 };
 struct BeamRTHit { int32_t category; uint32_t visits; };
+struct BeamRTDeviceInfo {
+    uint32_t luidLow;
+    int32_t luidHigh;
+    uint32_t acquisition; // 1 supplied device, 2 adapter candidate; NOT game attachment
+    uint32_t reserved;
+};
 // category: 2 definite opaque, 1 uncertain hit, 0 miss, -1 invalid, -2 incomplete.
 
 extern "C" {
@@ -29,6 +35,18 @@ BEAMRT_API uint32_t BeamRT_WorkerAbiVersion();
 BEAMRT_API const char* BeamRT_WorkerLastError(); // thread-local; copy before next call
 BEAMRT_API int BeamRT_WorkerCreate(void* device, const void* computeShader,
                                   uint64_t shaderBytes, BeamRTWorker** output);
+// D3D12CreateDevice normally reuses a same-process device for this exact adapter.
+// It MAY create a new one if none exists. Explicit candidateCreationAllowed=1
+// is required; this never claims the game device was found or changes other devices.
+BEAMRT_API int BeamRT_WorkerCreateOnAdapter(uint32_t luidLow, int32_t luidHigh,
+    uint32_t candidateCreationAllowed, const void* computeShader,
+    uint64_t shaderBytes, BeamRTWorker** output);
+BEAMRT_API int BeamRT_WorkerGetDeviceInfo(BeamRTWorker*, BeamRTDeviceInfo*);
+// Borrow only an actual valid same-process ID3D12Resource pointer supplied by a
+// verified native host. Never guess addresses or pass Lua scene-object pointers.
+// Reports canonical COM device identity, not resource role/camera/sync validity.
+BEAMRT_API int BeamRT_WorkerDeviceMatchesResource(BeamRTWorker*, void* resource,
+                                                 uint32_t* matches);
 BEAMRT_API int BeamRT_WorkerUpload(BeamRTWorker*, const BeamRTScene*,
                                   const uint8_t* rgba, uint64_t byteCount);
 BEAMRT_API int BeamRT_WorkerTrace(BeamRTWorker*, const BeamRTRay*, uint32_t count,
