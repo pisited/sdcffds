@@ -4636,3 +4636,72 @@ LIGHT_VISIBILITY_V0105.md records5cycleitems. NextsmallcompleteSliceactualsewer
 mesh+localLight/skyambientvisibility. CandidateWCUsteel_factory_sewer01..06/
 underground01..02foundarchive;notmatchedlive/GPUnotimported. No new in-game
 commands or tests thiscycle. NoassistantGitwrites/pulls/pushes,installedfilesuntouched.
+
+## 129. v106: complete one-section native local-light visibility implementation
+
+User'alright' accepted nextslice; proceededimplementationwithoutanotherdiagnostic.
+Prepared8privateWCUassets sewer01..06/underground01..02 viaexistingimporter+packer.
+Exacthighestnumericvisual_aLODnode,noCOLmesh/LODunion. 3981/4294/10200/3981/5538/
+8727/10900/8961tris, nodes1023/1419/4095/1023/2047/3117/4095/3585 allwithin4096.
+Explicitnon-area lines/linestrips exclusionrecorded;defaultimportstrict,other
+unsupportedSURFACEprimitive stillfails. Actualassetparserissue fixedinbatch.
+
+meshLocalScene readsdescriptorregistry,scansTSStaticatENABLEONLY,selectsonebyactual
+transformedmeshBBoxdistance(max30m;inside/smallerBBox tiebreak),NativeMatrixFpoint
+basis/inverse,layout/texture/materialchecks. No wire/camera/vehiclemutations. Native
+Canal materialofflinehasnoalpha/translucentdecl (runtimeflagsnotconfirmed); industrial
+trim/fencesmaskunknownfallback. DataPNGNPOTuncompressedcompatiblepathretained.
+
+meshLocalLights privatePoint/Spot nativecopiesviafreshShaderData/materialrebind;
+immutableDatasetvaluesinShaderData.defines beforeREGISTER,texture t14. Real native
+worldPos->cb.lightPosition ray INSIDE nativepixelpass, noPFXPreBin depthrelay,
+no separate lightreconstruction orcontrolledvehiclefilter. Definiteopaquehit0;
+nativeShadowingotherwiseincludinginvalid/unknown/miss. NativeNO_SHADOW path now
+getsoptionalMeshblockers. Normal/nativeattenuation,cookies,brightness,color,
+electricblinking/spec/retro preserved;noLightInfo setterwrites. Exclude subsurface
+receivers/speciallightmapping. Native source/helpercontracts checked. Freshshader
+cachekey reusedunchanged,max64ownedrevisions bounded. BothPoint/Spotrollback;
+ownershipconflict/stale/opacity/mission/unload restoresnative. Stalecheck30frames.
+Main106toggle/defaultOFF/unpersisted,Maindisable/unloadrestoreslocalbindings.
+
+10actualLua selection/lifecycle/bindfixtures+4Stdimport/sourcecontract+25retainedGI
+and14alignmentpass;24strictnativePoint/SpotPS permutations shadow/no-shadow/cookie/
+reversed-depth/cube withREALlargestdesc dimensions; Lua51/JIT55compilepass.
+CompilerfoundnativeShadowMapIO '#define bias' collision; renameourparamsrayStartBias
+insharedBVHCommon,nomathchange. RecompileGI083/mesh002 infinalreviewrequired.
+
+UnverifiedLIVE: exactclosestsection/LOD alignment/material flags/textureupload/
+nativePointSpotpathbinding/actuallightblocking/FPS. One-instanceonly,notwholeTunnel;
+nativeclustered/forward/dynamicgeometrynotintercepted, nativefalse shadowsnotremoved.
+Ambient/daytimefill+GI+orangelegitimatebounces remain separate. No fixclaimyet.
+ONE normalrenderGEcmd:nooldwire/probes/screenshotaudits:
+extensions.load("beamrt_meshLocalLights"); dump(beamrt_meshLocalLights.enable()).
+Atcurrentsewer,expectselectedactualasset andnativeheadlight illuminationbehindsolid
+OPAQUEwall reduced,retainedcar/walk. Restoredisable. Iferrorinspectexactlog; ifno
+effectinspectselectedasset/policy/nativeRenderPathnotnewfilters. NewcompleteSlice
+validationnotthirdoldSunhypothesischeck. Nextadjacentinstances/alpha thenSkyambient
+andGIvisibility. Userexternalcommits2733084/1e638e1 observedmidwork,preserved;
+noassistantGitwrites. Preparedprivateassets/hooksource alreadyinPC,notGitincluded.
+
+## 130. Final v106 compatibility blocker — do NOT request another visual test yet
+
+Furtherreviewfoundnativecore/settings/clusteredQuality.lua +graphicqualitygroup
+GraphicClusteredQuality configuringGLOBAL ClusteredShading (minLightScreenSize,
+lightFlares,shadowMaxCasters,shadowFallbackFrames,shadowOversample,shadowBubble).
+Native cluster_shade.cs.hlsl computehandleslocalPointSpot lighting+ShadowViews;
+t14 isshadowAtlas,t15shadowViews,t16baseColoroption. Legacy nativeCustomMaterial
+bridgenotcoverageproofonthisbackend. Exactactive routingnotprovenfrompresence,
+butdoNOTclaimcompatible/askanother'imageunchanged'test. meshLocalLights.enable
+nowrefuseswhenClusteredShadingexposed beforeanyscene/renderwrite. Added11thLua
+testforguard andsafeMemberMetadata. Srccompileallprevious24pass; GI083/mesh002
+VSPS strictrecompilepass followingrayStartBiasrename.
+
+getBackendInfo listsbounded128memberNAMES+TYPES (depth2,seen/cap), no getter calls
+orfieldvalues/pointers/statewrites. FinalONEread-onlyAPIlookup:
+extensions.load("beamrt_meshLocalLights"); dump(beamrt_meshLocalLights.getBackendInfo()).
+PurposeactualClusteredShader/ResourcebindingAPI,notvisual/tracediagnostic. Ifexposed,
+portrealgeometryqueriesinsidematchingcompute pass (newslot17orappropriatebinding,
+no t14overwrite). Ifnotexposed,explainnativebridge requiresapproval/scope decision;
+doNOTguessstaticfields,forcebackendoff,blindVFSoverride/nativeinstallwrites,or
+floodwithconsoletests. Existinggeometryregistry/privateMeshscene/BVH reusable.
+DocsREADME updatedclearlySTAGED/CLUSTEREDBLOCKED. No in-game shadowsfixedclaim.

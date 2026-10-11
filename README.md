@@ -1320,6 +1320,12 @@ Search for `BeamRT`, `v012`, `beamrtSurfelCache`, `beamrtGITrace`, `compile`, an
 
 ### v0.104 real-mesh sunlight integration (opt-in)
 
+v0.106 prepares actual WCU underground meshes and stages a direct world-mesh query
+inside the legacy native point/spot light passes. This build also exposes clustered
+compute lighting, whose integration is still blocked by its binding interface;
+the legacy hook refuses activation there. **Not yet a verified headlight/sewer
+fix.** See [scope and required binding-interface lookup](UNDERGROUND_LOCAL_LIGHTS_V0106.md).
+
 v0.105 corrects vehicle-light acquisition across driving/walking and replaces the
 unsafe cached-shader filename swap with private shader objects/material rebinding.
 These are implementation fixes, **not verified headlight/sewer shadow fixes**.

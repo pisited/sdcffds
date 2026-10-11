@@ -24,7 +24,9 @@ local function validate(asset)
   end
   if gpu.width~=256 or gpu.nodeOffset~=2 or gpu.nodeStride~=6 or gpu.triangleStride~=7
     or gpu.triangleOffset~=2+gpu.nodeCount*6 or gpu.triangleOffset+gpu.triangleCount*7>gpu.width*gpu.height then return false end
-  if not placement.xyz(gpu.quantMin)or not placement.xyz(gpu.quantExtent)or type(gpu.materialNames)~='table'or #gpu.materialNames>16 then return false end
+  if not placement.xyz(gpu.quantMin)or not placement.xyz(gpu.quantExtent)or type(gpu.materialNames)~='table'
+    or #gpu.materialNames<1 or #gpu.materialNames>16 then return false end
+  for _,name in ipairs(gpu.materialNames)do if type(name)~='string'or name==''or #name>256 then return false end end
   for i=1,3 do if gpu.quantExtent[i]<=0 then return false end end
   return true
 end

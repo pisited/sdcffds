@@ -143,5 +143,12 @@ class Local(unittest.TestCase):
         self.lua.globals().objects.wall.castShadows='true';self.module.enable();self.module.onClientEndMission()
         self.assertFalse(self.module.getStatus().enabled)
         self.module.enable();self.module.onClientStartMission();self.assertFalse(self.module.getStatus().enabled)
+    def test_clustered_backend_not_falsely_enabled_and_metadata_is_read_only_bounded(self):
+        self.lua.execute("ClusteredShading=setmetatable({shadowMaxCasters=64},{__index=function()error('must not invoke backend getters')end})")
+        self.assertFalse(self.module.enable()[0])
+        self.assertEqual(self.obj('AL_PointLightMaterial').reloads,0)
+        info=self.module.getBackendInfo();self.assertTrue(info.exposed)
+        self.assertTrue(any(m.name=='shadowMaxCasters'and m.kind=='number'for m in info.members.values()))
+        self.assertFalse(self.module.getStatus().clusteredDispatchIntegrated)
 
 if __name__=='__main__':unittest.main(verbosity=2)

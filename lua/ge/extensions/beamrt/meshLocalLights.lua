@@ -86,6 +86,12 @@ function M.disable()
 end
 function M.enable()
   if active then return true,M.getStatus()end
+  -- This installation also provides clustered compute shading. Its texture/
+  -- structured-buffer bindings are not the legacy CustomMaterial interface.
+  -- Do not report a successful install on an unverified alternate route.
+  if ClusteredShading~=nil then
+    return fail('clustered lighting backend exposed; legacy point/spot hook is staged, not activated until matching dispatch/bindings are integrated')
+  end
   local data,why=sceneModule.prepare();if not data then return fail(why)end
   scene=data
   local defines,count=sceneModule.defines(scene);if count==0 then return fail('no supported opaque underground blockers; native lighting retained')end
@@ -129,11 +135,33 @@ end
 function M.getStatus()
   return {enabled=active,error=errorMessage,objectId=scene and scene.objectId,
     selectedShape=scene and scene.asset.shapePath,triangles=scene and scene.gpuData.triangleCount,
-    nodes=scene and scene.gpuData.nodeCount,scope='one imported underground instance, native deferred point and spot lights',
+    nodes=scene and scene.gpuData.nodeCount,scope='one imported underground instance, legacy native deferred point and spot lights',
+    clusteredBackendExposed=ClusteredShading~=nil,clusteredDispatchIntegrated=false,
     installation='fresh ShaderData with direct BVH queries in native local-light shading',
     cameraDepthRelayUsed=false,controlledVehicleSelectionUsed=false,brightnessOrColorChanged=false,
     nativeShadowsPreserved=true,ambientLightingChanged=false,alphaTexturesSampled=false,
     completeScene=false,gpuExecutionVerified=false,appearanceVerified=false}
+end
+function M.getBackendInfo()
+  -- Bounded read-only member metadata, no getter calls or values/pointers.
+  local backend=ClusteredShading
+  local result={exposed=backend~=nil,kind=type(backend),members={},truncated=false}
+  local seen={}
+  local function collect(value,prefix,depth)
+    if type(value)~='table'or seen[value]then return end
+    seen[value]=true
+    for key,member in next,value do
+      if #result.members>=128 then result.truncated=true;return end
+      if type(key)=='string'then
+        result.members[#result.members+1]={name=prefix..key,kind=type(member)}
+        if depth<2 and type(member)=='table'then collect(member,prefix..key..'.',depth+1)end
+      end
+    end
+  end
+  collect(backend,'',0)
+  if backend~=nil then collect(getmetatable(backend),'meta.',0)end
+  table.sort(result.members,function(a,b)return a.name<b.name end)
+  return result
 end
 function M.onClientEndMission()M.disable();sceneModule.clear();scene=nil end
 function M.onClientStartMission()M.disable();sceneModule.clear();scene=nil end

@@ -44,7 +44,7 @@ class Prepare(unittest.TestCase):
         import beamrt_scene_import as mesh
         from test_scene_align import document
         root=document('<node id="selected"><instance_geometry url="#wall"/></node>')
-        geometry=mesh.first(mesh.descendants(root,'geometry')[0],'mesh')
+        geometry=mesh.first(next(mesh.descendants(root,'geometry')),'mesh')
         ET.SubElement(geometry,'lines')
         with self.assertRaises(ValueError):align.extract_selected(root,'selected')
         faces,meta=align.extract_selected(root,'selected',allow_non_surface_lines=True)

@@ -29,9 +29,9 @@ bool beamrtMeshDataValid(out bool srgb)
         &&all(beamrtMeshBytes(1,srgb)==uint4(23u,101u,211u,37u))
         &&meshTriangleOffset+meshTriangleCount*7<=(float)(w*h);
 }
-bool beamrtMeshBox(float3 o,float3 d,float3 lo,float3 hi,float reach,float bias)
+bool beamrtMeshBox(float3 o,float3 d,float3 lo,float3 hi,float reach,float rayStartBias)
 {
-    float near=bias,far=reach;
+    float near=rayStartBias,far=reach;
     [unroll]for(int a=0;a<3;++a)
     {
         if(abs(d[a])<1e-10){if(o[a]<lo[a]||o[a]>hi[a])return false;}
@@ -39,13 +39,13 @@ bool beamrtMeshBox(float3 o,float3 d,float3 lo,float3 hi,float reach,float bias)
     }
     return near<=far;
 }
-bool beamrtMeshTriangle(float3 o,float3 d,float3 a,float3 b,float3 c,float reach,float bias)
+bool beamrtMeshTriangle(float3 o,float3 d,float3 a,float3 b,float3 c,float reach,float rayStartBias)
 {
     float3 e1=b-a,e2=c-a,p=cross(d,e2);float det=dot(e1,p);
     if(abs(det)<1e-10)return false;
     float3 t=o-a;float u=dot(t,p)/det;if(u<0||u>1)return false;
     float3 q=cross(t,e1);float v=dot(d,q)/det;if(v<0||u+v>1)return false;
-    float distance=dot(e2,q)/det;return distance>bias&&distance<reach;
+    float distance=dot(e2,q)/det;return distance>rayStartBias&&distance<reach;
 }
 uint beamrtMeshMaterial(uint4 meta)
 {
@@ -57,7 +57,7 @@ uint beamrtMeshMaterial(uint4 meta)
 }
 // Return 2 only for a definite declared-opaque hit. Uncertain hits never
 // prevent finding a later definite blocker. -1 data failure; -2 incomplete.
-int beamrtMeshTrace(float3 worldOrigin,float3 worldDirection,float reach,float bias,out uint visits)
+int beamrtMeshTrace(float3 worldOrigin,float3 worldDirection,float reach,float rayStartBias,out uint visits)
 {
     visits=0;bool srgb;
     if(!beamrtMeshDataValid(srgb))return -1;
@@ -68,13 +68,13 @@ int beamrtMeshTrace(float3 worldOrigin,float3 worldDirection,float reach,float b
         if(node>=(uint)meshNodeCount)break;
         visits++;uint offset=2+node*6,info=beamrtMeshWord(offset+5,srgb),count=info&255u,escape=info>>8;
         if(escape<=node||escape>(uint)meshNodeCount||count>8)return -1;
-        if(!beamrtMeshBox(o,d,beamrtMeshPoint(offset,srgb),beamrtMeshPoint(offset+2,srgb),reach,bias)){node=escape;continue;}
+        if(!beamrtMeshBox(o,d,beamrtMeshPoint(offset,srgb),beamrtMeshPoint(offset+2,srgb),reach,rayStartBias)){node=escape;continue;}
         if(count==0){node++;continue;}
         uint start=beamrtMeshWord(offset+4,srgb);if(start+count>(uint)meshTriangleCount)return -1;
         [loop]for(uint i=0;i<8;++i)
         {
             if(i>=count)break;uint p=(uint)meshTriangleOffset+(start+i)*7;
-            if(beamrtMeshTriangle(o,d,beamrtMeshPoint(p,srgb),beamrtMeshPoint(p+2,srgb),beamrtMeshPoint(p+4,srgb),reach,bias))
+            if(beamrtMeshTriangle(o,d,beamrtMeshPoint(p,srgb),beamrtMeshPoint(p+2,srgb),beamrtMeshPoint(p+4,srgb),reach,rayStartBias))
             {
                 uint mode=beamrtMeshMaterial(beamrtMeshBytes(p+6,srgb));
                 if(mode==1)return 2;possible=true;
