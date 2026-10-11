@@ -6975,6 +6975,20 @@ function M.querySceneVisibility(fromWorld,toWorld,opts)
   return provider.traceSegment(fromWorld,toWorld,opts)
 end
 
+-- Static mesh preprocessing input: export shape asset paths and instance
+-- metadata without assuming Lua can access the native graphics mesh buffer.
+function M.exportStaticSceneManifest(path, limit, useCached)
+  return require("ge/extensions/beamrt/sceneAssetManifest").write(
+    path or "/settings/beamrtSceneManifest.json",
+    {limit=limit, cached=useCached==true})
+end
+function M.getStaticSceneManifestStats(limit, useCached)
+  local manifest,err=require("ge/extensions/beamrt/sceneAssetManifest").capture(
+    {limit=limit, cached=useCached==true})
+  if not manifest then return false,err end
+  return manifest.stats
+end
+
 function M.getSceneDatabaseStats()
   return sceneDatabase.getStats()
 end
