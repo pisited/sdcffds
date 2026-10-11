@@ -12,7 +12,7 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.105"
+local VERSION = "0.106"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -6635,6 +6635,12 @@ local function drawTuningWindow()
     if im.Button("Restore hybrid sun shadows") then M.setMeshSunShadowComparison('hybrid') end
     tuningTooltip("Same-frame direct-sun comparison: LEFT native shadows, RIGHT BeamRT-only mesh shadows. Not two independent GI/reflection renders. Ambient, local-light shadows and cloud lighting remain unchanged. Disable restores native shading.")
     if M.getMeshSunShadowStatus().error then im.TextUnformatted("Mesh sun: "..M.getMeshSunShadowStatus().error) end
+    if im.Button(M.getMeshLocalLightStatus().enabled and "Underground local-light visibility ON" or "Underground local-light visibility OFF") then
+      local ok,why=M.setMeshLocalLightsEnabled(not M.getMeshLocalLightStatus().enabled)
+      if not ok then beamrtLog('E',tostring(why)) end
+    end
+    tuningTooltip("Opt-in one imported sewer/underground section. World-space triangle visibility inside native point/spot lighting, including its NO_SHADOW path. Preserves light brightness/color and native fallback. Does not suppress sky/ambient lighting or support alpha textures yet.")
+    if M.getMeshLocalLightStatus().error then im.TextUnformatted('Mesh local: '..M.getMeshLocalLightStatus().error) end
     im.PopItemWidth()
   end
 
@@ -6922,6 +6928,7 @@ end
 
 function M.disable()
   M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
   enabledRequested = false
   syncEffectEnablement()
   beamrtLog("I", "disable requested")
@@ -7128,6 +7135,19 @@ function M.setMeshSunShadowComparison(value)
   if not shadow.getStatus().enabled then return shadow.enable() end
   return true,shadow.getStatus()
 end
+function M.setMeshLocalLightsEnabled(value)
+  if type(value)~='boolean'then return false,'enabled must be boolean'end
+  if not extensions then return not value,'extensions unavailable'end
+  if value and not extensions.beamrt_meshLocalLights then extensions.load('beamrt_meshLocalLights')end
+  local lights=extensions.beamrt_meshLocalLights
+  if not lights then return not value,'local mesh-light integration unavailable'end
+  if value then return lights.enable()end
+  return lights.disable()
+end
+function M.getMeshLocalLightStatus()
+  local lights=extensions and extensions.beamrt_meshLocalLights
+  return lights and lights.getStatus()or{enabled=false}
+end
 
 function M.captureVehicleGeometry(vehicleId)
   local provider = sceneDatabase.getProvider("vehicles")
@@ -7325,6 +7345,7 @@ end
 
 function M.onExtensionUnloaded()
   M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
   if package.loaded['ge/extensions/beamrt/meshSceneInputs'] then package.loaded['ge/extensions/beamrt/meshSceneInputs'].release() end
   if extensions and extensions.beamrt_reflectionSourceProbe then extensions.beamrt_reflectionSourceProbe.cancel("BeamRT unloaded") end
   if extensions and extensions.beamrt_reflectionConvergence then

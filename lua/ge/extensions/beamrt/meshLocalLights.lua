@@ -8,6 +8,7 @@ local originals={}
 local owned={}
 local serial=0
 local frame=0
+local shaderCache={}
 local function find(name)return scenetree.findObject(name)end
 local function field(object,name,index)return object:getField(name,index or 0)end
 local function normalize(text)return text and text:gsub('\r\n','\n')end
@@ -34,6 +35,10 @@ local function compatible()
   return data
 end
 local function privateShader(kind,native,defines)
+  local key=kind..'|'..manifest.lights[kind].shaderPath..'|'..scene.gpuData.texture..'|'
+    ..(field(native,'defines')or'')..'|'..field(native,'DXVertexShaderFile')..'|'..defines
+  if shaderCache[key]then return shaderCache[key]end
+  if #owned>=64 then error('bounded private shader revision budget reached')end
   serial=serial+1
   local name='BeamRT_LocalMesh'..kind..'Shader_'..serial
   if find(name)then error('local-light shader namespace already occupied')end
@@ -48,6 +53,7 @@ local function privateShader(kind,native,defines)
     shader:setField('samplerNames',index,name)
   end
   shader:registerObject(name);owned[#owned+1]=name
+  shaderCache[key]=name
   return name
 end
 local function install(defines)
@@ -134,7 +140,7 @@ function M.onClientStartMission()M.disable();sceneModule.clear();scene=nil end
 function M.onExtensionUnloaded()
   M.disable()
   for i=#owned,1,-1 do local object=find(owned[i]);if object then object:delete()end end
-  owned={};sceneModule.clear();scene=nil
+  owned={};shaderCache={};sceneModule.clear();scene=nil
 end
 function M.onExtensionLoaded()if setExtensionUnloadMode then setExtensionUnloadMode(M,'manual')end end
 return M

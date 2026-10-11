@@ -44,7 +44,7 @@ def generate_local(source,kind):
       '#include "shaders/beamrt/beamrtMeshLocalLight.h.hlsl"')
     return source.replace(insertion,
       '    // Keep native attenuation/BRDF/emission. Add only definite world-mesh visibility.\n'
-      '    if (gbuffer.target0.w <= 0.0)\n'
+      '    if (gbuffer.target0.w <= 0.0 && cb.lightMapParams.a >= 0.0)\n'
       '        shadowed = beamrtLocalShadowFactor(worldPos, material.normal, cb.lightPosition, shadowed);\n'+insertion)
 
 def prepare(game_root,mod_root):
