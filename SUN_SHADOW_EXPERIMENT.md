@@ -155,3 +155,50 @@ change any shadow or GI illumination.
 - Finally `compare("classification","difference",0.5)`.
 - Do not treat differences as proof that either renderer is more physically
   correct until the native sun mask encoding and ray confidence are verified.
+
+## Shadow intersection accuracy A/B (trace v005)
+
+The v005 tracer adds a refined front-to-back depth-crossing search, while
+preserving the v004 coarse intersection rule as a live selectable baseline.
+The **same texture inputs, ray budgets, bias, resolution, and distances** are
+used in both modes. The default on extension load is `refined`.
+
+```lua
+beamrt_shadowRenderer.setHitModel("legacy")  -- previous v004 intersections
+beamrt_shadowRenderer.setHitModel("refined") -- depth-bracket binary refinement
+```
+
+To inspect results in the same scene without changing the split debugger:
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+beamrt_shadowRenderer.setHitModel("legacy")
+-- inspect/save screenshot with camera stationary
+beamrt_shadowRenderer.setHitModel("refined")
+-- inspect/save the same view again
+```
+
+Or compare the calculated mask against BeamNG's native buffer:
+
+```lua
+beamrt_shadowRenderer.compare("beamrt", "native", 0.5)
+beamrt_shadowRenderer.setHitModel("refined")
+```
+
+**Important:** This is an A/B *toggle*, not simultaneous baseline/refined GPU
+passes. The split comparison shows the currently selected tracing algorithm
+against a different view or native mask in the same frame. The only way to
+compare old/new algorithms is to switch models while the scene stays fixed.
+
+- `refined` bisects a front-to-back crossing (three steps in Playable,
+  five steps in Cinematic), rejecting missing-depth intervals and checking
+  the final depth agreement rather than trusting only the coarse sample.
+- `legacy` uses the original v004 acceptance check unchanged.
+- This still does **not** solve off-screen shadow casters, alpha-tested foliage,
+  perspective undersampling of chain-link geometry, or native shadow-mask
+  semantic uncertainty.
+- Refinement costs more depth samples on candidate hits. Actual GPU runtime
+  performance and HLSL shader compilation must be tested in BeamNG before
+  merging.
+- `getStatus().hitModel` identifies the current method.
+
