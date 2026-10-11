@@ -530,6 +530,35 @@ function M.setHybridDetailStrength(value)
   return true
 end
 
+-- Inspect what geometry asset a named TSStatic actually uses. This is
+-- read-only: it cannot claim a shape's binary renderer mesh was exported.
+function M.inspectOffscreenMeshSource(name)
+  if type(name) ~= "string" or name == "" then
+    return false, "supply a TSStatic scene-object name"
+  end
+  local obj = find(name)
+  if not obj then return false, "object not found" end
+  local clsOk, cls = pcall(obj.getClassName, obj)
+  if not clsOk or cls ~= "TSStatic" then
+    return false, "only TSStatic objects are supported"
+  end
+  local function field(key)
+    local ok, value = pcall(function() return obj:getField(key, 0) end)
+    if ok and value ~= nil and tostring(value) ~= "" then return tostring(value) end
+    ok,value = pcall(function() return obj[key] end)
+    return ok and value and tostring(value) or nil
+  end
+  local shape = field("shapeName")
+  return true, {
+    name = name, shapeName = shape,
+    format = shape and shape:match("%.[^%.]+$") or "unknown",
+    position = field("position"), rotationMatrix = field("rotationMatrix"),
+    scale = field("scale"),
+    trianglesExtracted = false,
+    note = "Shape asset identified; no automatic mesh vertex extraction"
+  }
+end
+
 -- Actual triangle geometry, separate from coarse box placeholders.
 -- World-space vertices: static mesh positions, not camera-space coordinates.
 function M.setOffscreenTriangle(index, ax, ay, az, bx, by, bz, cx, cy, cz)
