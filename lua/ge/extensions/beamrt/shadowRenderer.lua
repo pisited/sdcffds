@@ -19,7 +19,7 @@ local views = {
   scene = 8, split = 9,
 }
 local quality = "playable"
-local hitModel = "validated" -- legacy (v004), refined (v005), validated (v006)
+local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 local view = "off"
 local active = false
 local split = {
@@ -90,7 +90,7 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v006.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v007.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
     "shaders/beamrt/beamrtSunShadowPreviewP_v003.hlsl",
@@ -140,7 +140,8 @@ local function apply()
     trace:setShaderConst("$shadowNormalBias", settings.bias)
     trace:setShaderConst("$shadowThickness", settings.thickness)
     trace:setShaderConst("$shadowHitModel",
-      hitModel == "legacy" and 0 or (hitModel == "refined" and 1 or 2))
+      hitModel == "legacy" and 0 or
+        (hitModel == "refined" and 1 or (hitModel == "validated" and 2 or 3)))
     trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
   end
   if preview then
@@ -195,9 +196,10 @@ end
 -- Models use the same main tracing budget. Only candidate refinement /
 -- neighborhood validation differs. No additional full-screen GPU pass.
 function M.setHitModel(requested)
-  if requested ~= "legacy" and requested ~= "refined" and requested ~= "validated" then
+  if requested ~= "legacy" and requested ~= "refined" and
+     requested ~= "validated" and requested ~= "geometric" then
     if type(log) == "function" then
-      log("E", "BeamRT.Shadow", "Expected 'legacy', 'refined', or 'validated'")
+      log("E", "BeamRT.Shadow", "Expected 'legacy', 'refined', 'validated', or 'geometric'")
     end
     return false
   end
