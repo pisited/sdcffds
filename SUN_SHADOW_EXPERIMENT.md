@@ -795,3 +795,118 @@ still needs actual mesh geometry or verified sun-view depth, not 4 boxes.
 If `worldbox` is still black after reversing, inspect the selected box
 locations and the receiver-normal facing test rather than assuming the GPU
 uniforms vanished.
+
+
+## Opt-in world-space triangle mesh shadows (trace v013 + preview v012)
+
+This introduces **real ray/triangle intersections**, in addition to the
+previous approximate AABB test. It is **not** a full scene mesh extractor.
+The initial fixed GPU limit is **12 triangles**, with a separate independent
+array of vertex positions in world metres. Triangles persist across camera
+rotations because their world coordinates do not come from the camera depth
+buffer. The *receiver* must still be visible to the camera.
+
+The triangle tracer uses a double-sided Möller-Trumbore test. Each triangle
+is uploaded as three world-space vertices (A, B, C). It shares the existing
+`setOffscreenSunDirection("normal"|"reversed")` setting with world-box
+casting, but does not otherwise alter the screen-space ray marching models.
+
+### Quick GPU test (no file or measuring needed)
+
+In GE Lua after loading the extension, while the previous four TSStatic boxes
+are captured:
+
+```lua
+beamrt_shadowRenderer.captureOffscreenNearby(45)
+local ok,err = beamrt_shadowRenderer.testTrianglesFromOffscreenBox(1)
+dump({ok=ok,error=err})
+beamrt_shadowRenderer.setOffscreenSunDirection("reversed")
+beamrt_shadowRenderer.compare("scene", "worldmesh", 0.5)
+dump(beamrt_shadowRenderer.getStatus().offscreen)
+```
+
+The **orange** overlay should mark sunlight rays intersecting triangle
+facets. `testTrianglesFromOffscreenBox(1)` is only a **control experiment**:
+it explicitly triangulates the previously captured first rectangular
+bounds. This proves the triangle shader binding and algorithm work, but
+**does not improve the caster silhouette**. It disables box tracing during
+this test to avoid counting the same geometry twice.
+
+### Upload actual mesh faces in world coordinates
+
+For a measured triangle (A, B, C), set all nine vertex coordinates:
+
+```lua
+beamrt_shadowRenderer.clearOffscreenTriangles()
+local ok,err = beamrt_shadowRenderer.setOffscreenTriangle(
+  1, ax,ay,az, bx,by,bz, cx,cy,cz)
+dump({ok=ok,error=err})
+beamrt_shadowRenderer.compare("scene", "worldmesh", 0.5)
+```
+
+All placeholders must be replaced with actual numbers in world metres.
+Triangles must have nonzero area. You can upload 1 to 12 of them
+consecutively. **No automatic clipping or decimation** occurs: an input
+larger than 12 is rejected rather than silently producing a misleading
+partial building. To avoid the old boxes influencing classification:
+
+```lua
+beamrt_shadowRenderer.setOffscreenEnabled(false)
+```
+
+### Load pre-extracted mesh triangles
+
+If you have already converted selected faces from a real map mesh to
+**world-space** positions, store them in a JSON file accessible through
+BeamNG's virtual filesystem:
+
+```json
+{
+  "triangles": [
+    {"a":[100,200,5], "b":[103,200,5], "c":[101,200,8]}
+  ]
+}
+```
+
+```lua
+local ok,err = beamrt_shadowRenderer.loadOffscreenTrianglesJson(
+  "/mods/unpacked/beamrt/shadow_triangles.json")
+dump({ok=ok,error=err})
+beamrt_shadowRenderer.compare("scene", "worldmesh", 0.5)
+```
+
+The loader checks that every triangle is finite and nondegenerate, and
+accepts all triangles **atomically** so a failed load never corrupts
+previously loaded geometry. This JSON is only a format example, not a
+claim that coordinates correspond to the current map.
+
+To inspect the mesh path and transform exposed by a named TSStatic, without
+guessing at unavailable runtime mesh buffers:
+
+```lua
+dump(beamrt_shadowRenderer.inspectOffscreenMeshSource("41168"))
+```
+
+The result reports `shapeName`, position, scale and rotation fields
+when BeamNG exposes them. It **does not** currently parse the referenced
+Collada/compiled shape, resolve its scene-node transforms, or upload its
+complete triangle mesh. Those are the remaining steps before this could
+replace coarse building bounds automatically.
+
+### Disable and reset
+
+```lua
+beamrt_shadowRenderer.setOffscreenMeshEnabled(false) -- keep uploaded faces
+beamrt_shadowRenderer.clearOffscreenTriangles()      -- remove all faces
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+```
+
+**Important limitations:** 12 triangles can represent a simple roof or
+part of a facade, not a city building or chain-link fence. Complex
+objects can have thousands of triangles and may be cached as binary
+`.cdae` or `.dts`; reading them accurately involves asset parsing,
+transform handling, level-of-detail selection and GPU data acceleration.
+This is a small **actual-triangle traversal proof**, not that larger
+importer or an optimized scene BVH. The code has been repository-reviewed,
+not compiled or validated in BeamNG as of this commit. It remains
+experimental and off by default, separate from the production lighting/GI.
