@@ -1,0 +1,23 @@
+{
+  "experimentId": "beamrt-native-scene-cubemap-probe-v1",
+  "mode": "scene-cubemap magenta diagnostic",
+  "nativeSha256": "48A97618E397F7DE5A09837939EF8C1E9862DD335808FB3477E2894D90D7C1DB",
+  "nativeSha1": "6FF7DEF7CCF8E6B55A9CC933DE5AA47930CEB20F",
+  "overrideSha256": "4780B6C615D26B6D4EB7F93FA9CE904E3AFF420712D62082274D455F11FB5C0E",
+  "overrideSha1": "780D2B7A337E5AE084AA9FA5F23860E1B669D7BE",
+  "target": "C:\\Users\\ab\\AppData\\Local\\BeamNG\\BeamNG.drive\\current\\mods\\unpacked\\beamrt\\shaders\\common\\material\\shadergen\\permutations.h.hlsl",
+  "virtualPath": "/shaders/common/material/shadergen/permutations.h.hlsl",
+  "stagedPath": "C:\\Users\\ab\\AppData\\Local\\BeamNG\\BeamNG.drive\\current\\mods\\unpacked\\beamrt\\.beamrt-validation\\native-reflection-experiment\\staged\\permutations.magenta.h.hlsl",
+  "patchedCallSites": 2,
+  "exclusions": [
+    "getCustomCubemap source branch",
+    "custom material constant buffers",
+    "nonzero reflectionVectorsPacked",
+    "deprecated V0 materials",
+    "water shader path"
+  ],
+  "dynamicCaptureExclusion": "Not established; no native reflection-pass flag was found.",
+  "sourceScope": "Only the completed modern scene-cubemap contribution is tinted; native sampling and all other lighting remain unchanged.",
+  "gpuExecutionVerified": false,
+  "refreshRequired": "Full application restart; no shader-cache deletion or guessed reload API."
+}

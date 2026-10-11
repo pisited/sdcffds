@@ -1,0 +1,21 @@
+// v0.074 validates second-bounce history with the dedicated moments-depth
+// buffer and reprojects it with motion vectors. GI alpha is hit confidence,
+// not depth, so the older validation silently rejected almost every bounce.
+#define BEAMRT_ADAPTIVE_RAY_BUDGET 1
+#define BEAMRT_BLUE_NOISE 1
+#define BEAMRT_TRUE_BLUE_NOISE 1
+#define BEAMRT_STBN_ATLAS 1
+#define BEAMRT_REFINED_HITS 1
+#define BEAMRT_SCREEN_DDA 1
+#define BEAMRT_SCREEN_DDA_REPAIR 1
+#define BEAMRT_BOUNDED_SCREEN_DDA 1
+#define BEAMRT_SOURCE_AWARE_DDA_BUDGET 1
+#define BEAMRT_CONSERVATIVE_RECEIVER_RESPONSE 1
+#define BEAMRT_STABLE_DIAGNOSTIC_RAY 1
+#define BEAMRT_DIAGNOSTIC_DIRECTION_VIEWS 1
+#define BEAMRT_HIT_VALIDATION 1
+#define BEAMRT_CANDIDATE_CONTINUATION 1
+#define BEAMRT_EMISSIVE_SEPARATION 1
+#define BEAMRT_SECOND_BOUNCE_DEPTH_MOMENTS 1
+#define BEAMRT_SECOND_BOUNCE_REPROJECTION 1
+#include "beamrtGITraceP_v067_core.hlsl"

@@ -1,0 +1,19 @@
+{
+  "generator": "BeamRT spectral alternating projection STBN candidate",
+  "layout": "64 frames of 128x128, packed 8x8 RG",
+  "iterations": 10,
+  "seed": 780871,
+  "red": {
+    "mean": 0.5,
+    "stddev": 0.28867512941360474,
+    "spatial_low_to_mid_power": 0.0012863494921475649,
+    "temporal_low_to_mid_power": 0.007630117703229189
+  },
+  "green": {
+    "mean": 0.5,
+    "stddev": 0.28867512941360474,
+    "spatial_low_to_mid_power": 0.0013119534123688936,
+    "temporal_low_to_mid_power": 0.00761227635666728
+  },
+  "channel_correlation": 0.0011257209618818964
+}

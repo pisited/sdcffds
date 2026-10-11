@@ -1,0 +1,23 @@
+#ifndef BEAMRT_CLEAN_RADIANCE_V065_H_HLSL
+#define BEAMRT_CLEAN_RADIANCE_V065_H_HLSL
+
+#include "shaders/common/postFx/postFx.h.hlsl"
+
+// Material V2 still builds the live CleanRadiance source from the three
+// already-proven captures. Roughness/AO/normals/clear-coat caches are published
+// independently for diagnostics first, so they cannot silently change PTGI.
+uniform_sampler2D(prepassDepthTex, 0);
+uniform_sampler2D(baseColorCacheTex, 1);
+uniform_sampler2D(metallicCacheTex, 2);
+uniform_sampler2D(lightInfoTex, 3);
+uniform_sampler2D(emissiveCacheTex, 4);
+
+cbuffer perDraw : register(b0)
+{
+    uniform float outputMode;
+    POSTFX_UNIFORMS
+};
+
+#include "shaders/common/postFx/postFx.hlsl"
+
+#endif // BEAMRT_CLEAN_RADIANCE_V065_H_HLSL
