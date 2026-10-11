@@ -22,14 +22,14 @@ local views = {
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
   hybrid = 13, hybridweight = 14, hybridsource = 15, hybridscene = 16,
-  worldbox = 17,
+  worldbox = 17, worldboxprobe = 18,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
   incidence = 3, difference = 4, rawdifference = 5, modelid = 6,
   hitdistance = 7, deptherror = 8, selfplane = 9}
 local telemetryViews = {hitdistance = true, deptherror = true, selfplane = true}
-local worldBoxViews = {worldbox = true}
+local worldBoxViews = {worldbox = true, worldboxprobe = true}
 local quality = "playable"
 local hitModel = "validated" -- legacy v004, refined v005, validated v006, geometric v007
 -- Experimental preview only: native mask semantics are not yet calibrated.
@@ -108,10 +108,10 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v010.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v011.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v010.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v011.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
@@ -191,8 +191,17 @@ local function worldBoxDiagnosticRequested()
   return worldBoxViews[view] == true
 end
 
+local function worldBoxProbeRequested()
+  if view == "split" and split.enabled and split.kind == "views" then
+    return split.left == "worldboxprobe" or
+           split.right == "worldboxprobe"
+  end
+  return view == "worldboxprobe"
+end
+
 local function currentTraceDiagnostic()
   if modelComparisonActive() and split.modelView == "modelid" then return 1 end
+  if worldBoxProbeRequested() then return 4 end
   if worldBoxDiagnosticRequested() then return 3 end
   return telemetryRequested() and 2 or 0
 end
@@ -348,6 +357,8 @@ function M.setSplitLeft(requested)
      requested ~= "scene" and split.right ~= "scene" then return false end
   if worldBoxViews[requested] ~= worldBoxViews[split.right] and
      requested ~= "scene" and split.right ~= "scene" then return false end
+  if worldBoxViews[requested] and worldBoxViews[split.right] and
+     requested ~= split.right then return false end
   split.left = requested
   apply()
   return true
@@ -359,6 +370,8 @@ function M.setSplitRight(requested)
      requested ~= "scene" and split.left ~= "scene" then return false end
   if worldBoxViews[requested] ~= worldBoxViews[split.left] and
      requested ~= "scene" and split.left ~= "scene" then return false end
+  if worldBoxViews[requested] and worldBoxViews[split.left] and
+     requested ~= split.left then return false end
   split.right = requested
   apply()
   return true
@@ -407,6 +420,13 @@ function M.compare(left, right, position)
      left ~= "scene" and right ~= "scene" then
     if type(log) == "function" then
       log("E", "BeamRT.Shadow", "World-box diagnostic changes trace encoding; pair with scene only")
+    end
+    return false
+  end
+  if worldBoxViews[left] and worldBoxViews[right] and
+     left ~= right then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "worldbox and worldboxprobe use different encodings; pair either with scene")
     end
     return false
   end
@@ -540,6 +560,7 @@ function M.getStatus()
       detailStrength = hybrid.detailStrength,
       diagnosticOnly = true},
     offscreen = {enabled = offscreenEnabled,
+      probeActive = currentTraceDiagnostic() == 4,
       proxyCasters = worldBoxCasters.getStatus(),
       source = "static TSStatic world-space AABBs, not sun-view depth"},
     split = {enabled = split.enabled, position = split.position,
