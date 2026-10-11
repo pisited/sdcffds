@@ -231,7 +231,15 @@ end
 function M.get(vehicleId) return cache[tonumber(vehicleId)] end
 
 function M.invalidate(vehicleId)
-  if vehicleId ~= nil then cache[tonumber(vehicleId)] = nil else cache = {} end
+  -- SceneDatabase broadcasts a descriptive reason (for example,
+  -- "extension unloaded") to every provider. That is a full cache
+  -- invalidation, not a specific numeric vehicle ID.
+  local id = tonumber(vehicleId)
+  if id ~= nil then
+    cache[id] = nil
+  else
+    cache = {}
+  end
 end
 
 function M.getStats()
