@@ -65,7 +65,7 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v003.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v004.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
     "shaders/beamrt/beamrtSunShadowPreviewP_v002.hlsl",
