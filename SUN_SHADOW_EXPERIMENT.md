@@ -562,3 +562,114 @@ The same shadow trace still runs. A future optimization could gate tracing
 on native coverage after verifying mask semantics, timing, target availability
 and a true early-out. Prematurely skipping rays may miss the chain-link/fine
 detail we are trying to retain.
+
+
+## Off-screen world-space caster proof (trace v010 / preview v010)
+
+**This is a genuine screen-independent geometry experiment, not yet a
+sun-view render pass or full triangle renderer.** It can cast sunlight-shadow
+rays against up to four world-space axis-aligned bounding boxes (AABBs).
+Those boxes persist in BeamRT after a building/TSStatic moves outside the
+main camera frustum. Visible receivers are still reconstructed from the
+camera G-buffer; missing/off-screen receivers cannot be shaded.
+
+There are **no active caster boxes by default**. All old tracing, model
+comparison, telemetry, and hybrid views behave as before until you explicitly
+capture/enter a box. This is diagnostic-only and does not alter BeamRT's
+production main renderer or GI.
+
+### Simplest first test: nearby TSStatic objects
+
+In GE Lua while sitting in a car in the target area:
+
+```lua
+extensions.load("beamrt_shadowRenderer")
+beamrt_shadowRenderer.setQuality("playable")
+local ok, detail = beamrt_shadowRenderer.captureOffscreenNearby(45)
+dump({ok = ok, detail = detail})
+dump(beamrt_shadowRenderer.getStatus().offscreen)
+beamrt_shadowRenderer.compare("scene", "worldbox", 0.5)
+```
+
+`captureOffscreenNearby(radiusMetres)` enumerates TSStatic objects
+**once on request**, selects up to four near the player vehicle whose
+world bounding boxes are plausibly bounded, then enables them. It does
+not rescan every frame. Depending on the map, the nearest boxes may belong to
+road furniture rather than the object you want.
+
+**Cyan** in `worldbox` means a sunlight ray from a camera-visible receiver
+intersected one of the stored *world-space boxes*. Black means it did not.
+Drive or rotate the camera until the **caster itself is off-screen but its
+shadow receiver remains visible**. The cyan should persist while the receiver
+is still in view and the receiver-to-box ray still intersects the box.
+This proves persistence of a supplied world-space caster; it does not prove
+the box matches the object's actual mesh.
+
+### Target one named object
+
+Use a TSStatic name from the BeamNG World Editor's scene tree:
+
+```lua
+local ok, err = beamrt_shadowRenderer.captureOffscreenObject("MY_TSSTATIC_NAME")
+dump({ok = ok, error = err})
+beamrt_shadowRenderer.compare("scene", "worldbox", 0.5)
+```
+
+The command attempts `getWorldBox()` and reads min/max world extents.
+Not all BeamNG builds expose those extents in Lua in the same format.
+If extraction fails, the command returns `false` and a reason. It does
+**not** create or guess geometry.
+
+### Manual test box (world metres)
+
+```lua
+beamrt_shadowRenderer.clearOffscreenBoxes()
+beamrt_shadowRenderer.setOffscreenBox(1, minX, minY, minZ, maxX, maxY, maxZ)
+beamrt_shadowRenderer.setOffscreenEnabled(true)
+beamrt_shadowRenderer.compare("scene", "worldbox", 0.5)
+```
+
+Replace those six placeholders with actual measured world coordinates:
+`minX/minY/minZ` are the lower corner and `maxX/maxY/maxZ` the upper
+corner, with min strictly below max on all axes. Boxes larger than 250m
+on any axis are deliberately rejected. Slots are contiguous, indexed
+1..4; `captureOffscreenObject(name, false)` appends a named caster rather
+than replacing existing boxes.
+
+To observe the coarse world-box occlusion with the normal depth tracer:
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+-- These coarse boxes are now treated as valid occluders in normal traces.
+```
+
+To revert **only** the off-screen geometry while preserving split settings:
+
+```lua
+beamrt_shadowRenderer.setOffscreenEnabled(false)
+-- Or remove captured boxes completely:
+beamrt_shadowRenderer.clearOffscreenBoxes()
+```
+
+### Current limitations and next steps
+
+- **Approximate volumes, not real mesh silhouettes.** A rectangular proxy
+  over a whole fence or complex building can create broad *incorrect*
+  rectangular shadows. Keep it OFF unless diagnosing.
+- **Static objects only.** Moving objects require recapture. We are not yet
+  uploading live-deforming vehicle meshes, forest items, terrain geometry,
+  mesh triangles, or independent sun-view depth textures.
+- **Partial scene coverage.** A maximum of four boxes means these are
+  controlled off-screen-persistence experiments, not a usable map-wide
+  shadow-map replacement.
+- **Performance and correctness.** Every receiver tests at most four
+  additional AABBs when enabled. Actual GPU performance still needs testing.
+- `#sunShadowMask[RT0]` remains the existing BeamNG native mask, with
+  polarity/time semantics not independently validated; this proof does not
+  rely on that mask to find world-box intersections.
+- A full accurate solution needs a verified sun-view render target or
+  proper GPU-accelerated scene triangle/instance data. This experiment
+  establishes the missing screen-independent geometry path first.
+
+`getStatus().offscreen` reports the enabled state, slot count, source,
+and the selected caster names.
