@@ -4,6 +4,9 @@
 local M = {}
 local worldBoxCasters = require("ge/extensions/beamrt/worldBoxCasters")
 local offscreenEnabled = false
+-- Probe v011 showed hits with the reversed engine sun vector. Limit this
+-- correction to opt-in world-box geometry until screen-space is revalidated.
+local offscreenSunDirection = "reversed"
 local TRACE_SHADER = "BeamRT_SunShadowTraceShader"
 local PREVIEW_SHADER = "BeamRT_SunShadowPreviewShader"
 local STATE = "BeamRT_SunShadowState"
@@ -108,7 +111,7 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v011.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v012.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
     "shaders/beamrt/beamrtSunShadowPreviewP_v011.hlsl",
@@ -227,6 +230,8 @@ local function applyTracerConsts(trace, settings, model)
   trace:setShaderConst("$shadowWorldBoxEnabled", offscreenEnabled and 1 or 0)
   trace:setShaderConst("$shadowWorldBoxCount",
     offscreenEnabled and #slots or 0)
+  trace:setShaderConst("$shadowWorldBoxSunSign",
+    offscreenSunDirection == "reversed" and -1 or 1)
   for index = 0, 3 do
     local b = slots[index + 1]
     local lo = b and b.lo or {0, 0, 0}
@@ -502,6 +507,17 @@ function M.setHybridDetailStrength(value)
   return true
 end
 
+-- World-box sunlight polarity, independent from screen-space trace settings.
+-- Does not change the original forward/reversed worldboxprobe channels.
+function M.setOffscreenSunDirection(direction)
+  if direction ~= "normal" and direction ~= "reversed" then
+    return false, "expected 'normal' or 'reversed'"
+  end
+  offscreenSunDirection = direction
+  apply()
+  return true
+end
+
 -- World-space static casters persist after the SOURCE object leaves
 -- the camera frustum. They are coarse AABB proxies, not the real mesh.
 function M.setOffscreenEnabled(enabled)
@@ -560,6 +576,7 @@ function M.getStatus()
       detailStrength = hybrid.detailStrength,
       diagnosticOnly = true},
     offscreen = {enabled = offscreenEnabled,
+      sunDirection = offscreenSunDirection,
       probeActive = currentTraceDiagnostic() == 4,
       proxyCasters = worldBoxCasters.getStatus(),
       source = "static TSStatic world-space AABBs, not sun-view depth"},
