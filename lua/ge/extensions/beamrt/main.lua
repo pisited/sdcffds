@@ -107,6 +107,7 @@ local PROGRESSIVE = {
   cameraCutReason = nil,
   lightingDiagnostic = {mode = 0, name = "off", gain = 4.0},
   lightingAccuracyMode = 1, -- conservative by default; 0 is legacy baseline
+  nativeSunContactEnabled = 0, -- opt-in, requires validation of native RT0.r
   reflectionDiagnostic = {mode = 0, name = "off"},
   reflectionSampling = {mode = 0, name = "mirror", frame = 0, sampleIndex = 0},
   reflectionReconstruction = {mode = 1, name = "playable", frameDelta = 1 / 60},
@@ -142,7 +143,7 @@ local PROGRESSIVE = {
   },
   inputPrep = {
     receiverShaderName = "BeamRT_ReceiverResponseShader",
-    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v001.hlsl",
+    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v002.hlsl",
     receiverEffectName = "BeamRT_ReceiverResponseFx",
     receiverTarget = "#BeamRT_ReceiverResponse",
     auxiliaryShaderName = "BeamRT_AuxiliaryPackShader",
@@ -321,7 +322,7 @@ local REFLECTION_CALLBACKS_NAME = REFLECTION_EFFECT_NAME .. "Callbacks"
 local DEBUG_SHADER_ENTRY = "shaders/beamrt/beamrtDebugP_v011.hlsl"
 local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v081.hlsl"
 local TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtTemporalP_v071.hlsl"
-local COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtLightingComposeP_v079.hlsl"
+local COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtLightingComposeP_v080.hlsl"
 local COPY_SHADER_ENTRY = "shaders/beamrt/beamrtCopyP_v005.hlsl"
 local SURFEL_CACHE_SHADER_ENTRY = "shaders/beamrt/beamrtSurfelCacheP_v062.hlsl"
 local REFLECTION_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTraceP_v041.hlsl"
@@ -1449,6 +1450,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   end
   setIfPresent(COMPOSE_EFFECT_NAME, "$giStrength", giStrength)
   setIfPresent(COMPOSE_EFFECT_NAME, "$lightingAccuracyMode", PROGRESSIVE.lightingAccuracyMode)
+  setIfPresent(COMPOSE_EFFECT_NAME, "$nativeSunContactEnabled", PROGRESSIVE.nativeSunContactEnabled)
   setIfPresent(COMPOSE_EFFECT_NAME, "$contactShadowStrength", contactShadowStrength)
   setIfPresent(COMPOSE_EFFECT_NAME, "$bounceSaturation", bounceSaturation)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giExposure", giExposure)
@@ -1980,7 +1982,7 @@ local function createShaders()
     "prepassDepthTex", "baseColorCacheTex", "metallicCacheTex", "lightInfoTex", "emissiveCacheTex"
   })
   createShader(PROGRESSIVE.inputPrep.receiverShaderName, PROGRESSIVE.inputPrep.receiverShaderEntry, {
-    "backBufferTex", "prepassTex", "receiverLightInfoTex", "receiverMaterialSpecTex", "prepassDepthTex"
+    "backBufferTex", "prepassTex", "receiverLightInfoTex", "receiverMaterialSpecTex", "prepassDepthTex", "sunShadowMaskTex"
   })
   createShader(PROGRESSIVE.inputPrep.auxiliaryShaderName, PROGRESSIVE.inputPrep.auxiliaryShaderEntry, {
     "historyGITex", "historyMomentsTex", "velocityTex", "stbnNoiseTex", "blueNoiseTex", "surfelRadianceTex"
@@ -2232,6 +2234,7 @@ function PROGRESSIVE.inputPrep.createEffects()
   receiver:setField("texture", 2, "#lightinfo[RT0]")
   receiver:setField("texture", 3, "#prepass[RT1]")
   receiver:setField("texture", 4, "#prepass[Depth]")
+  receiver:setField("texture", 5, "#sunShadowMask[RT0]")
   receiver:setField("target", 0, PROGRESSIVE.inputPrep.receiverTarget)
   receiver:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
   receiver:setField("targetScale", 0, "1 1")
@@ -4698,6 +4701,21 @@ function M.setLightingComposeModel(requestedMode)
   return true
 end
 
+function M.setNativeSunContactEnabled(enabled)
+  if type(enabled) ~= "boolean" then
+    beamrtLog("E", "native sun contact toggle requires true or false")
+    return false
+  end
+  PROGRESSIVE.nativeSunContactEnabled = enabled and 1 or 0
+  applyGIShaderConsts()
+  beamrtLog("I", "native sun contact experiment " .. (enabled and "enabled" or "disabled"))
+  return true
+end
+
+function M.getNativeSunContactEnabled()
+  return PROGRESSIVE.nativeSunContactEnabled > 0.5
+end
+
 function M.getLightingComposeModel()
   return PROGRESSIVE.lightingAccuracyMode == 0 and "legacy" or "conservative"
 end
@@ -5370,7 +5388,7 @@ function M.setLightingDiagnostic(value)
   local name = type(value) == "string" and string.lower(value) or ""
   local modes = {off = 0, raw = 1, filtered = 2, contribution = 3, receiver = 4,
     direct = 5, roughness = 6, f0 = 7, reflectance = 8,
-    contact = 9, attenuation = 10, giweight = 11, identity = 12}
+    contact = 9, attenuation = 10, giweight = 11, identity = 12, sunraw = 13}
   if modes[name] == nil then
     beamrtLog("E", "lighting diagnostic must be off, raw, filtered, contribution, receiver, direct, roughness, f0, reflectance, contact, attenuation, giweight, or identity")
     return false
