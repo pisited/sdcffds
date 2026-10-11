@@ -24,6 +24,10 @@
 #undef mainV
 #undef main
 
+#ifdef BEAMRT_SCENE_VISIBILITY_GI
+#include "beamrtGISceneVisibility_v001.h.hlsl"
+#endif
+
 #ifdef SHADER_STAGE_VS
     #define mainV main
 #else
@@ -1409,6 +1413,20 @@ void beamrtTraceLightingSample(
 
             if (visibilityConfidence > 0.0001)
             {
+#ifdef BEAMRT_SCENE_VISIBILITY_GI
+                // A verified opaque blocker between receiver and cached
+                // world surfel forbids bounced light from crossing this path.
+                // Unknown scene geometry never falsely certifies visibility.
+                // This runs only in opt-in v082; existing GI shaders remain
+                // byte-for-byte equivalent in their active instructions.
+                if (sceneVisibilityEnabled > 0.5 &&
+                    beamrtGIBlockedByKnownGeometry(rayOrigin, surfelPosition))
+                {
+                    sampleRadiance = 0.0;
+                    sampleConfidence = 0.0;
+                    return;
+                }
+#endif
                 bounceLinear = beamrtClampRadiance(bounceLinear);
                 float emitterCosine = saturate(dot(surfelNormal, -diffuseDirection));
                 float emitterWeight = lerp(emitterCosine, smoothstep(0.0, 0.15, emitterCosine), estimator);
