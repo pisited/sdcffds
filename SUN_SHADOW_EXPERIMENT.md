@@ -480,3 +480,85 @@ beamrt_shadowRenderer.compare("scene", "classification", 0.5)
 -- or in model A/B:
 beamrt_shadowRenderer.setModelSplitView("classification")
 ```
+
+
+## Native fallback / hybrid shadow diagnostics (preview v009)
+
+**Experimental, debug-only.** The screen-space tracer cannot see casters outside
+the camera depth buffer. The new `hybrid` family uses native
+`#sunShadowMask[RT0]` as the base and allows BeamRT to add **only**
+confidence-gated occlusion. Uncertain/off-screen/no-receiver rays do not
+erase native shadows. Nothing in this change modifies BeamRT's production GI,
+lighting composer, or the game's underlying shadow-map generation.
+
+To activate in the GE Lua console:
+
+```lua
+beamrt_shadowRenderer.setQuality("playable")
+beamrt_shadowRenderer.setHitModel("validated")
+beamrt_shadowRenderer.compare("scene", "hybridscene", 0.5)
+```
+
+`hybridscene` (view 16) previews the *already native-shadowed* backbuffer,
+with up to 35% extra darkness where the BeamRT ray hits confidently and the
+native mask reports sunlight. It NEVER multiplies the native shadow mask into
+the scene a second time. When the BeamRT ray cannot see off-screen casters,
+this returns the unmodified scene, retaining whatever shadows BeamNG rendered.
+This visual enhancement is not a tested production composite and should be
+turned off when not debugging.
+
+For mask-level inspection:
+
+```lua
+beamrt_shadowRenderer.compare("native", "hybrid", 0.5)
+beamrt_shadowRenderer.compare("scene", "hybridweight", 0.5)
+beamrt_shadowRenderer.compare("scene", "hybridsource", 0.5)
+```
+
+- `native` shows raw native mask R (not inverted by hybrid controls).
+- `hybrid` shows native-preserving hybrid visibility, grayscale.
+- `hybridweight` shows eligibility for extra screen-space occlusion, grayscale.
+- `hybridsource` shows red for BeamRT's detail contribution, green for native
+  visibility retained, black where both are low. This is an explanatory
+  source map, not an accurate partition of direct vs indirect lighting.
+- `hybridscene` shows the native-rendered scene plus confidence-gated
+  additional contact/detail darkening **only in preview**.
+
+Native mask R polarity and its actual format/temporal validity have NOT been
+verified. Treat these as provisional screen-space diagnostics and test both
+interpretations against an obvious moving shadow before accepting one.
+
+```lua
+beamrt_shadowRenderer.setHybridNativePolarity("normal")   -- R=1 lit, R=0 shadow
+beamrt_shadowRenderer.setHybridNativePolarity("inverted") -- R=0 lit, R=1 shadow
+beamrt_shadowRenderer.setHybridMinConfidence(0.95)       -- 0..0.999, default .95
+beamrt_shadowRenderer.setHybridDetailStrength(0.35)      -- 0..1, default .35
+dump(beamrt_shadowRenderer.getStatus())
+```
+
+The hybrid formula assumes a visible receiver and an accepted screen-space
+occlusion (`R=0`, sufficient `G`, `N.L>0`), and uses
+`nativeVisibility * (1 - strength * eligible)`. It **never increases**
+native mask visibility, so a disappearing screen-space caster does not
+erase the native fallback. G is only *path coverage*, not a reliable
+probabilistic confidence, so this is deliberately conservative and should
+not yet feed lighting/GI.
+
+`hybridscene` darkens only by `strength * eligible * nativeVisibility`,
+rather than multiplying the already-shadowed scene by native visibility.
+That avoids deterministic double-shadowing of native occlusion, but falsely
+accepted BeamRT hits may still produce extra dark regions. The strength
+parameter limits their visual effect.
+
+To return to unmodified scene/debug:
+
+```lua
+beamrt_shadowRenderer.setView("off")          -- hide preview, keep trace
+beamrt_shadowRenderer.disable()               -- disable trace and preview
+```
+
+**Performance:** native fallback by itself does NOT reduce ray tracing cost.
+The same shadow trace still runs. A future optimization could gate tracing
+on native coverage after verifying mask semantics, timing, target availability
+and a true early-out. Prematurely skipping rays may miss the chain-link/fine
+detail we are trying to retain.
