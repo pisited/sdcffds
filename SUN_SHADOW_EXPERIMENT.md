@@ -673,3 +673,63 @@ beamrt_shadowRenderer.clearOffscreenBoxes()
 
 `getStatus().offscreen` reports the enabled state, slot count, source,
 and the selected caster names.
+
+
+## World-box GPU/bidirectional ray probe (trace v011 + preview v011)
+
+If `compare("scene", "worldbox", 0.5)` remains black even at
+Cinematic quality, do not assume the off-screen geometry system has failed
+or succeeded. Capturing nearby TSStatic world boxes only proves the *Lua*
+side has values, not that they reached the shader or that the sun rays
+actually cross them.
+
+This new diagnostic runs **before** the normal backface and screen
+projection culling, and probes sunlight in **both orientations**:
+
+```lua
+beamrt_shadowRenderer.setQuality("cinematic")
+local ok, result = beamrt_shadowRenderer.captureOffscreenNearby(45)
+dump({ok = ok, result = result})
+beamrt_shadowRenderer.compare("scene", "worldboxprobe", 0.5)
+```
+
+The right half is an explicit RGB diagnostic:
+
+- **Red background**: GPU tracer received enabled world-box constants,
+  a positive count, and valid ordered extents for the first box
+- **Yellow pixels** (red + green): a camera-visible receiver's world-space
+  ray hits a stored box in BeamRT's currently assumed sun direction
+- **Magenta pixels** (red + blue): ray hits a box when the sun vector is
+  **reversed**; these diagnose possible sunlight vector polarity mismatch
+- **White pixels**: both forward and reversed rays intersect boxes
+- **Black everywhere**: the shader did not report a valid enabled box;
+  investigate uniform binding, target scheduling, or shader compilation
+  rather than changing ray distance again
+- **Red only, with no yellow/magenta**: box state is present, but the
+  tested rays in neither direction intersect the chosen boxes. This
+  may reflect their locations, the camera origin reconstruction, or
+  ray distance. It does **not** imply the GPU never received the boxes.
+
+This probe deliberately labels sky red too, so it remains visible even
+when the prepass has no receiver pixel. It does NOT add shadows or change
+which direction the normal renderer uses. It is a diagnostic shader
+output, not a correct scene-lighting result.
+
+The older `worldbox` view remains available and still reports only
+normal-direction intersections, after surface-facing rejection.
+Because `worldboxprobe` and `worldbox` encode their shader target
+differently, pair each with `scene` in split-screen rather than putting
+them on opposite halves.
+
+After the diagnostic, return to normal classification (without world-box
+probe overrides):
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+-- or disable the bounding-box experiment entirely:
+beamrt_shadowRenderer.setOffscreenEnabled(false)
+```
+
+Neither this diagnostic nor the current four-box prototype solves
+fine-mesh off-screen shadowing; that still requires accurate sun-view
+geometry or a scene-triangle representation.
