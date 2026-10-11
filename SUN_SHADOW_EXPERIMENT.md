@@ -108,3 +108,50 @@ dump(beamrt_shadowRenderer.getStatus())
    irradiance sampling at GI hit points.
 
 This test preserves the existing GI, GGX, and lighting composer untouched.
+
+## Live split-screen diagnostic (preview v003)
+
+No extra render pass is required. Both halves are composited from the **same
+frame** using the existing shadow target, native sun mask, and backbuffer.
+
+```lua
+beamrt_shadowRenderer.compare("classification", "difference", 0.5)
+beamrt_shadowRenderer.compare("beamrt", "native", 0.5)
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+```
+
+`compare(left, right, position)` enables the shadow renderer if needed, then
+activates split mode. Position is optional and defaults to the saved position
+(initially 0.5). You can change views and divider settings live:
+
+```lua
+beamrt_shadowRenderer.setSplitLeft("scene")
+beamrt_shadowRenderer.setSplitRight("native")
+beamrt_shadowRenderer.setSplitPosition(0.35)        -- 35% from viewport left
+beamrt_shadowRenderer.setSplitLineWidth(3.0)        -- pixels; 0 to hide
+beamrt_shadowRenderer.setSplitLineColor(1,1,0,1)   -- yellow RGBA 0..1
+beamrt_shadowRenderer.setSplitEnabled(false)       -- restore prior normal view
+```
+
+Other selectable sides: `visibility`, `coverage`, `incidence`, `sun`,
+`identity`. `beamrt` aliases `visibility`; neither `off` nor `split`
+is valid as one of the two split inputs. If any argument is invalid, the
+setter returns false without changing the split selection.
+
+`beamrt_shadowRenderer.setView("split")` enables the saved split pair,
+whereas `setView("classification")` or any other ordinary view exits split
+mode. `setView("off")` hides the entire preview without stopping shadow
+tracing. `getStatus().split` reports the current selections and divider.
+
+A side displaying `scene` returns the existing native/BeamRT-composited
+backbuffer, **not** a separately preserved original render if other BeamRT
+effects have already modified the scene. These diagnostic comparisons do not
+change any shadow or GI illumination.
+
+### Split review checklist
+- Try `compare("scene","classification",0.5)` first to confirm the divider
+  and both sides update when moving the camera.
+- Then `compare("beamrt","native",0.5)`, keeping the camera stationary.
+- Finally `compare("classification","difference",0.5)`.
+- Do not treat differences as proof that either renderer is more physically
+  correct until the native sun mask encoding and ray confidence are verified.
