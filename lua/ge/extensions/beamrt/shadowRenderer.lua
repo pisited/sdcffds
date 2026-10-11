@@ -19,7 +19,7 @@ local views = {
   scene = 8, split = 9,
 }
 local quality = "playable"
-local hitModel = "refined" -- legacy (v004) or refined (v005), same tracing budget
+local hitModel = "validated" -- legacy (v004), refined (v005), validated (v006)
 local view = "off"
 local active = false
 local split = {
@@ -90,7 +90,7 @@ local function makeObjects()
   end
 
   makeShader(TRACE_SHADER,
-    "shaders/beamrt/beamrtSunShadowTraceP_v005.hlsl",
+    "shaders/beamrt/beamrtSunShadowTraceP_v006.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
     "shaders/beamrt/beamrtSunShadowPreviewP_v003.hlsl",
@@ -139,7 +139,8 @@ local function apply()
     trace:setShaderConst("$shadowRayDistance", settings.distance)
     trace:setShaderConst("$shadowNormalBias", settings.bias)
     trace:setShaderConst("$shadowThickness", settings.thickness)
-    trace:setShaderConst("$shadowHitModel", hitModel == "refined" and 1 or 0)
+    trace:setShaderConst("$shadowHitModel",
+      hitModel == "legacy" and 0 or (hitModel == "refined" and 1 or 2))
     trace:setShaderConst("$shadowRefineSteps", settings.refineSteps)
   end
   if preview then
@@ -191,12 +192,12 @@ function M.setQuality(requested)
   return true
 end
 
--- Toggle identical tracing inputs and budgets to compare the v004 hit rule
--- against the refined depth-bracket solver. This does not run two GPU passes.
+-- Models use the same main tracing budget. Only candidate refinement /
+-- neighborhood validation differs. No additional full-screen GPU pass.
 function M.setHitModel(requested)
-  if requested ~= "legacy" and requested ~= "refined" then
+  if requested ~= "legacy" and requested ~= "refined" and requested ~= "validated" then
     if type(log) == "function" then
-      log("E", "BeamRT.Shadow", "Expected hit model 'legacy' or 'refined'")
+      log("E", "BeamRT.Shadow", "Expected 'legacy', 'refined', or 'validated'")
     end
     return false
   end
