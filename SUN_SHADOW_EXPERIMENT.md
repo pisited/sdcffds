@@ -341,3 +341,33 @@ Use Playable while moving the camera, then Cinematic for static inspection.
 
 This is experimental GitHub code and still requires a shader compilation and
 render-order test inside BeamNG. No changes to production lighting/GI.
+
+## Unweighted model disagreement (preview v005)
+
+The original model-split `difference` view multiplies differences by BOTH
+tracers' coverage confidence and surface incidence. A black pixel may mean
+"same result" or "not trustworthy enough to show."
+
+Use **rawdifference** to compare raw shadow visibility R values without that
+confidence suppression:
+
+```lua
+beamrt_shadowRenderer.compareModels("validated", "refined", 0.5)
+beamrt_shadowRenderer.setModelSplitView("rawdifference")
+```
+
+- **Black:** both tracers returned the same 0/1 visibility value.
+- **Red:** left model reports occlusion, right model does not.
+- **Green:** right model reports occlusion, left model does not.
+- All red/green locations include **low-confidence or invalid receivers**:
+  do not treat raw disagreements as verified shadows.
+- Switch back with `setModelSplitView("difference")` to suppress untrusted
+  pixels, or `setModelSplitView("coverage")` to inspect confidence on each
+  side of the divider.
+- Both algorithms are still executed on independent full-frame targets, and
+  rawdifference does not change any shading/geometry/tracing logic.
+
+If rawdifference is also largely black while both classification views share
+the same false red patches, the cause probably lies in their common underlying
+sun-ray/depth reconstruction or the limitations of screen-space geometry,
+not the later validation filters.
