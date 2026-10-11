@@ -121,6 +121,93 @@ function M.traceSegment(origin,target,options)
                           "terrain","alpha textures","unobserved light sources"}
   return evidence
 end
+-- Public scene contract: small read-only normalized snapshots, without
+-- retaining engine objects, invalid userdata handles or huge native buffers.
+-- Geometry does NOT imply material alpha has been sampled on the GPU.
+local function textValue(v)
+  if v==nil then return nil end
+  local text=tostring(v)
+  return text~="" and text or nil
+end
+local function materialCandidate(fields)
+  fields=fields or {}
+  local opacity=textValue(fields.opacityMap)
+  local alpha=tonumber(fields.alphaRef) or 0
+  local translucent=tostring(fields.translucent or ""):lower()
+  local blended=translucent=="1" or translucent=="true"
+  if opacity or alpha>0.001 then return "needs-alpha-test" end
+  if blended then return "potentially-transparent" end
+  return "unknown-opacity"
+end
+function M.getMaterialCandidate(name)
+  local record=materialProvider.get and materialProvider.get(name)
+  if not record then return {name=tostring(name),available=false,
+                            alphaDecision="unknown-opacity"} end
+  local fields=record.fields or {}
+  return {name=record.name,available=true,
+    alphaDecision=materialCandidate(fields),
+    alphaTexture=textValue(fields.opacityMap),
+    alphaRef=tonumber(fields.alphaRef),
+    baseColorMap=textValue(fields.baseColorMap or fields.diffuseMap),
+    emissiveMap=textValue(fields.emissiveMap),
+    normalMap=textValue(fields.normalMap),
+    doubleSided=textValue(fields.doubleSided),
+    opaqueVerified=false}
+end
+function M.getSnapshot(limit)
+  local cap=math.max(1,math.min(64,math.floor(tonumber(limit) or 16)))
+  local snapshot={
+    schema=1,worldCoordinateSystem="BeamNG world metres",
+    complete=false,visibilitySemantics="blocked/possible-blocker/unknown",
+    triangles=triangleStore.getTriangles(),
+    boxes=boxStore.getSlots(),materials={},lights={},staticInstances={},
+    coverage={staticMeshTrianglesImported=false,
+      vehicleMeshTrianglesImported=false,forestMeshTrianglesImported=false,
+      terrainTrianglesImported=false,alphaTexturesSampled=false,
+      nativeSunShadowMapIntegrated=false}
+  }
+  local matRecords=materialProvider.getRecords and materialProvider.getRecords() or {}
+  local lightRecords=lightProvider.getRecords and lightProvider.getRecords() or {}
+  local staticRecords=staticProvider.getInstances and staticProvider.getInstances() or {}
+  for i=1,math.min(cap,#matRecords) do
+    snapshot.materials[i]=M.getMaterialCandidate(matRecords[i].name)
+  end
+  for i=1,math.min(cap,#lightRecords) do
+    local l=lightRecords[i]
+    snapshot.lights[i]={name=textValue(l.name),type=l.type,
+      source=l.source or "sceneLight",
+      position=vec(l.position),direction=vec(l.direction),
+      range=tonumber(l.range or l.radius),
+      intensity=tonumber(l.intensityCd or l.intensity),
+      castShadows=textValue(l.castShadows),
+      enabledStateVerified=l.enabledStateVerified == true,
+      visibilityGeometryComplete=false}
+  end
+  for i=1,math.min(cap,#staticRecords) do
+    local obj=staticRecords[i]
+    snapshot.staticInstances[i]={name=textValue(obj.name),
+       assetKey=textValue(obj.assetKey),hasWorldBox=obj.worldBox~=nil,
+       trianglesImported=false}
+  end
+  snapshot.totals={materials=#matRecords,lights=#lightRecords,
+    staticInstances=#staticRecords,triangles=#snapshot.triangles,
+    boxes=#snapshot.boxes}
+  snapshot.truncated=(#matRecords>cap or #lightRecords>cap or
+                      #staticRecords>cap)
+  return snapshot
+end
+function M.selfTest()
+  -- Non-mutating synthetic triangle in Z=0 plane: vertical light segment
+  -- should hit it; an offset segment should miss. This tests the CPU math,
+  -- not HLSL compilation or the renderer's input-binding behavior.
+  local face={a={0,0,0},b={1,0,0},c={0,1,0}}
+  local good=hitTriangle({0.2,0.2,1},{0,0,-1},2,face)
+  local miss=hitTriangle({3,3,1},{0,0,-1},2,face)
+  return {cpuIntersection=good~=nil and math.abs(good-1)<1e-6,
+          cpuMiss=miss==nil,doesNotTestGPU=true,
+          status="synthetic math checks only"}
+end
+
 function M.getStats()
   local tris=triangleStore.getTriangles()
   local modes={opaque=0,mask=0,blend=0,unknown=0}
