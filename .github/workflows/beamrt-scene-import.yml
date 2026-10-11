@@ -46,6 +46,8 @@ jobs:
         run: python -B tools/tests/test_underground_prepare.py
       - name: Syntax check all offline tools and test fixtures
         run: python -m compileall -q tools
+      - name: Critical renderer source ABI and Lua compilation-budget checks
+        run: python -B tools/tests/test_renderer_contracts.py
   lua-contracts:
     runs-on: ubuntu-latest
     steps:
