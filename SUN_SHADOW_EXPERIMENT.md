@@ -733,3 +733,65 @@ beamrt_shadowRenderer.setOffscreenEnabled(false)
 Neither this diagnostic nor the current four-box prototype solves
 fine-mesh off-screen shadowing; that still requires accurate sun-view
 geometry or a scene-triangle representation.
+
+
+## Selectable off-screen caster sun direction (trace v012)
+
+The v011 GPU probe produced visible **magenta** intersections, which means
+the four uploaded world-space boxes were struck by rays using the **reversed**
+engine `sunDirection`. This is evidence for a direction mismatch in the
+world-box experiment, not proof that every screen-space shadow uses the
+wrong vector.
+
+**Trace v012 fixes the world-box path only:** its default is now
+`reversed` when box tracing is explicitly enabled. A new shader uniform,
+`$shadowWorldBoxSunSign`, selects `-sunDirection` for boxes while the
+existing camera-depth algorithm continues to use its original `sunDirection`.
+The world-box ray test **and its receiver N dot L check** use the same
+selected vector, and run before the screen-space tracer's original
+backface/derivative early exits.
+
+No boxes are activated until a user captures or enters them. Production
+lighting/GI are untouched. The world-box masks are **still coarse AABB
+proxies** and may cover incorrect broad areas.
+
+After updating and reloading the extension:
+
+```lua
+beamrt_shadowRenderer.setQuality("cinematic")
+local ok, result = beamrt_shadowRenderer.captureOffscreenNearby(45)
+dump({ok = ok, result = result})
+beamrt_shadowRenderer.setOffscreenSunDirection("reversed") -- default in v012
+beamrt_shadowRenderer.compare("scene", "worldbox", 0.5)
+dump(beamrt_shadowRenderer.getStatus().offscreen)
+```
+
+The right half should show **cyan** where the selected world-space box ray
+intersects a visible, sun-facing receiver. Rotate the camera or move until
+the chosen box's original scene object is out of view but the receiver remains
+visible, and check that cyan remains.
+
+An immediate comparison without recapturing boxes:
+
+```lua
+beamrt_shadowRenderer.setOffscreenSunDirection("normal")   -- old behavior
+beamrt_shadowRenderer.setOffscreenSunDirection("reversed") -- experimental fix
+```
+
+You can also return to `compare("scene", "worldboxprobe", 0.5)`;
+this diagnostic always shows **both raw orientations** as yellow/magenta,
+unaffected by the selector. That lets us confirm the GPU binding independently
+of the new receiver-facing guard.
+
+To include coarse persistent box occlusion in the *diagnostic* classification
+view:
+
+```lua
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+```
+
+This remains an opt-in approximation. A proper off-screen shadow renderer
+still needs actual mesh geometry or verified sun-view depth, not 4 boxes.
+If `worldbox` is still black after reversing, inspect the selected box
+locations and the receiver-normal facing test rather than assuming the GPU
+uniforms vanished.
