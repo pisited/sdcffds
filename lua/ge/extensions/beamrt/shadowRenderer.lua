@@ -19,7 +19,7 @@ local views = {
   off = -1, classification = 0, visibility = 1, beamrt = 1, coverage = 2,
   incidence = 3, native = 4, difference = 5, sun = 6, identity = 7,
   scene = 8, split = 9, hitdistance = 10, deptherror = 11, selfplane = 12,
-  hybrid = 13, hybridweight = 14, hybridsource = 15,
+  hybrid = 13, hybridweight = 14, hybridsource = 15, hybridscene = 16,
 }
 local hitModels = {legacy = 0, refined = 1, validated = 2, geometric = 3}
 local modelSplitViews = {classification = 0, visibility = 1, coverage = 2,
@@ -107,7 +107,7 @@ local function makeObjects()
     "shaders/beamrt/beamrtSunShadowTraceP_v009.hlsl",
     {"prepassTex", "prepassDepthTex"})
   makeShader(PREVIEW_SHADER,
-    "shaders/beamrt/beamrtSunShadowPreviewP_v008.hlsl",
+    "shaders/beamrt/beamrtSunShadowPreviewP_v009.hlsl",
     {"shadowDataTex", "backBufferTex", "nativeSunTex", "compareShadowDataTex"})
 
   if not find(TRACE_FX) then
