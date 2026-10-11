@@ -243,3 +243,41 @@ dump(beamrt_shadowRenderer.getStatus())
 Avoid integrating this shadow target into lighting/GI until its screen-space
 confidence, thin-geometry behavior, and native-mask interpretation have been
 validated in-game. It still cannot trace hidden/off-screen shadow casters.
+
+## Geometric self-shadow rejection (trace v007)
+
+The **optional** `geometric` hit model specifically tests a case that v006
+depth-neighborhood validation cannot distinguish: the ray may re-intersect
+the receiver's own continuous surface (road, sidewalk, wall), producing a
+solid red false shadow even though adjacent depth pixels agree.
+
+```lua
+beamrt_shadowRenderer.setHitModel("validated") -- v006 baseline
+beamrt_shadowRenderer.setHitModel("geometric") -- v007 plane-aware checks
+```
+
+The new mode reconstructs the candidate caster's eye-relative position and
+G-buffer normal. If its normal closely matches the receiver's and its
+position is almost coplanar with the receiver, the candidate is rejected as
+an unreliable same-surface intersection. Unverified hits reduce coverage
+confidence rather than being described as fully sunlit. The mode also uses
+a wider 1.5-screen-pixel neighborhood radius to avoid checking the same
+point-sampled depth texel repeatedly; the old validated mode retains its
+original behavior for A/B comparison.
+
+This is still a screen-space *heuristic*, not proof of separate mesh identity.
+It may reject a genuinely close, parallel caster; it cannot discover geometry
+missing from the camera depth buffer. Treat remaining red as candidate shadow
+hits, not yet trustworthy enough for GI.
+
+Quick same-camera comparison:
+
+```lua
+beamrt_shadowRenderer.setQuality("cinematic")
+beamrt_shadowRenderer.compare("scene", "classification", 0.5)
+beamrt_shadowRenderer.setHitModel("validated") -- screenshot 1
+beamrt_shadowRenderer.setHitModel("geometric") -- screenshot 2
+```
+
+The default after reload remains `validated`; the new model is opt-in.
+Its shader must still compile and be visually checked in BeamNG.
