@@ -42,6 +42,8 @@ local function objectIdentity(object)
 end
 
 local function objectClass(object)
+  local tagOk,tag=pcall(function()return object.___type end)
+  if tagOk and type(tag)=='string'and tag~=''then return tag:match('^class<([^>]+)>$')or tag end
   local ok, className = safeCall(object and object.getClassName, object)
   return ok and tostring(className) or nil
 end
@@ -144,14 +146,7 @@ local function resolveVehicle(vehicleId)
   return nil
 end
 
-local function collectVehicleLights(options)
-  if options.includeVehicleLights == false then return {}, nil end
-  local vehicleId = tonumber(options.vehicleId)
-  if not vehicleId and be and type(be.getPlayerVehicleID) == "function" then
-    local idOk, id = safeCall(be.getPlayerVehicleID, be, tonumber(options.playerIndex) or 0)
-    if idOk then vehicleId = tonumber(id) end
-  end
-  if not vehicleId then return {}, "player vehicle is unavailable" end
+local function collectOneVehicleLights(vehicleId)
   if not core_vehicle_manager or type(core_vehicle_manager.getVehicleData) ~= "function" then
     return {}, "core_vehicle_manager.getVehicleData is unavailable"
   end
@@ -188,13 +183,15 @@ local function collectVehicleLights(options)
         position = worldPosition,
         direction = directionOk and direction or nil,
         color = prop.lightColor,
-        brightness = tonumber(prop.lightBrightness) or 0,
+        -- Constructor defaults in jbeam/sections/meshs.lua, not live emission.
+        brightness = tonumber(prop.lightBrightness) or 1,
         intensityCd = tonumber(prop.lightIntensityCd) or tonumber(prop.cd) or 0,
         intensityLm = tonumber(prop.lightIntensityLm) or 0,
-        range = tonumber(prop.lightRange) or 0,
-        innerAngle = tonumber(prop.lightInnerAngle) or 0,
-        outerAngle = tonumber(prop.lightOuterAngle) or 0,
-        castShadows = prop.lightCastShadows,
+        range = tonumber(prop.lightRange) or 10,
+        innerAngle = tonumber(prop.lightInnerAngle) or 40,
+        outerAngle = tonumber(prop.lightOuterAngle) or 45,
+        castShadows = prop.lightCastShadows or false,
+        shadowPolicySource = prop.lightCastShadows==nil and 'native constructor default: no shadows' or 'JBeam declaration',
         attenuation = prop.lightAttenuation,
         enabled = nil,
         enabledStateVerified = false,
@@ -202,6 +199,64 @@ local function collectVehicleLights(options)
     end
   end
   return lights
+end
+
+local function xyz(value)
+  if not value then return nil end
+  local ok,x,y,z=pcall(function()return tonumber(value.x or value[1]),tonumber(value.y or value[2]),tonumber(value.z or value[3])end)
+  if not ok or not x or not y or not z or x~=x or y~=y or z~=z
+    or math.abs(x)==math.huge or math.abs(y)==math.huge or math.abs(z)==math.huge then return nil end
+  return {x,y,z}
+end
+
+local function collectVehicleLights(options)
+  if options.includeVehicleLights==false then return {},nil,{mode='disabled',vehicles=0}end
+  local explicit=tonumber(options.vehicleId)
+  -- An explicit vehicle remains a scoped query for existing callers. Otherwise
+  -- enumerate nearby real vehicles, NOT only the currently controlled avatar.
+  local ids,selection={},{mode='nearby',vehicles=0,selectionIndependentOfControlledVehicle=true}
+  if explicit then ids={explicit};selection.mode='explicit';selection.selectionIndependentOfControlledVehicle=false
+  else
+    local radius=tonumber(options.vehicleLightRadius)or 80
+    local cap=tonumber(options.maxVehicleLightVehicles)or 8
+    if radius~=radius or radius<1 or radius>500 or cap~=cap or cap%1~=0 or cap<1 or cap>16 then
+      return {},'invalid nearby vehicle-light radius/cap',{mode='invalid',vehicles=0}
+    end
+    local eyeOk,eye=safeCall(core_camera and core_camera.getPosition)
+    eye=eyeOk and xyz(eye)or nil
+    local allOk,vehicles=safeCall(getAllVehicles)
+    if eye and allOk and type(vehicles)=='table'then
+      local candidates,seen={},{}
+      for _,vehicle in pairs(vehicles)do
+        local idOk,id=safeCall(vehicle and vehicle.getID,vehicle)
+        local posOk,pos=safeCall(vehicle and vehicle.getPosition,vehicle)
+        id=idOk and tonumber(id)or nil;pos=posOk and xyz(pos)or nil
+        if id and pos and not seen[id]then
+          seen[id]=true;local distance=0
+          for i=1,3 do distance=distance+(pos[i]-eye[i])^2 end
+          if distance<=radius*radius then candidates[#candidates+1]={id=id,distance=distance}end
+        end
+      end
+      table.sort(candidates,function(a,b)return a.distance==b.distance and a.id<b.id or a.distance<b.distance end)
+      for i=1,math.min(cap,#candidates)do ids[#ids+1]=candidates[i].id end
+      selection.radius=radius;selection.cap=cap;selection.candidates=#candidates
+      selection.capped=#candidates>cap
+    else
+      -- Compatibility fallback is explicitly reported, not called mode-stable.
+      local idOk,id=safeCall(be and be.getPlayerVehicleID,be,tonumber(options.playerIndex)or 0)
+      if idOk and tonumber(id)then ids={tonumber(id)}end
+      selection.mode='player fallback';selection.selectionIndependentOfControlledVehicle=false
+      selection.warning='nearby vehicle enumeration/camera position unavailable'
+    end
+  end
+  local records,warnings={},{}
+  for _,id in ipairs(ids)do
+    local lights,why=collectOneVehicleLights(id)
+    for _,record in ipairs(lights)do records[#records+1]=record end
+    if why then warnings[#warnings+1]='vehicle '..tostring(id)..': '..why end
+  end
+  selection.vehicles=#ids
+  return records,#warnings>0 and table.concat(warnings,'; ')or selection.warning,selection
 end
 
 function M.rebuild(options)
@@ -237,7 +292,7 @@ function M.rebuild(options)
   end
 
 
-  local vehicleLights, vehicleLightWarning = collectVehicleLights(options)
+  local vehicleLights, vehicleLightWarning, vehicleSelection = collectVehicleLights(options)
   for _, record in ipairs(vehicleLights) do
     nextRecords[#nextRecords + 1] = record
     nextById[record.id] = record
@@ -262,6 +317,7 @@ function M.rebuild(options)
     unresolvedOrRejected = unresolved,
     buildSeconds = os.clock() - started,
     vehicleLightsIncluded = vehicleLightCount > 0,
+    vehicleSelection = vehicleSelection,
     vehicleEnabledStateVerified = false,
     feedsRayTracer = false,
   }

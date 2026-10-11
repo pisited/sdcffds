@@ -12,12 +12,15 @@ import re
 
 NATIVE = 'shaders/common/lighting/advanced/vectorLightP.hlsl'
 INSERT = '    float Sat_NL_Att = saturate(dotNL * unshadowed) * lightBrightness * lastFrameExposure;'
+MODES = {'hybrid':0,'beamrt-only':1,'unshadowed':2,'split':3}
 
-def generate(source):
+def generate(source,mode='hybrid'):
+    if mode not in MODES:raise ValueError('Unsupported sunlight comparison mode')
     source = source.replace('\r\n', '\n')
     for token in (INSERT, 'LightBufferOutput main(FarFrustumQuadConnectP IN)',
                   'const float3 worldPos = perspectiveDiv(mul(screenToWorldPos0, float4(posNdc, 1))).xyz;',
-                  'unshadowed = sunShadowMaskTex.Load(int3(IN.hpos.xy, 0)).r;'):
+                  'unshadowed = sunShadowMaskTex.Load(int3(IN.hpos.xy, 0)).r;',
+                  '    float unshadowed = 1.0;', '    unshadowed *= cloudCookie;'):
         if source.count(token) != 1:
             raise ValueError('Unsupported native vector-light contract: '+token)
     if re.search(r'register\s*\(\s*[ts]14\s*\)|beamrtMeshSun', source):
@@ -29,11 +32,15 @@ def generate(source):
         source = source.replace(old, '#include "shaders/common/lighting/advanced/'+name+'"')
     source = source.replace('LightBufferOutput main(FarFrustumQuadConnectP IN)',
         '#include "shaders/beamrt/beamrtMeshSunHook.h.hlsl"\n\nLightBufferOutput main(FarFrustumQuadConnectP IN)')
-    return source.replace(INSERT,
+    source=source.replace('    float unshadowed = 1.0;',
+        '    float beamrtCloudVisibility = 1.0;\n    float unshadowed = 1.0;')
+    source=source.replace('    unshadowed *= cloudCookie;',
+        '    unshadowed *= cloudCookie;\n    beamrtCloudVisibility = cloudCookie;')
+    return '#define BEAMRT_SUN_COMPARISON '+str(MODES[mode])+'\n'+source.replace(INSERT,
         '    // BEAMRT: retain native shadows; reject only additional definite mesh blockers.\n'
         '    // Thin/transmitting receiver shading remains native.\n'
         '    if (subsurfaceIntensity <= 0.0)\n'
-        '        unshadowed = min(unshadowed, beamrtMeshSunFactor(IN.hpos, worldPos));\n\n'+INSERT)
+        '        unshadowed = beamrtResolveSunVisibility(unshadowed, beamrtCloudVisibility, IN.hpos, worldPos);\n\n'+INSERT)
 
 def prepare(game_root, mod_root):
     game_root,mod_root=Path(game_root).resolve(),Path(mod_root).resolve()
@@ -49,14 +56,19 @@ def prepare(game_root, mod_root):
         if re.search(r'(?:uniform_sampler\w*\([^\n]*,\s*14\s*\)|register\s*\(\s*[ts]14\s*\))',text):
             raise ValueError('Native dependency already occupies slot14')
         dependencies[path]=text
-    digest=hashlib.sha256(generated.encode()).hexdigest()[:16]
+    hook_path='shaders/beamrt/beamrtMeshSunHook.h.hlsl'
+    dependencies[hook_path]=(mod_root/hook_path).read_text(encoding='utf-8').replace('\r\n','\n')
     folder=mod_root/'shaders/beamrt/generated';folder.mkdir(parents=True,exist_ok=True)
-    shader=folder/('beamrtVectorLight_'+digest+'.hlsl')
-    shader.write_text(generated,encoding='utf-8')
-    manifest={'schema':'beamrt.native.sun.hook.v1','nativePath':NATIVE,
+    variants={}
+    for mode in MODES:
+        text=generate(source,mode)
+        digest=hashlib.sha256((text+dependencies[hook_path]).encode()).hexdigest()[:16]
+        shader=folder/('beamrtVectorLight_'+digest+'.hlsl');shader.write_text(text,encoding='utf-8')
+        variants[mode]={'shaderPath':'shaders/beamrt/generated/'+shader.name,'generatedSource':text}
+    manifest={'schema':'beamrt.native.sun.hook.v2','nativePath':NATIVE,
         'nativeSource':source,'dependencies':dependencies,
-        'shaderPath':'shaders/beamrt/generated/'+shader.name,
-        'generatedSource':generated,'gpuExecutionVerified':False}
+        'shaderPath':variants['hybrid']['shaderPath'],
+        'generatedSource':generated,'variants':variants,'gpuExecutionVerified':False}
     (folder/'nativeSunHook.json').write_text(json.dumps(manifest),encoding='utf-8')
     return manifest
 

@@ -1318,6 +1318,20 @@ Search for `BeamRT`, `v012`, `beamrtSurfelCache`, `beamrtGITrace`, `compile`, an
 
 ## Scope boundary
 
+### v0.104 real-mesh sunlight integration (opt-in)
+
+v0.105 corrects vehicle-light acquisition across driving/walking and replaces the
+unsafe cached-shader filename swap with private shader objects/material rebinding.
+These are implementation fixes, **not verified headlight/sewer shadow fixes**.
+See [scope, evidence and next integration milestone](LIGHT_VISIBILITY_V0105.md).
+
+The guardhouse BVH now has an actual native direct-sun shading hook, not only a
+colored preview. Native shadows remain; unknown/alpha materials fall back. GI/SSR
+algorithms are preserved. Default OFF; GPU execution, off-screen appearance and
+cost remain unverified. See [implementation and one normal-render activation](MESH_SUN_SHADOW_MILESTONE.md).
+The native hook is generated privately from the local installation; its source
+is not included in Git and must be prepared when moving to another PC/game version.
+
 Phase 4 intentionally departs from v0.004's single-pass design because previous-frame data requires persistent intermediate targets. All added objects and targets are uniquely BeamRT-prefixed and are removed when the extension unloads. No base-game files are changed.
 
 Phase 5's geometry bridge, oriented-box refinement, sparse detailed-raycast surfels, radiance validation, exact hybrid coverage, and v0.012 persistent-radiance implementation gate are accepted. v0.020 reflections are staged for their first in-game gate. The accepted screen-only GI renderer remains selectable through `setGISource("screen")`. Native DX12/DXR work has not started.

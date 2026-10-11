@@ -4508,3 +4508,131 @@ activation:save/reloadmain+unloadoldmeshBVH,applytuning,enable,HYBRID+world.35
 explicitly,enableguard+dumpstatus. No debugviews/camera/time/vehiclechange. Scope
 onebuilding/worldGI only;noSSRnoise/nativecubemap/wholemapclaim. NextalphaUVtexture
 queries +moreinstances,thenselective native-preserving light/shadow integration.
+
+## 124. Oct 11: v0.104 selective native direct-sun mesh integration
+
+User explicitly authorized actual shadows, not further classification tools.
+Reviewed installed native vectorLightP/farFrustum headers, Lua CustomMaterial
+samplers and material-editor reload; AL_LightBin name confirmed in installed binary.
+One three-input full-res deterministic BVH pass runs BEFORE AL_LightBin. Target
+R32F XYZ receiver identity/W=2 definite opaque blocker; other cases W=1 fallback.
+Native direct-sun helper t14 verifies dimensions/pixel/world identity (1 cm) and
+only min-combines into native visibility BEFORE direct diffuse/specular shading.
+Native shadow/cloud/SSS stays; subsurface receiver path excluded. No final-color
+multiply, local-light/emissive/cubemap patch, random rays or filter added.
+
+Private generator copies installed pixel source, preserves native math, validates
+specific call/include contracts and free t14, content-addresses filename, records
+original/dependency/generated source. Files under shaders/beamrt/generated ignored.
+Installed files untouched. Enable compares actual VFS sources, requires native
+AL_VectorLightShader/material APIs, refuses existing mod ownership, reloads only
+chosen objects. Disable/stale/missions/unload restore original fields, no foreign
+mutation overwrite. Main v104 UI/disable/unload integration; defaultOFF/unpersisted.
+CastShadows=false excluded independently of GI opacity. Old loaded policy records
+supported; no alignment/camera repeat. Current native copy prepared locally.
+
+9 Lua lifecycle/control +4 generator tests pass; retained25GI/motion+5BVH+23packing
+pass. Lua51/JIT55 compilation passes; strict visibilityVSPS+8nativePS permutations
+pass. GPU reload/binding/pre-light scheduling, receiver agreement, reflection-view
+fallback, shadows/offscreen retention/FPS unverified. No whole-map/soft-shadow/
+alpha/dynamic/forward support claimed. Target~52.9MiB at2560x1353 plus bandwidth.
+
+ONE normal daytime render command in MESH_SUN_SHADOW_MILESTONE.md:
+extensions.load("beamrt_meshSunShadow"); dump(beamrt_meshSunShadow.enable()).
+Normal image; compare disable, rotate caster offscreen keeping receiver onscreen.
+Nighttime deliberately not fake-lit. If no effect inspectexistinglog first; do not
+retest wire/CPUselfTest. Next real milestone additionalinstances+alpha thenGI light
+visibility after firstliveintegrationfix. User external commit1d07902 observed
+midwork andpreserved; noassistantGitwrites/pulls/pushes performed.
+
+## 125. First live v104 activation: native Material-wrapper API mismatch fixed
+
+User screenshot actualmesh40430/776faces/1196edges, all8materialnames rejected
+nonstandard,opaque0,enablefalse. This is BEFORE anynativehook/shadow execution,
+not evidence ofbadGPUrays. InstalledmaterialEditor.lua:792 andeditor/api/material.lua
+use___type==class<Material>. Ourpolicy incorrectlyassumed getClassName method.
+Implementednativewrapperidentityfirst,legacymethodfallbackonlywithouttag;
+CustomMaterialknown-tag cannotbypass. Fieldreadwithinpcall, incompleteopacity
+lognowcontainsvalues. No opacitydefaults/guessing/alphaoverride changed.6newLua
+policytests+9sun+25GI regressionspass,Lua51/JIT55compilepass. Samev104bugfix.
+
+Running policyrequirecached;final/docsonecommandunloadSun+BVH,clearpolicyrequire,
+loadSun+enable. DoNOTunloadalignment orrepeatgeometry/camera. Normalclassification
+expected, actualopaque counts/nativehookexecutionunverified. Ifnewerrorinspect it
+directly. Nextmilestone stillnormalrealshadow+offscreen retention,theninstances/alpha.
+
+## 126. Second live v104 activation: remove irrelevant color-alpha gate
+
+Userlogpostclassfix:opaque0/mask4/blend2/unknown2. corrugated_modern andmetal_galvanized
+explicit alphaTestfalse/translucentfalse, colorAlphanil; other6retainfallback.
+Samecommandrepeated1641/1657 unchanged. Nativepermutations181-228 confirmsalpha
+clipping gatedbyMFT_AlphaTest, separatetranslucentpath; coloralphaaccessor absence
+doesnotmeanunknowncoverage whenbothnativeflags explicitfalse. Fixedpolicycriteria
+toallowthese2withcolorAlphastillnil,noassumedvalue,no8facesopaquebypass. Known
+fractionalalpha stillconservativefallback; truly missingflags/custom/mapTo mismatch
+stayunknown.8policyfixtures inclactualobservedflaglayout+9sun+25GIpass,Lua51/JIT55
+compilepass. Docs samecache-reloadactivation,expected2opaque4mask2blend0unknown.
+No newdebugshader/opacityprobe; nextnormalnativehookexecution thenoffscreen shadow.
+
+## 127. User-requested native geometric sunlight isolation / comparison
+
+User saysnativeexterior shadowsalreadygood, obscuresBeamRTcontribution; goaldark
+interiorsnotglobalbrightnesschange. AddedtemporarynativeSun comparisonhybrid/
+beamrt-only/split/unshadowed. Normalhybriddefaultpreserved. Othermodesbypassnative
+geometricSun onvalidmainreceivers;cloud/localshadows/ambient/IBL/emissive remain.
+Unknown/transmitting/invalid/mismatch reflectionreceiversfallbacknative. Shaderhelper
+tracksnativecloudseparately; one sharedtrace;splitLEFTnative/RIGHTBeamRTonly,not2
+wholeGI/SSRrenders. Existingworldboxdiagnosticcompareunmodified. Tunerbuttonsadded.
+
+Generatorv2private4hashvariants includeshelpersourceinchecks/digest. Luaownsall4
+pathsforrestore/conflictdetection. Disable/stale/mission/unload/resetrestoreoriginal
+nativeandcomparisonhybrid. Invalidtrace/clearW0 vsvalidclear1/blocked2 guards
+isolation. Latestactualuserscreenshoterror isrextensions extra r,no reload ran.
+Final/docsmultilinecorrectactivationreloadSun+BVH+policy,selectbeamrt-only,enable.
+DoNOTretestalignment. Restore:disable. Max2meaningfultests:1normalisolation/split;
+2ONLYifneededunshadowedcontrol. Controlunchanged->fixbinding/receivercontract;
+controlworksbutnoBeamRTshadow->fixquery/coverage. No more generic probes.
+
+12sunLua/5generator/8policy/retained25GIpass;32nativePS+visibilityVSPS strictFXC,
+Lua51/JIT55pass. ActualnativeGPUactivation/appearance unverified. Latestobserved
+2opaque4masked2blended (inferredpostfix,notconfirmedruntime). No blanketopacity.
+Nextarchitecturemilestonealpha-awarecoverage+skyambient+indirectvisibility forone
+building;sunshadowalonecannotmakeinteriorpitchblack. Preservelegitimatewindow/
+lamp/emissive/bounce lighting. NoassistantGitwrites/installedfilestouched.
+
+## 128. v105: driving/walking observation; real defects fixed without new tests
+
+User identifiescarcontrolvswalkmode, notonlycamera; orangebleedstillwrong. New
+day/nightsewer andpartitionheadlight screenshots arecurrentreproreferences;no
+furthersamehypothesistests requested. NativeSun beamrt-only+unshadowed lookedsame;
+recordtheseasfailedisolation,CPUenabled notGPUproof. Latestlogexplicitdisable3220
+restoresnative. PNG256x28skipcookingnotGPUresourcefailureproof; donotPOT-pad and
+triggerlossycookingofpackedbytes. Failedtracerinstallationnotignored.
+
+InspectednativecameraUpdatechangesSunSDSMrange .5vs1 andinteriorSSAO .5vs1.5;
+NOTproofofheadlightmodecause. Jbeamsections/meshs.lua activeconstructor default
+lightCastShadowsfalse; props.updateGFX ownsemissions/cache/blinkstate. DoNOTfull
+setLightArgs blindlywithbasebrightness; thatcanforceofflampON/manglelivecolors.
+
+FixedBeamRTlightProvider defaultonlyplayervehicle acquisition:nearest8vehicles/
+80mcameraradius,getAllVehicles nativeAPI(verifiedveToolbar),scopeexplicitvehicleId
+preserved. Radiuscapfailure/capped/playerfallbackreported,falseGPUfeeds/liveactive
+unknown flagsretained. NativePoint/Spot___type accepted. Recordknownconstructor
+defaultsmetadata only;noactualnativeLight/state/shadowsetterwrites.8Luafixturespass
+avatar-switch/removal/wrapper/cap/fallback/positions/noLightmutations. Thisisdata
+acqdefectfix,NOTnativeheadlightbugfix.
+
+FoundupstreamshaderData.cpp macros-keyedcachedprogramlookup +reloadoldGFXpaths;
+BeamNGforksamebehaviorinference only, butoldnativeShaderfilename mutation unsafe.
+M.meshSunShadow nowcreatesfreshprivateShaderDatapergeneratedhashwithVtx/Pixel/
+defines/samplerNames0..14 BEFOREregister, rebindsNativeCustomMaterial.shader+
+reloadmaterial. OriginalShaderData/cache nevermodified. Disable/failure restores
+origMaterialShader/sampler,ownedclonesonlycleanup,foreignchangespreserved. Independent
+unshadowedcontrol returnscloudvisibilitybeforemeshRelayguard;normalmodeskeepguards.
+MainVERSION105.13sunLua fixtures modelcachedpathandnewmaterialbinding;retained25GI+
+5generatorpass;32nativePS/Lua51JIT55compilepass. NativeGPUexecappearanceunverified.
+
+LIGHT_VISIBILITY_V0105.md records5cycleitems. NextsmallcompleteSliceactualsewer
+mesh+localLight/skyambientvisibility. CandidateWCUsteel_factory_sewer01..06/
+underground01..02foundarchive;notmatchedlive/GPUnotimported. No new in-game
+commands or tests thiscycle. NoassistantGitwrites/pulls/pushes,installedfilesuntouched.

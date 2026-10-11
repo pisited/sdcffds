@@ -12,7 +12,7 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.104"
+local VERSION = "0.105"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -6628,6 +6628,12 @@ local function drawTuningWindow()
       if not ok then beamrtLog("E",tostring(why)) end
     end
     tuningTooltip("Opt-in full guardhouse mesh in native direct-sun shading. Native shadows/reflections/emissive remain intact; unknown/alpha materials retain fallback. Full receiver resolution; GPU cost not yet measured.")
+    if im.Button("Compare native / BeamRT sun shadows") then
+      local ok,why=M.setMeshSunShadowComparison('split');if not ok then beamrtLog('E',tostring(why)) end
+    end
+    im.SameLine()
+    if im.Button("Restore hybrid sun shadows") then M.setMeshSunShadowComparison('hybrid') end
+    tuningTooltip("Same-frame direct-sun comparison: LEFT native shadows, RIGHT BeamRT-only mesh shadows. Not two independent GI/reflection renders. Ambient, local-light shadows and cloud lighting remain unchanged. Disable restores native shading.")
     if M.getMeshSunShadowStatus().error then im.TextUnformatted("Mesh sun: "..M.getMeshSunShadowStatus().error) end
     im.PopItemWidth()
   end
@@ -7102,6 +7108,7 @@ end
 
 function M.setMeshSunShadowsEnabled(value)
   if type(value)~='boolean' then return false,'enabled must be boolean' end
+  if not extensions then return not value,'extensions unavailable' end
   if value and not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
   local shadow=extensions.beamrt_meshSunShadow
   if not shadow then return not value,'mesh sunlight integration unavailable' end
@@ -7109,8 +7116,17 @@ function M.setMeshSunShadowsEnabled(value)
   return shadow.disable()
 end
 function M.getMeshSunShadowStatus()
-  local shadow=extensions.beamrt_meshSunShadow
+  local shadow=extensions and extensions.beamrt_meshSunShadow
   return shadow and shadow.getStatus() or {enabled=false}
+end
+function M.setMeshSunShadowComparison(value)
+  if not extensions then return false,'extensions unavailable' end
+  if not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
+  local shadow=extensions.beamrt_meshSunShadow
+  if not shadow or type(shadow.setComparisonMode)~='function' then return false,'reload meshSunShadow for comparison controls' end
+  local ok,why=shadow.setComparisonMode(value);if not ok then return false,why end
+  if not shadow.getStatus().enabled then return shadow.enable() end
+  return true,shadow.getStatus()
 end
 
 function M.captureVehicleGeometry(vehicleId)

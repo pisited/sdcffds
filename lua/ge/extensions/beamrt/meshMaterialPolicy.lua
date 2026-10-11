@@ -2,9 +2,21 @@
 -- Alpha-tested/blended/custom/unresolved materials retain native fallback.
 local M={}
 local function field(object,name)
-  local ok,value=pcall(object.getField,object,name,0)
+  local ok,value=pcall(function()return object:getField(name,0)end)
   if ok and value~=nil and value~='' then return tostring(value) end
   return nil
+end
+-- BeamNG's materialEditor/editor.api.material use the LuaIntf ___type tag.
+-- Material wrappers need not expose the SimObject getClassName method.
+-- A known non-Material wrapper cannot bypass the check via a legacy fallback.
+local function nativeClass(object)
+  local ok,tag=pcall(function()return object.___type end)
+  if ok and type(tag)=='string'and tag~=''then
+    return tag:match('^class<([^>]+)>$')or tag,'___type'
+  end
+  local classOk,class=pcall(function()return object:getClassName()end)
+  if classOk and type(class)=='string'then return class,'getClassName'end
+  return nil,'native class identity unavailable'
 end
 local function boolean(value)
   if value=='0' or value=='false' then return false end
@@ -23,8 +35,9 @@ function M.capture(names)
     local record={name=name,mode=0,reason='material unresolved'}
     local ok,object=pcall(scenetree.findObject,name)
     if ok and object then
-      local classOk,class=pcall(object.getClassName,object)
-      if classOk and class=='Material' then
+      local class,source=nativeClass(object)
+      record.nativeClass=class;record.classIdentitySource=source
+      if class=='Material' then
         local mapTo=field(object,'mapTo')
         local alphaTest=boolean(field(object,'alphaTest'))
         local translucent=boolean(field(object,'translucent'))
@@ -34,10 +47,16 @@ function M.capture(names)
         if mapTo and mapTo~=name then record.reason='material mapTo does not match imported identity'
         elseif alphaTest==true then record.mode=2;record.reason='alpha-test texture required; native fallback'
         elseif translucent==true or colorAlpha and colorAlpha<.999 then record.mode=3;record.reason='transparency requires transmission; native fallback'
-        elseif alphaTest==false and translucent==false and colorAlpha and colorAlpha>=.999 then
-          record.mode=1;record.reason='live native Material declares opaque'
-        else record.reason='incomplete native opacity declaration' end
-      else record.reason='nonstandard Material class unsupported' end
+        elseif alphaTest==false and translucent==false then
+          -- Native processVisibility clips opacity only in MFT_AlphaTest;
+          -- blending is selected by the translucent render path. A missing
+          -- color-alpha accessor is not missing surface-coverage information.
+          -- Do not invent an alpha value: retain nil and use the explicit
+          -- native non-alpha-tested, non-translucent declarations instead.
+          record.mode=1;record.reason='live native Material declares opaque coverage (alphaTest=false, translucent=false)'
+        else record.reason=string.format('incomplete native opacity declaration: alphaTest=%s translucent=%s colorAlpha=%s',
+          tostring(alphaTest),tostring(translucent),tostring(colorAlpha)) end
+      else record.reason='unsupported native class: '..tostring(class or source) end
     end
     record.shadowMode=record.fields and record.fields.castShadows==false and 0 or record.mode
     result.modes[i]=record.mode;result.records[i]=record
