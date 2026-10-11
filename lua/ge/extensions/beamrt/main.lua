@@ -6925,6 +6925,7 @@ function M.setSceneVisibilityGIEnabled(enabled)
   M.sceneGIVisibility.enabled=enabled
   M.sceneGIVisibility.revision=-1
   applyGIShaderConsts(true)
+  resetTemporalHistory("opaque scene visibility changed", false)
   beamrtLog("I", "GI opaque-triangle visibility " ..
     (enabled and "enabled (experimental)" or "disabled"))
   return true
