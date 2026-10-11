@@ -189,7 +189,10 @@ def parse_geometry(mesh, geom_id, bindings, scale, up, triangle_limit):
                         raise ValueError("position has less than XYZ")
                     vs.append(orient(original, scale, up))
                     if uv is not None and uv[1] in sources:
-                        t = sources[uv[1]][entry[uv[2]]]
+                        ti = entry[uv[2]]
+                        if ti < 0:
+                            raise ValueError("negative texture coordinate index")
+                        t = sources[uv[1]][ti]
                         us.append([t[0], t[1]] if len(t) >= 2 else None)
             except (IndexError, KeyError, ValueError):
                 note("bad source index")

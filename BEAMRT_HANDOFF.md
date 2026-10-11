@@ -4368,3 +4368,46 @@ denoiser-only cause. Nextverify actualcomposer/source routing with explicit
 namedGI-lit target and positive signal before blindfilter or repeat audit.
 No gameplayedit. v101/source-2026-10-10-analysis.md +work/source-quantify.py
 record displayprecision/ROI limits. Latestuserdone expects review findings.
+
+## 120. Oct 11: user-authorized real building alignment stage
+
+User supplied PR #2 and full hybrid renderer goal, then explicitly authorized
+taking over the one-real-building alignment milestone. Clean experimental branch
+fast-forwarded cbc592b -> f03d45d (no checkout switch, commit or push). Later
+implementation is uncommitted. Preserve user branch and experimental shaders.
+
+Read installed WCU ZIP: real guardhouse.dae visual node guardhouse_L150 selected,
+776 triangles /776 UV faces, 8 material refs,255 offline BVH nodes. Seven unique
+candidate engine Material configs resolved across WCU+art_shapes ZIPs; construction
+unresolved. Every alphaMode staysunknown. Generated art/beamrt/alignment package
+is Gitignored private game-derived data. Original game archives unchanged.
+
+New tools/beamrt_scene_align.py bakes actual active visual-node ancestor transforms
+before unit/axis conversion; excludes siblingLOD and collisionmeshes, preserves
+node/geometry/material provenance, rejects unsupported/partial source. Original
+importer gains negativeUVindex rejection. Khronos spec verified row-major text /
+column-vector postmultiplication. No triangle decimation to old12cap.
+
+New meshPlacement.lua uses native MatrixF.mulP3F on scaledunitpoints plus control
+points /getColumn evidence, not parsedMatrixFstrings. >2mm affine discrepancy
+rejected; visualalignment remainsfalse. sceneAssetManifest captures native basis
+as optionalJSONsafe metadata with expliciterror ifunavailable.
+
+New standalone meshAlignment.lua loadsprivate package, selectsnearest matching
+guardhouse (notarbitrarynearestbuilding), transforms allfacesonce, drawsbounded
+orange actualmesh edges/materialrefcolors. Neverchanges GI/shadow/reflection/
+physics/camera. Objecttransform/shapechange/removal marksstale; cameramotiondoesnot.
+HumanconfirmAlignment explicitly recordsvisualevidence; noautomaticGPUproof.
+Worldmesh export preservesall776 faces,unknownopacity,flags; NOT old12uniformload.
+
+14 Python regressiontests +6 importerchecks pass;6 actual-Lua fixtures pass;
+nativeLua51/JIT55 compile checks pass. ExistingmainFOVchecks pass. No newHLSL.
+CIworkflow extended offline tests,notpushed/runremote. In-gamepreview notyetloaded
+byassistant; pendinguserGEcmd: extensions.load("beamrt_meshAlignment");
+beamrt_meshAlignment.previewNearest(); dump(beamrt_meshAlignment.getStatus()).
+Sourcecachedregistry priornil stillmustrefresh ifmainfeaturesused; thispreview
+is independent and requiresno mainreload. MESH_ALIGNMENT_MILESTONE.md/README
+explain selectiondistance and futureGPUupload/alpha/shadowpersistence limits.
+Optional focusPreview/restoreCamera added using verified core_camera free APIs;
+only explicit commands move camera, nevervehicle. Missionchange dropsoldcamera
+snapshot. Seventh Lua fixture verifies focus only explicit and mode restore.

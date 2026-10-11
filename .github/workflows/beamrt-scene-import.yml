@@ -3,10 +3,14 @@ on:
   push:
     paths:
       - "tools/beamrt_scene_import.py"
+      - "tools/beamrt_scene_align.py"
+      - "tools/tests/test_scene_align.py"
       - ".github/workflows/beamrt-scene-import.yml"
   pull_request:
     paths:
       - "tools/beamrt_scene_import.py"
+      - "tools/beamrt_scene_align.py"
+      - "tools/tests/test_scene_align.py"
       - ".github/workflows/beamrt-scene-import.yml"
 jobs:
   validate:
@@ -22,3 +26,5 @@ jobs:
         run: python -m py_compile tools/beamrt_scene_import.py
       - name: Collada and BVH self-test
         run: python tools/beamrt_scene_import.py --self-test
+      - name: Node selection, transforms, material evidence and BVH regression tests
+        run: python -B tools/tests/test_scene_align.py

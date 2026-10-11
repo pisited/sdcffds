@@ -56,6 +56,7 @@ local function parseInstance(obj,token)
   local scale,scaleRaw=roundedVectorOrString(obj,"getScale")
   local _,transformRaw=roundedVectorOrString(obj,"getTransform")
   local _,worldBoundsRaw=roundedVectorOrString(obj,"getWorldBox")
+  local placement,placementError=require("ge/extensions/beamrt/meshPlacement").capture(obj)
   return {
     name=identity(obj,"getName") or tostring(token),
     id=scalar(method(obj,"getID")),
@@ -67,6 +68,7 @@ local function parseInstance(obj,token)
     materialHint=safeText(member(obj,"material")),
     materialsHint=safeText(member(obj,"materials")),
     positionField=safeText(member(obj,"position")),
+    nativePlacement=placement,placementError=placementError,
     -- materialHint is metadata only; TSStatic may have per-submesh
     -- materials that require Collada instance bind_material resolution.
     -- MATRIX CONVENTION IS NOT VERIFIED. Never use transformRaw to place

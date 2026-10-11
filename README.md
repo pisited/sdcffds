@@ -1,3 +1,26 @@
+# BeamRT v0.102 — real building alignment preview
+
+The next geometry milestone is implemented: a selected real West Coast guardhouse
+visual mesh, node-transform-aware extraction, material references, native instance
+placement and an isolated wireframe alignment check. No GI/shadow/reflection changes
+are activated. Actual in-game alignment and GPU mesh tracing remain unverified.
+
+In GE Lua while parked in West Coast USA:
+
+```lua
+extensions.load("beamrt_meshAlignment"); beamrt_meshAlignment.previewNearest(); dump(beamrt_meshAlignment.getStatus())
+```
+
+The nearest **prepared guardhouse** instance is selected; it may not be in the
+current view. Orange edges are real mesh triangles, not box shadows. Hide with
+`beamrt_meshAlignment.setMode("off")`, or clear with `beamrt_meshAlignment.clear()`.
+Optional `beamrt_meshAlignment.focusPreview()` takes only the free camera to it;
+`beamrt_meshAlignment.restoreCamera()` returns to the previous camera mode.
+Details, private package reproduction, evidence and limits:
+[MESH_ALIGNMENT_MILESTONE.md](MESH_ALIGNMENT_MILESTONE.md).
+
+---
+
 # BeamRT v0.101 — reflection source isolation
 
 No new denoiser or claimed noise fix. Tests original SSR input, native-only color,
