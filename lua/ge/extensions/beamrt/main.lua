@@ -6942,6 +6942,33 @@ function M.getSceneVisibilityGIStatus()
   return status
 end
 
+-- CPU inspection path for GI light-source visibility. This does not
+-- override native direct lighting: it reports available segment evidence,
+-- including uncertain alpha geometry and unimported scene limitations.
+function M.auditWorldSurfelLightPath(surfelIndex, lightIndex)
+  local i=tonumber(surfelIndex) or 1
+  local j=tonumber(lightIndex) or 1
+  if i%1~=0 or j%1~=0 or i<1 or j<1 then
+    return {status="invalid",error="indices must be positive integers"}
+  end
+  local surfel=surfels[i]
+  if not surfel then return {status="unavailable",error="world surfel not cached at index "..i} end
+  local lightProvider=sceneDatabase.getProvider("lights")
+  local light=(lightProvider.getRecords() or {})[j]
+  if not light or not light.position then
+    return {status="unavailable",error="light position not in provider cache at index "..j}
+  end
+  local provider=sceneDatabase.getProvider("visibility")
+  local evidence=provider.traceSegment(surfel.position,light.position,
+                                        {includeApproximateBoxes=true})
+  evidence.surfelIndex=i
+  evidence.lightIndex=j
+  evidence.lightType=light.type
+  evidence.lightName=light.name
+  evidence.directLightingModified=false
+  return evidence
+end
+
 function M.querySceneVisibility(fromWorld,toWorld,opts)
   local provider=sceneDatabase.getProvider("visibility")
   return provider.traceSegment(fromWorld,toWorld,opts)
