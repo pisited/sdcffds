@@ -173,7 +173,7 @@ def material_evidence(archives, candidates):
             for name,hits in found.items()},examined
 
 
-def extract_selected(root, node_name, limit=200000):
+def extract_selected(root, node_name, limit=200000, allow_non_surface_lines=False):
     records=walk(active_scene(root))
     matches=[r for r in records if r[0].get('id') == node_name or r[0].get('name') == node_name]
     if len(matches) != 1:
@@ -202,6 +202,12 @@ def extract_selected(root, node_name, limit=200000):
             new,warnings=mesh.parse_geometry(geometry_mesh,gid,material_bindings(root,instance),
                                             1.,'Z_UP',limit-len(faces))
             for warning,count in warnings.items():
+                if allow_non_surface_lines and warning in ('unsupported primitive lines','unsupported primitive linestrips'):
+                    # Lines have no surface area in the triangle-visibility model.
+                    # Record this explicit scope; never ignore unsupported surfaces.
+                    key='non-surface '+warning.removeprefix('unsupported primitive ')
+                    skipped[key]=skipped.get(key,0)+count
+                    continue
                 if warning != 'degenerate triangle':
                     raise ValueError('refusing partial selected geometry: '+warning)
                 skipped[warning]=skipped.get(warning,0)+count
@@ -233,12 +239,12 @@ def bake_basis(faces, basis):
     return result
 
 
-def prepare(archive, asset, node, output, limit=200000, material_archives=()):
+def prepare(archive, asset, node, output, limit=200000, material_archives=(), allow_non_surface_lines=False):
     if not 1<=limit<=200000:
         raise ValueError('triangle limit must be 1..200000')
     name=asset_name(asset)
     root,data=read_asset(archive,name)
-    faces,meta=extract_selected(root,node,limit)
+    faces,meta=extract_selected(root,node,limit,allow_non_surface_lines)
     names={f['materialNameCandidate'] for f in faces if f['materialNameCandidate']}
     materials,examined=material_evidence([archive]+list(material_archives),names)
     bounds=mesh.build_bvh(faces)
