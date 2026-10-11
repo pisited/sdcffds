@@ -346,6 +346,8 @@ function M.setSplitLeft(requested)
   -- One trace can't output both telemetry and visibility simultaneously.
   if telemetryViews[requested] ~= telemetryViews[split.right] and
      requested ~= "scene" and split.right ~= "scene" then return false end
+  if worldBoxViews[requested] ~= worldBoxViews[split.right] and
+     requested ~= "scene" and split.right ~= "scene" then return false end
   split.left = requested
   apply()
   return true
@@ -354,6 +356,8 @@ end
 function M.setSplitRight(requested)
   if not validComparisonMode(requested) then return false end
   if telemetryViews[requested] ~= telemetryViews[split.left] and
+     requested ~= "scene" and split.left ~= "scene" then return false end
+  if worldBoxViews[requested] ~= worldBoxViews[split.left] and
      requested ~= "scene" and split.left ~= "scene" then return false end
   split.right = requested
   apply()
@@ -396,6 +400,13 @@ function M.compare(left, right, position)
      left ~= "scene" and right ~= "scene" then
     if type(log) == "function" then
       log("E", "BeamRT.Shadow", "Use two telemetry modes together or pair one with scene")
+    end
+    return false
+  end
+  if worldBoxViews[left] ~= worldBoxViews[right] and
+     left ~= "scene" and right ~= "scene" then
+    if type(log) == "function" then
+      log("E", "BeamRT.Shadow", "World-box diagnostic changes trace encoding; pair with scene only")
     end
     return false
   end
@@ -471,6 +482,51 @@ function M.setHybridDetailStrength(value)
   return true
 end
 
+-- World-space static casters persist after the SOURCE object leaves
+-- the camera frustum. They are coarse AABB proxies, not the real mesh.
+function M.setOffscreenEnabled(enabled)
+  if type(enabled) ~= "boolean" then return false, "enabled must be boolean" end
+  offscreenEnabled = enabled
+  apply()
+  return true
+end
+
+function M.clearOffscreenBoxes()
+  worldBoxCasters.clear()
+  offscreenEnabled = false
+  apply()
+  return true
+end
+
+function M.setOffscreenBox(index, minX, minY, minZ, maxX, maxY, maxZ)
+  local ok, err = worldBoxCasters.set(index,
+    minX, minY, minZ, maxX, maxY, maxZ)
+  if ok then
+    offscreenEnabled = true
+    apply()
+  end
+  return ok, err
+end
+
+function M.captureOffscreenObject(name, replace)
+  if replace == nil then replace = true end
+  local ok, err = worldBoxCasters.captureObject(name, replace)
+  if ok then
+    offscreenEnabled = true
+    apply()
+  end
+  return ok, err
+end
+
+function M.captureOffscreenNearby(radius)
+  local ok, result = worldBoxCasters.captureNearby(radius)
+  if ok then
+    offscreenEnabled = true
+    apply()
+  end
+  return ok, result
+end
+
 function M.getStatus()
   return {enabled = active, quality = quality, view = view, target = TARGET,
     hitModel = hitModel, refineSteps = modes[quality].refineSteps,
@@ -483,6 +539,9 @@ function M.getStatus()
       minConfidence = hybrid.minConfidence,
       detailStrength = hybrid.detailStrength,
       diagnosticOnly = true},
+    offscreen = {enabled = offscreenEnabled,
+      proxyCasters = worldBoxCasters.getStatus(),
+      source = "static TSStatic world-space AABBs, not sun-view depth"},
     split = {enabled = split.enabled, position = split.position,
       kind = split.kind, left = split.left, right = split.right,
       modelLeft = split.modelLeft, modelRight = split.modelRight,
