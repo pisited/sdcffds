@@ -11,6 +11,12 @@ The current build does not link or call the capture or GI adapter. Building this
 slice does not establish graphics-device access, safe game-thread interception,
 actual GI pass identity or any lighting improvement.
 
+Update: the DLL now includes a dormant [post-loader device observer](DEVICE_OBSERVER.md).
+Only an explicit host call outside loader-lock work initializes it. Startup
+insertion itself still performs no graphics initialization. Hardware/WARP
+disposable fixtures observed actual creation outputs and resource ownership;
+the corresponding BeamNG initialization/thread handoff is still unverified.
+
 ## Files and default behavior
 
 - `launcher.cpp`: Windows x64 host. No arguments show help. Normal configuration
@@ -85,7 +91,7 @@ close it normally and start BeamNG through its original startup route. Removing
 the bootstrap file while it is loaded is **not** hot-unloading. No safe live
 hook detach or in-game OFF restoration is claimed by this inert bootstrap.
 
-The remaining host work must establish device acquisition outside loader-lock
+The remaining BeamNG host work must establish device acquisition outside loader-lock
 work, an actual safe thread handoff, early resource observation, the real GI
 shader/root manifest, CBV ownership/contents, frame freshness, resource lifetimes,
 submission ordering and compatible output consumption. Loading this bootstrap
@@ -102,7 +108,7 @@ alone does not establish any of those conditions. Capture/GI remain disabled.
   hashes and intended working directory without launching it. SHA-256 output is
   cross-checked with PowerShell's independent file hash implementation.
 - Review mode rejects an incorrect DLL hash and a DLL passed as the target EXE.
-- Full Python/Lua source/regression suite passes **149/149**.
+- Full Python/Lua source/regression suite passes **153/153**.
 - Explicitly authorized disposable-process testing passes **9/9** cases. This
   includes actual DLL insertion/receipt and target entry, exact Unicode/empty/
   quote/backslash arguments and directory preservation, hash refusal before a

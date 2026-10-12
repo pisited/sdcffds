@@ -1,4 +1,5 @@
 #include "startup_contract.h"
+#include "entry_contract.h"
 #include <detours.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -59,6 +60,13 @@ struct LockedFile {
             && (nt.FileHeader.Characteristics&IMAGE_FILE_EXECUTABLE_IMAGE)
             && bool(nt.FileHeader.Characteristics&IMAGE_FILE_DLL)==dll,"review host requires an x64 EXE and x64 DLL");
     }
+    uint32_t nativeEntryRva() const {
+        IMAGE_DOS_HEADER dos{};at(0,&dos,sizeof(dos));IMAGE_NT_HEADERS64 nt{};at(static_cast<uint32_t>(dos.e_lfanew),&nt,sizeof(nt));
+        demand(!nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress
+            && nt.OptionalHeader.AddressOfEntryPoint && nt.OptionalHeader.AddressOfEntryPoint<nt.OptionalHeader.SizeOfImage,
+            "native entry rendezvous does not support CLR/missing/out-of-image entry points");
+        return nt.OptionalHeader.AddressOfEntryPoint;
+    }
     std::wstring sha256() const {
         struct HashOwner {
             BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
@@ -96,6 +104,7 @@ static std::wstring printable(const std::wstring& text) {
 }
 struct Options {
     bool launch=false;
+    bool entry=false;
     std::wstring target,dll,workdir,targetHash,dllHash,ack;
     std::vector<std::wstring> arguments;
 };
@@ -110,6 +119,7 @@ static Options parse(const std::vector<std::wstring>& args) {
         if(flag==L"--"){out.arguments.assign(args.begin()+i+1,args.end());break;}
         demand(!seen[flag],"duplicate startup option");seen[flag]=true;
         if(flag==L"--launch-reviewed"){out.launch=true;continue;}
+        if(flag==L"--entry-rendezvous"){out.entry=true;continue;}
         if(flag==L"--review")continue;
         demand(i+1<args.size(),"startup option missing value");const auto value=args[++i];
         if(flag==L"--target")out.target=localPath(value);
@@ -136,10 +146,10 @@ static std::string asciiDll(const std::wstring& path) {
 }
 struct Attributes {
     std::vector<uint8_t> storage;LPPROC_THREAD_ATTRIBUTE_LIST list=nullptr;
-    explicit Attributes(HANDLE* event){SIZE_T bytes=0;InitializeProcThreadAttributeList(nullptr,1,0,&bytes);
+    explicit Attributes(HANDLE* events,SIZE_T count){SIZE_T bytes=0;InitializeProcThreadAttributeList(nullptr,1,0,&bytes);
         demand(bytes>0,"startup attribute size unavailable");storage.resize(bytes);list=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
         win(InitializeProcThreadAttributeList(list,1,0,&bytes),"initialize startup attributes");
-        if(!UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,event,sizeof(*event),nullptr,nullptr)){
+        if(!UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,events,count*sizeof(*events),nullptr,nullptr)){
             const DWORD error=GetLastError();DeleteProcThreadAttributeList(list);list=nullptr;SetLastError(error);win(FALSE,"restrict inherited handles");}
     }
     ~Attributes(){if(list)DeleteProcThreadAttributeList(list);}
@@ -157,7 +167,8 @@ static void fixtureFault(const Options& options,const std::wstring& target,const
 static int launchReviewed(const Options& options,const LockedFile& exe,const LockedFile& dll,const std::wstring& workdir) {
     // Called only by the explicit reviewed-launch branch, never by review/self-test.
     SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};Handle event(CreateEventW(&security,TRUE,FALSE,nullptr));
-    win(event.value!=nullptr,"startup receipt event");Attributes attributes(&event.value);
+    win(event.value!=nullptr,"startup receipt event");Handle entryEvent(options.entry?CreateEventW(&security,TRUE,FALSE,nullptr):nullptr);
+    if(options.entry)win(entryEvent.value!=nullptr,"entry receipt event");HANDLE events[]={event.value,entryEvent.value};Attributes attributes(events,options.entry?2:1);
     STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(startup);startup.lpAttributeList=attributes.list;
     auto command=commandLine(options,exe.path);std::vector<wchar_t> mutableCommand(command.begin(),command.end());mutableCommand.push_back(0);
     PROCESS_INFORMATION process{};
@@ -174,6 +185,11 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
         BeamRTStartupPayload payload{sizeof(payload),1,beamrtStartupMagic,process.dwProcessId,beamrtStartupObservationOnly,
             static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(event.value)),{0,0}};
         win(DetourCopyPayloadToProcess(process.hProcess,beamrtStartupGuid,&payload,sizeof(payload)),"copy startup receipt payload");
+        if(options.entry){
+            BeamRTEntryPayload entry{sizeof(entry),1,beamrtEntryMagic,process.dwProcessId,process.dwThreadId,
+                static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(entryEvent.value)),exe.nativeEntryRva(),0};
+            win(DetourCopyPayloadToProcess(process.hProcess,beamrtEntryGuid,&entry,sizeof(entry)),"copy entry rendezvous payload");
+        }
         fixtureFault(options,exe.path,L"before-resume");
         const DWORD previous=ResumeThread(process.hThread);
         if(previous!=DWORD(-1))resumeAttempted=true;
@@ -183,7 +199,13 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
         if(result!=WAIT_OBJECT_0){std::wcerr<<L"No startup receipt (wait="<<result<<L"). Child PID "<<process.dwProcessId
             <<L" is NOT terminated after resume. No renderer activation attempted.\n";return 2;}
         std::wcout<<L"Startup bootstrap receipt received. BeamRT capture=OFF; BeamRT GPU work=OFF; lighting=UNCHANGED.\n"
-            <<L"This proves DLL attach only, not game pass/resource access or stable rendering.\n";return 0;
+            <<L"This proves DLL attach only, not game pass/resource access or stable rendering.\n";
+        if(options.entry){
+            HANDLE entryWaits[]={entryEvent.value,process.hProcess};const DWORD entryResult=WaitForMultipleObjects(2,entryWaits,FALSE,15000);
+            if(entryResult!=WAIT_OBJECT_0){std::wcerr<<L"No native-entry receipt (wait="<<entryResult<<L"); resumed child is retained.\n";return 3;}
+            std::wcout<<L"Native-entry rendezvous receipt received. This is not graphics quiescence or GI proof.\n";
+        }
+        return 0;
     }catch(...){
         // Only the new child, still suspended and never allowed to execute user work.
         if(!resumeAttempted){
@@ -233,6 +255,7 @@ int wmain(int argc,wchar_t** argv) {
                 <<"Launching requires --launch-reviewed, both --expected-*-sha256 hashes and --acknowledge-native-insertion startup-observation-only. Deployment is not approved by this build.\n";return 0;}
         std::vector<std::wstring> arguments(argv+1,argv+argc);const auto options=parse(arguments);
         LockedFile exe(options.target),dll(options.dll);exe.pe(false);dll.pe(true);asciiDll(dll.path);
+        if(options.entry)exe.nativeEntryRva();
         const auto targetHash=exe.sha256(),dllHash=dll.sha256();
         demand(options.targetHash.empty() || options.targetHash==targetHash,"target hash differs from reviewed binary");
         demand(options.dllHash.empty() || options.dllHash==dllHash,"bootstrap hash differs from reviewed binary");
@@ -245,6 +268,7 @@ int wmain(int argc,wchar_t** argv) {
             <<L"\nTarget: "<<printable(exe.path)<<L"\nTarget SHA-256: "<<targetHash<<L"\nBootstrap: "<<printable(dll.path)<<L"\nBootstrap SHA-256: "<<dllHash
             <<L"\nWorking directory: "<<printable(workdir)<<L"\nCommand line (escaped display): "<<printable(commandLine(options,exe.path))
             <<L"\nBeamRT capture=OFF; BeamRT graphics initialization=NONE; lighting=UNCHANGED; no game-file installation.\n";
+        std::wcout<<L"Opt-in native-entry rendezvous: "<<(options.entry?L"ON (passive in production)":L"OFF")<<L'\n';
         if(!options.launch)return 0;
         return launchReviewed(options,exe,dll,workdir);
     }catch(const std::exception& error){std::cerr<<"Startup host refused: "<<error.what()<<'\n';return 1;}

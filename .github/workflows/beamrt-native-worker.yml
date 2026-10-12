@@ -7,6 +7,7 @@ on:
       - 'native/capture/**'
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_device_observer_contracts.py'
       - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
@@ -31,6 +32,7 @@ on:
       - 'native/capture/**'
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_device_observer_contracts.py'
       - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
@@ -68,6 +70,8 @@ jobs:
         run: python -B tools/tests/test_native_worker_contracts.py
       - name: Startup review-only source contracts
         run: python -B tools/tests/test_native_startup_contracts.py
+      - name: Device creation observer source contracts
+        run: python -B tools/tests/test_native_device_observer_contracts.py
       - name: Build review startup host and run no-launch argument/payload tests
         shell: pwsh
         run: ./native/startup/build.ps1 -RunContractTests

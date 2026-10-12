@@ -1,5 +1,6 @@
 #include "startup_contract.h"
 #include <detours.h>
+#include "entry_contract.h"
 
 // POD only: no static C++ constructors, renderer libraries or unload callbacks.
 static volatile LONG attached=0;
@@ -20,6 +21,9 @@ BOOL WINAPI DllMain(HINSTANCE,DWORD reason,LPVOID) {
     // Required restoration of Detours' temporary startup import-table edit.
     // No device creation, waits, threads, file logging, capture or GPU work here.
     if(!DetourRestoreAfterWith())return FALSE;
+    // Optional entry detour ONLY; no device/capture initialization here.
+    // Without the separate entry payload this is a no-op.
+    BeamRT_EntryArmFromPayload();
     attachThread=GetCurrentThreadId();InterlockedExchange(&attached,1);
     const auto receipt=reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(eventValue));
 #ifdef BEAMRT_STARTUP_TEST_NO_RECEIPT

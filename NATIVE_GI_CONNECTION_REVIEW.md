@@ -93,6 +93,14 @@ missing-receipt timeout. All private fixture jobs drained. No BeamNG startup or
 game deployment occurred. Safe game-thread/device handoff and actual GI bindings
 remain unimplemented; this fixture approval is not approval for BeamNG launch mode.
 
+A dormant [post-loader device creation observer](native/startup/DEVICE_OBSERVER.md)
+is now available through explicit native exports. Its startup-inserted hardware
+and WARP fixtures observe the real public API return, verify device/resource
+identity and reject ambiguity, unexpected threads and stale generations. It
+does not initialize itself from DllMain or add an automatic game callback. The
+real BeamNG control/thread handoff remains required; creation observation is not
+render-pass or lighting integration, and no in-game activation was performed.
+
 The installed BeamNG raw-LiDAR example documents external ffi.load as requiring
 a disabled Lua security sandbox (that particular sensor also requires .tech).
 We must not silently disable the sandbox or assume that example is a general
