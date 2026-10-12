@@ -48,7 +48,7 @@ struct BeamRTGIFrame {
     std::mutex mutex;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12Resource> mesh,receivers,output,scene,frame;
-    ComPtr<ID3D12DescriptorHeap> descriptors;
+    ComPtr<ID3D12DescriptorHeap> descriptors,outputSrv;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12Fence> fence;
@@ -127,7 +127,7 @@ extern "C" int BeamRT_GICreateFrame(void* nativeDevice,const void* shader,uint64
         check(f->device->CreateRootSignature(0,encoded->GetBufferPointer(),encoded->GetBufferSize(),IID_PPV_ARGS(&f->root)),"CreateRootSignature");
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=f->root.Get();pipeline.CS={shader,static_cast<SIZE_T>(bytes)};
         check(f->device->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&f->pipeline)),"CreateComputePipelineState");
-        D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.NumDescriptors=4;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.NumDescriptors=3;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(f->device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&f->descriptors)),"CreateDescriptorHeap");
         f->stride=f->device->GetDescriptorHandleIncrementSize(heap.Type);
         auto cpu=f->descriptors->GetCPUDescriptorHandleForHeapStart();
@@ -136,7 +136,11 @@ extern "C" int BeamRT_GICreateFrame(void* nativeDevice,const void* shader,uint64
         srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;f->device->CreateShaderResourceView(f->receivers.Get(),&srv,cpu);cpu.ptr+=f->stride;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=srv.Format;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
         f->device->CreateUnorderedAccessView(f->output.Get(),nullptr,&uav,cpu);cpu.ptr+=f->stride;
-        f->device->CreateShaderResourceView(f->output.Get(),&srv,cpu);
+        // CopyDescriptors requires a non-shader-visible source. Keep this
+        // borrowed output SRV in a dedicated CPU staging heap until retirement.
+        heap.NumDescriptors=1;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        check(f->device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&f->outputSrv)),"Output staging descriptor heap");
+        f->device->CreateShaderResourceView(f->output.Get(),&srv,f->outputSrv->GetCPUDescriptorHandleForHeapStart());
         *output=f.release();return 0;
     } catch(const std::exception& e) { lastError=e.what();return -1; }
 }
@@ -165,7 +169,7 @@ extern "C" int BeamRT_GIGetOutput(BeamRTGIFrame* f,void** resource,uint64_t* cpu
         lastError.clear();require(resource && cpuSrv,"resource and descriptor outputs required");*resource=nullptr;*cpuSrv=0;
         require(f,"frame required");std::lock_guard<std::mutex> lock(f->mutex);require(f->recorded && !f->discarded,"output not recorded/was discarded");
         check(f->device->GetDeviceRemovedReason(),"DeviceRemovedReason");
-        *resource=f->output.Get();*cpuSrv=f->descriptors->GetCPUDescriptorHandleForHeapStart().ptr+3*uint64_t(f->stride);return 0;
+        *resource=f->output.Get();*cpuSrv=f->outputSrv->GetCPUDescriptorHandleForHeapStart().ptr;return 0;
     } catch(const std::exception& e) { lastError=e.what();return -1; }
 }
 extern "C" int BeamRT_GIMarkSubmitted(BeamRTGIFrame* f,void* nativeFence,uint64_t value) {

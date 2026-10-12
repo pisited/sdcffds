@@ -28,7 +28,7 @@ BEAMRT_GI_API int BeamRT_GICreateFrame(void* device,const void* computeShader,
 // to restore. Host submits this between matched receiver export and GI consumer
 // on the SAME ordered DIRECT queue. No queues/submission/readback/CPU waits here.
 BEAMRT_GI_API int BeamRT_GIRecord(BeamRTGIFrame*,void* commandList);
-// Borrowed resource + CPU SRV handle. Copy descriptor into the consumer's own
+// Borrowed resource + non-shader-visible staging SRV. Copy into the consumer's own
 // compatible t5 heap; never bind this compute heap to an original game draw.
 BEAMRT_GI_API int BeamRT_GIGetOutput(BeamRTGIFrame*,void** resource,uint64_t* cpuSrv);
 // Host records/signals this fence after BOTH native compute and GI consumer.

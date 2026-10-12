@@ -1,164 +1,9 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include "beamrt_gi.h"
-#include <windows.h>
-#include <d3d12.h>
-#include <d3d12sdklayers.h>
-#include <d3dcompiler.h>
-#include <d3d11shader.h>
-#include <dxgi1_6.h>
-#include <wrl/client.h>
-#include <cmath>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <stdexcept>
-#include <string>
-#include <vector>
-using Microsoft::WRL::ComPtr;
-static void require(bool ok,const char* why) { if(!ok) throw std::runtime_error(why); }
-static void hr(HRESULT value,const char* operation="D3D12 fixture operation") {
-    if(FAILED(value)) throw std::runtime_error(std::string(operation)+" failed HRESULT="+std::to_string(value));
-}
-static void success(int value) { require(value==0,BeamRT_GILastError()); }
-static void read(std::ifstream& stream,void* output,size_t bytes) { stream.read(static_cast<char*>(output),static_cast<std::streamsize>(bytes));require(bool(stream),"truncated fixture"); }
-static std::vector<uint8_t> file(const wchar_t* path) {
-    std::ifstream stream(std::filesystem::path(path),std::ios::binary|std::ios::ate);require(bool(stream),"file missing");
-    auto size=stream.tellg();require(size>0 && size<=16*1024*1024,"file size invalid");
-    std::vector<uint8_t> data(static_cast<size_t>(size));stream.seekg(0);read(stream,data.data(),data.size());return data;
-}
-static void transition(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,D3D12_RESOURCE_STATES before,D3D12_RESOURCE_STATES after) {
-    D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={resource,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,before,after};list->ResourceBarrier(1,&b);
-}
-static ComPtr<ID3D12Resource> make(ID3D12Device* device,D3D12_RESOURCE_DESC desc,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state) {
-    D3D12_HEAP_PROPERTIES props{};props.Type=type;ComPtr<ID3D12Resource> result;
-    hr(device->CreateCommittedResource(&props,D3D12_HEAP_FLAG_NONE,&desc,state,nullptr,IID_PPV_ARGS(&result)));return result;
-}
-static D3D12_RESOURCE_DESC buffer(UINT64 bytes) {
-    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=bytes;d.Height=1;d.DepthOrArraySize=1;d.MipLevels=1;d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;return d;
-}
-static void fill(ID3D12Resource* resource,const void* data,size_t bytes) {
-    void* mapped=nullptr;D3D12_RANGE noRead{0,0};hr(resource->Map(0,&noRead,&mapped));std::memcpy(mapped,data,bytes);resource->Unmap(0,nullptr);
-}
-struct Host {
-    ComPtr<ID3D12Device> device;ComPtr<ID3D12CommandQueue> queue;
-    ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
-    ComPtr<ID3D12Fence> fence;UINT64 sequence=0;
-    std::vector<ComPtr<ID3D12Resource>> staging;
-    explicit Host(ID3D12Device* native):device(native) {
-        D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;hr(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)));
-        hr(device->CreateCommandAllocator(q.Type,IID_PPV_ARGS(&allocator)));hr(device->CreateCommandList(0,q.Type,allocator.Get(),nullptr,IID_PPV_ARGS(&list)));
-        hr(list->Close());hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)));
-    }
-    void begin() { hr(allocator->Reset());hr(list->Reset(allocator.Get(),nullptr)); }
-    void execute() { hr(list->Close());ID3D12CommandList* lists[]={list.Get()};queue->ExecuteCommandLists(1,lists); }
-    void wait() {
-        hr(queue->Signal(fence.Get(),++sequence));HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);require(event!=nullptr,"event creation failed");
-        hr(fence->SetEventOnCompletion(sequence,event));const DWORD result=WaitForSingleObject(event,10000);CloseHandle(event);
-        require(result==WAIT_OBJECT_0,"GPU test timeout; stop test process, not frame retirement proof");hr(device->GetDeviceRemovedReason());staging.clear();
-    }
-    ComPtr<ID3D12Resource> texture(UINT width,UINT height,DXGI_FORMAT format,const void* pixels,UINT pixelBytes) {
-        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;d.DepthOrArraySize=1;d.MipLevels=1;d.SampleDesc.Count=1;d.Format=format;
-        auto result=make(device.Get(),d,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT rows;UINT64 rowBytes,total;
-        device->GetCopyableFootprints(&d,0,1,0,&footprint,&rows,&rowBytes,&total);
-        require(rowBytes==uint64_t(width)*pixelBytes,"fixture pixel format mismatch");
-        auto upload=make(device.Get(),buffer(total),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
-        void* mapped;D3D12_RANGE noRead{0,0};hr(upload->Map(0,&noRead,&mapped));
-        for(UINT y=0;y<rows;++y) std::memcpy(static_cast<uint8_t*>(mapped)+footprint.Offset+uint64_t(y)*footprint.Footprint.RowPitch,static_cast<const uint8_t*>(pixels)+uint64_t(y)*rowBytes,static_cast<size_t>(rowBytes));
-        upload->Unmap(0,nullptr);D3D12_TEXTURE_COPY_LOCATION dst{},src{};dst.pResource=result.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        src.pResource=upload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=footprint;
-        list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);transition(list.Get(),result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        staging.push_back(upload);return result;
-    }
-};
-struct TestConstants { float key[4],size[2],enabled;int32_t index;float viewport[4]; };
-static_assert(sizeof(TestConstants)==48,"consumer test ABI");
-// Execute the actual game pixel producer, using reflection rather than guessed
-// engine constant offsets. Only offline fixture inputs, never game resources.
-struct PixelOutput { ComPtr<ID3D12Resource> resource;ComPtr<ID3D12DescriptorHeap> srv; };
-static PixelOutput pixelProducer(Host& host,const BeamRTGIInputs& input,
-    const std::vector<uint8_t>& vs,const std::vector<uint8_t>& ps) {
-    ComPtr<ID3D11ShaderReflection> reflection;hr(D3DReflect(ps.data(),ps.size(),IID_PPV_ARGS(&reflection)),"pixel producer reflection");
-    auto fields=reflection->GetConstantBufferByName("perDraw");D3D11_SHADER_BUFFER_DESC cbDesc{};hr(fields->GetDesc(&cbDesc),"pixel producer perDraw");
-    std::vector<uint8_t> constants((cbDesc.Size+255)&~size_t(255));
-    auto set=[&](const char* name,const void* data,size_t bytes) { D3D11_SHADER_VARIABLE_DESC v{};hr(fields->GetVariableByName(name)->GetDesc(&v),name);
-        require(bytes<=v.Size && uint64_t(v.StartOffset)+bytes<=constants.size(),"pixel constant layout mismatch");std::memcpy(constants.data()+v.StartOffset,data,bytes); };
-    const auto& scene=input.scene;
-    set("meshOrigin",scene.origin,12);set("meshInvX",scene.inverseX,12);set("meshInvY",scene.inverseY,12);set("meshInvZ",scene.inverseZ,12);
-    set("meshQuantMin",scene.quantMin,12);set("meshQuantExtent",scene.quantExtent,12);
-    auto scalar=[&](const char* name,float value) { set(name,&value,4); };
-    scalar("meshNodeCount",static_cast<float>(scene.counts[0]));scalar("meshTriangleCount",static_cast<float>(scene.counts[1]));scalar("meshTriangleOffset",static_cast<float>(scene.counts[2]));scalar("meshMaterialPolicyEnabled",1);
-    float atlas[]={static_cast<float>(scene.atlas[0]),static_cast<float>(scene.atlas[1])};set("meshAtlasSize",atlas,sizeof(atlas));
-    float modes[16];for(int i=0;i<16;++i) modes[i]=static_cast<float>(scene.materials[i]);
-    for(int bank=0;bank<4;++bank) { const auto name="meshMaterialModes"+std::to_string(bank);set(name.c_str(),modes+bank*4,16); }
-    float size[]={static_cast<float>(input.width),static_cast<float>(input.height)};set("visibilitySize",size,sizeof(size));set("nativeGIVisibilityKey",input.key,sizeof(input.key));scalar("surfelCount",static_cast<float>(input.surfelCount));
-    for(int i=0;i<32;++i) { const auto name="surfelPositionRadius"+std::to_string(i);set(name.c_str(),input.surfels[i],16); }
-    auto device=host.device.Get();auto cb=make(device,buffer(constants.size()),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);fill(cb.Get(),constants.data(),constants.size());
-    D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=2;
-    D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[1].DescriptorTable={1,&range};
-    D3D12_ROOT_SIGNATURE_DESC desc{};desc.NumParameters=2;desc.pParameters=params;ComPtr<ID3DBlob> encoded,errors;hr(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&encoded,&errors));
-    ComPtr<ID3D12RootSignature> root;hr(device->CreateRootSignature(0,encoded->GetBufferPointer(),encoded->GetBufferSize(),IID_PPV_ARGS(&root)));
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=root.Get();p.VS={vs.data(),vs.size()};p.PS={ps.data(),ps.size()};p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;p.RasterizerState.DepthClipEnable=TRUE;
-    p.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;p.SampleMask=UINT_MAX;p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT;p.SampleDesc.Count=1;
-    ComPtr<ID3D12PipelineState> pipeline;hr(device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&pipeline)),"pixel producer pipeline");
-    auto targetDesc=static_cast<ID3D12Resource*>(input.receivers)->GetDesc();targetDesc.Height+=1;targetDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    PixelOutput output;output.resource=make(device,targetDesc,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.NumDescriptors=1;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;ComPtr<ID3D12DescriptorHeap> rtv;hr(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&rtv)));device->CreateRenderTargetView(output.resource.Get(),nullptr,rtv->GetCPUDescriptorHandleForHeapStart());
-    heap.NumDescriptors=3;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;hr(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&output.srv)));
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
-    auto cpu=output.srv->GetCPUDescriptorHandleForHeapStart();const auto stride=device->GetDescriptorHandleIncrementSize(heap.Type);
-    device->CreateShaderResourceView(static_cast<ID3D12Resource*>(input.receivers),&srv,cpu);cpu.ptr+=stride;srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;device->CreateShaderResourceView(static_cast<ID3D12Resource*>(input.mesh),&srv,cpu);cpu.ptr+=stride;srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;device->CreateShaderResourceView(output.resource.Get(),&srv,cpu);
-    host.begin();host.list->SetPipelineState(pipeline.Get());host.list->SetGraphicsRootSignature(root.Get());ID3D12DescriptorHeap* heaps[]={output.srv.Get()};host.list->SetDescriptorHeaps(1,heaps);host.list->SetGraphicsRootConstantBufferView(0,cb->GetGPUVirtualAddress());host.list->SetGraphicsRootDescriptorTable(1,output.srv->GetGPUDescriptorHandleForHeapStart());
-    const D3D12_VIEWPORT viewport{0,0,static_cast<float>(input.width),static_cast<float>(input.height+1),0,1};const D3D12_RECT scissor{0,0,static_cast<LONG>(input.width),static_cast<LONG>(input.height+1)};
-    host.list->RSSetViewports(1,&viewport);host.list->RSSetScissorRects(1,&scissor);cpu=rtv->GetCPUDescriptorHandleForHeapStart();host.list->OMSetRenderTargets(1,&cpu,FALSE,nullptr);host.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);host.list->DrawInstanced(3,1,0,0);
-    transition(host.list.Get(),output.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);host.execute();host.wait();return output;
-}
-static void draw(Host& host,BeamRTGIFrame* frame,const std::vector<uint8_t>& vs,const std::vector<uint8_t>& ps,
-                 TestConstants constants,bool blocked,uint64_t outputSrv=0) {
-    void* nativeOutput=nullptr;if(!outputSrv) success(BeamRT_GIGetOutput(frame,&nativeOutput,&outputSrv));
-    auto device=host.device.Get();D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=5;
-    D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[1].DescriptorTable={1,&range};
-    D3D12_ROOT_SIGNATURE_DESC desc{};desc.NumParameters=2;desc.pParameters=params;
-    ComPtr<ID3DBlob> encoded,errors;hr(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&encoded,&errors));
-    ComPtr<ID3D12RootSignature> root;hr(device->CreateRootSignature(0,encoded->GetBufferPointer(),encoded->GetBufferSize(),IID_PPV_ARGS(&root)));
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=root.Get();p.VS={vs.data(),vs.size()};p.PS={ps.data(),ps.size()};
-    p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;p.RasterizerState.DepthClipEnable=TRUE;
-    p.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;p.SampleMask=UINT_MAX;
-    p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT;p.SampleDesc.Count=1;
-    ComPtr<ID3D12PipelineState> pipeline;hr(device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&pipeline)));
-    D3D12_RESOURCE_DESC targetDesc{};targetDesc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;targetDesc.Width=2;targetDesc.Height=1;targetDesc.DepthOrArraySize=1;targetDesc.MipLevels=1;targetDesc.SampleDesc.Count=1;
-    targetDesc.Format=p.RTVFormats[0];targetDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    auto target=make(device,targetDesc,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    auto cb=make(device,buffer(256),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);fill(cb.Get(),&constants,sizeof(constants));
-    D3D12_DESCRIPTOR_HEAP_DESC h{};h.NumDescriptors=1;h.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;ComPtr<ID3D12DescriptorHeap> rtv;hr(device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&rtv)));
-    device->CreateRenderTargetView(target.Get(),nullptr,rtv->GetCPUDescriptorHandleForHeapStart());
-    h.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;h.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;ComPtr<ID3D12DescriptorHeap> srv;hr(device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&srv)));
-    device->CopyDescriptorsSimple(1,srv->GetCPUDescriptorHandleForHeapStart(),D3D12_CPU_DESCRIPTOR_HANDLE{outputSrv},h.Type);
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT rows;UINT64 rowBytes,total;device->GetCopyableFootprints(&targetDesc,0,1,0,&footprint,&rows,&rowBytes,&total);
-    auto readback=make(device,buffer(total),D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-    host.begin();host.list->SetPipelineState(pipeline.Get());host.list->SetGraphicsRootSignature(root.Get());ID3D12DescriptorHeap* heaps[]={srv.Get()};host.list->SetDescriptorHeaps(1,heaps);
-    host.list->SetGraphicsRootConstantBufferView(0,cb->GetGPUVirtualAddress());host.list->SetGraphicsRootDescriptorTable(1,srv->GetGPUDescriptorHandleForHeapStart());
-    const D3D12_VIEWPORT viewport{0,0,2,1,0,1};const D3D12_RECT scissor{0,0,2,1};host.list->RSSetViewports(1,&viewport);host.list->RSSetScissorRects(1,&scissor);
-    auto cpu=rtv->GetCPUDescriptorHandleForHeapStart();host.list->OMSetRenderTargets(1,&cpu,FALSE,nullptr);host.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);host.list->DrawInstanced(3,1,0,0);
-    transition(host.list.Get(),target.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
-    D3D12_TEXTURE_COPY_LOCATION dst{},src{};dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=footprint;
-    src.pResource=target.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;host.list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);host.execute();host.wait();
-    void* mapped=nullptr;D3D12_RANGE readRange{0,static_cast<SIZE_T>(total)};hr(readback->Map(0,&readRange,&mapped));
-    const auto values=reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped)+footprint.Offset);
-    for(int pixel=0;pixel<2;++pixel) for(int channel=0;channel<3;++channel) {
-        const float expected=.2f+.1f*static_cast<float>(channel)+((pixel==0 && blocked)?0.0f:1.0f+static_cast<float>(channel));
-        require(std::abs(values[pixel*4+channel]-expected)<.00001f,"native visibility consumer changed wrong GI contribution or failed fallback");
-    }
-    D3D12_RANGE noWrite{0,0};readback->Unmap(0,&noWrite);
-}
+#include "test_support.h"
 int wmain(int argc,wchar_t** argv) {
     try {
-        require(argc>=5 && argc<=8,"usage: self_test fixture.bin visibility.cso consumer.vs.cso consumer.ps.cso [--warp] [--pixel-producer path]");
+        require(argc>=7 && argc<=10,"usage: self_test fixture.bin visibility.cso consumer.vs.cso consumer.ps.cso handoff.vs.cso handoff.ps.cso [--warp] [--pixel-producer path]");
         bool warp=false;std::vector<uint8_t> pixelShader;
-        for(int i=5;i<argc;++i) { if(std::wstring(argv[i])==L"--warp") warp=true;
+        for(int i=7;i<argc;++i) { if(std::wstring(argv[i])==L"--warp") warp=true;
             else if(std::wstring(argv[i])==L"--pixel-producer") { require(i+1<argc,"pixel producer path missing");pixelShader=file(argv[++i]); }
             else require(false,"unknown option"); }
         ComPtr<ID3D12Debug> debug;const bool debugEnabled=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));if(debugEnabled) debug->EnableDebugLayer();
@@ -167,6 +12,7 @@ int wmain(int argc,wchar_t** argv) {
         else for(UINT i=0;!device;++i) { ComPtr<IDXGIAdapter1> adapter;require(SUCCEEDED(factory->EnumAdapterByGpuPreference(i,DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,IID_PPV_ARGS(&adapter))),"hardware device unavailable");DXGI_ADAPTER_DESC1 d{};hr(adapter->GetDesc1(&d));if(d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) continue;
             if(SUCCEEDED(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)))) std::wcout<<L"Offline GI host: "<<d.Description<<L'\n'; }
         Host host(device.Get());auto cs=file(argv[2]),vs=file(argv[3]),ps=file(argv[4]);
+        auto handoffVS=file(argv[5]),handoffPS=file(argv[6]);
         std::ifstream stream(std::filesystem::path(argv[1]),std::ios::binary);require(bool(stream),"fixture missing");uint32_t header[4];read(stream,header,sizeof(header));
         require(header[0]==0x42525431 && header[1]>0 && header[1]<=16*1024*1024 && header[2]>0 && header[2]<=8192,"invalid fixture header");
         BeamRTGIInputs inputs{};read(stream,&inputs.scene,sizeof(inputs.scene));std::vector<uint8_t> pixels(header[1]);read(stream,pixels.data(),pixels.size());
@@ -204,7 +50,7 @@ int wmain(int argc,wchar_t** argv) {
         for(int index:{0,7,8,15,16,23,24,31}) { c.index=index;draw(host,frame,vs,ps,c,true); }
         if(!pixelShader.empty()) {
             auto output=pixelProducer(host,inputs,vs,pixelShader);
-            const uint64_t handle=output.srv->GetCPUDescriptorHandleForHeapStart().ptr+2*uint64_t(device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+            const uint64_t handle=output.copySource->GetCPUDescriptorHandleForHeapStart().ptr;
             draw(host,frame,vs,ps,c,true,handle);c.enabled=0;draw(host,frame,vs,ps,c,false,handle);c.enabled=1;
             std::cout<<"Actual game pixel producer -> exact GI consumer GPU fixture passed\n";
         }
@@ -217,6 +63,7 @@ int wmain(int argc,wchar_t** argv) {
         require(BeamRT_GIDestroyFrame(&frame)!=0 && frame,"compute completion incorrectly retired a consumer-live frame");
         hr(host.queue->Signal(lifetime.Get(),1));host.wait(); // AFTER the LAST consumer
         success(BeamRT_GIDestroyFrame(&frame));
+        testCaptureToGIHandoff(device.Get(),cs,inputs,handoffVS,handoffPS,vs,ps);
         UINT64 completion=1;
         auto fallback=[&]() {
             success(create(inputs));host.begin();success(BeamRT_GIRecord(frame,host.list.Get()));success(BeamRT_GIMarkSubmitted(frame,lifetime.Get(),++completion));host.execute();host.wait();

@@ -35,6 +35,13 @@ The existing worker remains ABI v2; this separate adapter has its own ABI v1.
    Explicit discard is permitted only after resetting/discarding an unexecuted
    command list. Stop/join callers before destruction; unloading a DLL does not
    cancel GPU work.
+6. The offline GI fixture now exercises capture-to-frame handoff. A synthetic
+  producer submits the fixture's packed-mesh and receiver SRVs through the real
+  capture hooks; the test supplies resource states, dimensions, scene data,
+  generation keys and surfels explicitly. It then records GI compute and the
+  consumer on the same DIRECT queue, rejects destruction at the compute fence,
+  and retires the frame only after the consumer fence. This is not automatic
+  conversion or BeamNG resource discovery.
 
 This is a GPU resource handoff implementation, not another standalone tracer
 algorithm. The remaining host integration must actually capture and supply the
@@ -100,7 +107,8 @@ Loading/deployment constraints remain in [the connection review](../../NATIVE_GI
 ## Build and verification
 
 Uses installed MSVC/SDK and the existing fixture generator; no prerequisites
-installed. Artifacts remain ignored in `.beamrt-validation/native-gi/`.
+installed. The build also compiles the isolated capture dependency using its
+pinned Detours source. Artifacts remain ignored in `.beamrt-validation/`.
 
 ```powershell
 ./native/gi/build.ps1 -Python python -RunTest
@@ -118,8 +126,11 @@ Hardware/real-guardhouse and WARP/synthetic fixture tests cover opaque rejection
 all 32 bits, unchanged independent screen contribution, disabled/ON/disabled,
 stale generation keys/dimensions, viewport mapping, unresolved/mask/blend
 fallback, invalid receiver/mesh fallback, ownership/contract checks, single-use
-recording and fence/discard lifetime gates. CPU readback is only in this isolated
-test executable to assert final pixels, never in the adapter's rendering path.
+recording and fence/discard lifetime gates. The capture handoff test verifies
+real captured SRV identity, explicit sidecar inputs, same-queue producer/compute/
+consumer order, snapshot release and post-consumer retirement. CPU readback is
+only in this isolated test executable to assert final pixels, never in the
+adapter's rendering path.
 
 Remaining unverified: actual BeamNG input capture/loading, complete GI draw
 consumption, game-side source-pack/history restoration, concurrent frame/queue

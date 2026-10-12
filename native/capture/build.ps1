@@ -3,16 +3,30 @@ $ErrorActionPreference='Stop'
 $beamrtRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $beamrtOutput=Join-Path $beamrtRoot '.beamrt-validation/native-capture'
 [IO.Directory]::CreateDirectory($beamrtOutput)|Out-Null
-$beamrtVswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-$beamrtInstallation=& $beamrtVswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if(!$beamrtInstallation){throw 'Installed x64 MSVC required; no installer will be run.'}
-$beamrtVcvars=Join-Path $beamrtInstallation 'VC/Auxiliary/Build/vcvars64.bat'
-$beamrtEnvironment=& $env:COMSPEC /d /c "`"$beamrtVcvars`" >nul && set"
-if($LASTEXITCODE){throw 'MSVC environment initialization failed'}
-foreach($beamrtLine in $beamrtEnvironment){if($beamrtLine -match '^(PATH|INCLUDE|LIB|LIBPATH)=(.*)$'){
-    [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process')
-}}
-$beamrtFxc=(Get-Command fxc.exe -ErrorAction Stop).Source
+$beamrtCl=Get-Command cl.exe -ErrorAction SilentlyContinue
+$beamrtNmake=Get-Command nmake.exe -ErrorAction SilentlyContinue
+if(!$beamrtCl -or !$beamrtNmake){
+    $beamrtVswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+    $beamrtInstallation=& $beamrtVswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if(!$beamrtInstallation){throw 'Installed x64 MSVC required; no installer will be run.'}
+    $beamrtVcvars=Join-Path $beamrtInstallation 'VC/Auxiliary/Build/vcvars64.bat'
+    $beamrtEnvironment=& $env:COMSPEC /d /c "`"$beamrtVcvars`" >nul && set"
+    if($LASTEXITCODE){throw 'MSVC environment initialization failed'}
+    foreach($beamrtLine in $beamrtEnvironment){if($beamrtLine -match '^(PATH|INCLUDE|LIB|LIBPATH)=(.*)$'){
+        [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process')
+    }}
+}
+$beamrtFxcCommand=Get-Command fxc.exe -ErrorAction SilentlyContinue
+if($beamrtFxcCommand){$beamrtFxc=$beamrtFxcCommand.Source}
+else {
+    $beamrtSdkCandidates=@((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue).KitsRoot10,
+        (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'))
+    $beamrtSdk=$beamrtSdkCandidates|Where-Object{$_ -and (Test-Path -LiteralPath (Join-Path $_ 'bin'))}|Select-Object -First 1
+    if(!$beamrtSdk){throw 'Windows SDK FXC not found; no installer will be run.'}
+    $beamrtFxc=Get-ChildItem (Join-Path $beamrtSdk 'bin') -Directory|Sort-Object Name -Descending|
+        ForEach-Object{Join-Path $_.FullName 'x64/fxc.exe'}|Where-Object{Test-Path -LiteralPath $_}|Select-Object -First 1
+    if(!$beamrtFxc){throw 'Windows SDK FXC not found; no installer will be run.'}
+}
 # Official MIT-licensed source, pinned to the verified v4.0.1 commit. Confined
 # to ignored build dependencies; never copied into BeamNG's Bin64 or deployed.
 $beamrtDetoursCommit='e4bfd6b03e50de46b47abfbd1e46b384f0c5f833'

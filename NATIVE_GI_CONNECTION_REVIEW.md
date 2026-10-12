@@ -27,6 +27,12 @@ or lighting consumer. Live attach/detach still requires externally established
 quiescence across all callers; that game-side policy is not implemented. No DLL
 has been installed into BeamNG. No Lua reload or new game test is needed.
 
+The offline GI fixture now exercises capture-to-frame handoff using a synthetic
+producer. Only its mesh/receiver SRVs come from capture; resource states,
+dimensions, scene/surfel data and generations are explicit fixture inputs. It
+records compute and consumer on the same queue and checks retirement after the
+consumer fence. This validates module composition, not live BeamNG bindings.
+
 ## First consumer and acceptance gate
 
 Target BeamRT's owned GI pass, not native headlights or the clustered shade pass.
@@ -144,9 +150,10 @@ resources, submit work, load itself or install interception. The separate
 v0.109 engine-managed backend can schedule the matched pixel producer and GI
 consumer without that DLL, while retaining inline/default rendering fallback.
 
-The read-only capture slice is implemented, but the next native work must address
-real game pass identification, game-scale lifetime handling, camera and output
-bindings and command ordering. Then the reviewed host can record the matched
+The offline handoff fixture composes the capture snapshot and GI frame only with
+explicit fixture sidecar values. The read-only capture slice is implemented,
+but the next native work must address real game pass identification, game-scale
+lifetime handling, camera and output bindings and command ordering. Then the reviewed host can record the matched
 receiver export, order native compute and bind its output to the owned GI
 consumer, with original-graph/history restoration on OFF. Only after reviewing
 a complete loading mechanism should a bounded in-game test check lighting

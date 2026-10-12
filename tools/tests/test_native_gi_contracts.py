@@ -59,6 +59,42 @@ class NativeGIContracts(unittest.TestCase):
         self.assertIn("GPU frame still in flight; retained", adapter)
         self.assertIn("unmarked recorded work retained", adapter)
 
+    def test_offline_capture_to_gi_handoff_uses_explicit_sidecar_and_final_fence(self):
+        fixture = self.source("native/gi/self_test.cpp")
+        handoff = self.source("native/gi/test_support.h")
+        build = self.source("native/gi/build.ps1")
+        self.assertIn('#include "test_support.h"', fixture)
+        self.assertIn('../capture/beamrt_capture.h', handoff)
+        self.assertIn("BeamRT_CaptureGetSnapshotForQueue", handoff)
+        self.assertIn("info.resources[0]==sidecar.receivers && info.resources[1]==sidecar.mesh", handoff)
+        for field in ("frameInputs.meshState=", "frameInputs.receiverState=", "frameInputs.scene=sidecar.scene",
+                      "frameInputs.width=sidecar.width", "frameInputs.surfelCount=sidecar.surfelCount",
+                      "std::memcpy(frameInputs.key", "std::memcpy(frameInputs.surfels"):
+            self.assertIn(field, handoff)
+        for step in ("capture.stop()", "BeamRT_GICreateFrame", "BeamRT_GIRecord",
+                     "BeamRT_GIMarkSubmitted", "handoffHost.execute();handoffHost.wait();",
+                     "draw(handoffHost,frame.value", "GI frame retired before the consumer completion fence"):
+            self.assertIn(step, handoff)
+        self.assertIn("native/capture/build.ps1", build)
+        self.assertIn("beamrt_capture.lib", build)
+        self.assertIn("handoff_producer.hlsl", build)
+        self.assertIn("config.offsets[0]=0;config.offsets[1]=1", handoff)
+        self.assertIn("!info.cameraVerified && !info.gpuOrderingVerified && !info.lightingConsumed", handoff)
+
+    def test_output_descriptor_copy_uses_cpu_staging_heap(self):
+        adapter = self.source("native/gi/beamrt_gi.cpp")
+        self.assertIn("heap.NumDescriptors=1;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_NONE", adapter)
+        self.assertIn("f->outputSrv->GetCPUDescriptorHandleForHeapStart()", adapter)
+        self.assertNotIn("cpuSrv=f->descriptors->GetCPUDescriptorHandleForHeapStart()", adapter)
+        self.assertIn("descriptors,outputSrv", adapter)
+
+    def test_handoff_reads_error_text_only_after_api_returns(self):
+        import re
+        support = self.source("native/gi/test_support.h")
+        self.assertIn("static void captureSuccess(int result)", support)
+        self.assertIn("captureSuccess(BeamRT_CaptureStart", support)
+        self.assertNotRegex(support, r"require\(\s*BeamRT_\w+\([^;]*?BeamRT_\w*LastError\(\)\)")
+
 
 if __name__ == "__main__":
     unittest.main()
