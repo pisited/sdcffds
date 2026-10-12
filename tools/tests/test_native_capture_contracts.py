@@ -75,7 +75,7 @@ class NativeCaptureContracts(unittest.TestCase):
         self.assertIn("h.copyHandles(from,to)", self.capture)
         self.assertIn("views.find(cpuHandle(state->candidate,config.offsets[n]))", self.capture)
         submit = self.capture[self.capture.index("static void STDMETHODCALLTYPE hExecuteLists"):]
-        self.assertLess(submit.index("h.submit(count,lists)"), submit.index("oExecuteLists(self,count,lists)"))
+        self.assertLess(submit.index("h.submit(self,count,lists)"), submit.index("oExecuteLists(self,count,lists)"))
         for method in ("hCreateCBV", "hCreateUAV"):
             start = self.capture.index(f"static void STDMETHODCALLTYPE {method}")
             end = self.capture.index("\nstatic ", start + 1)
@@ -86,9 +86,11 @@ class NativeCaptureContracts(unittest.TestCase):
         self.assertIn("sampler.Get()!=state->samplerHeap.Get()", self.capture)
         self.assertIn("state->graphicsTables.clear();state->computeTables.clear();", self.capture)
         self.assertIn("if(state->poisoned || !state->candidate.heap)", self.capture)
-        self.assertIn("prototype does not support multiple API-calling threads", self.capture)
+        self.assertIn("host->config.threadMode==BEAMRT_CAPTURE_SINGLE_THREAD", self.capture)
+        self.assertIn("single-thread capture received another API-calling thread", self.capture)
         self.assertIn("catch(const std::exception& e)", self.capture)
         self.assertIn("noexcept", self.capture)
+        self.assertIn("catch(const std::exception& e){host->poison(e.what());}", self.capture)
 
     def test_bounded_lifetimes_and_no_false_lighting_certification(self):
         self.assertIn("ComPtr<ID3D12Resource> references[8]", self.capture)
@@ -97,12 +99,40 @@ class NativeCaptureContracts(unittest.TestCase):
             self.assertIn(flag, self.header)
             self.assertNotRegex(self.capture, rf"\b{flag}\s*=")
         for limit in ("heaps.size()<64", "views.size()<512", "roots.size()<32",
-                      "pipelines.size()<64", "commands.size()<64"):
+                      "pipelines.size()<64", "commands.size()<64", "queues.size()<32"):
             self.assertIn(limit, self.capture)
         self.assertIn("new BeamRTCaptureSnapshot(*h->latest)", self.capture)
         self.assertIn("transaction(false);current=nullptr;delete h;*out=nullptr", self.capture)
         self.assertIn("GetCurrentThreadId()==h->thread && activeCalls==0", self.capture)
         self.assertIn("Failure retains host/hooks", self.header)
+
+    def test_queue_specific_snapshots_cannot_borrow_global_latest(self):
+        method = self.capture[self.capture.index('extern "C" int BeamRT_CaptureGetSnapshotForQueue'):]
+        method = method[:method.index('extern "C" int BeamRT_CaptureReadSnapshot')]
+        self.assertIn("h->owns(queue)", method)
+        self.assertIn("h->queues.find(queue)", method)
+        self.assertIn("new BeamRTCaptureSnapshot(*found->second.latest)", method)
+        self.assertNotIn("*h->latest", method)
+        self.assertIn("foundQueue->second.latest.reset()", self.capture)
+        self.assertIn("snapshot->queueReference=queue;snapshot->info.queue=queue", self.capture)
+        self.assertIn("queues.clear()", self.capture)
+
+    def test_v2_threading_contract_retains_quiescent_owner_detach(self):
+        self.assertRegex(self.capture, r"BeamRT_CaptureAbiVersion\(\)\s*\{return 2;")
+        self.assertIn("threadMode,reserved2", self.header)
+        self.assertIn("cfg->threadMode<=BEAMRT_CAPTURE_MULTITHREAD", self.capture)
+        self.assertIn("std::lock_guard<std::mutex> lock(host->mutex)", self.capture)
+        self.assertIn("GetCurrentThreadId()==h->thread && activeCalls==0", self.capture)
+        self.assertNotIn("SuspendThread", self.capture)
+        self.assertNotIn("CreateToolhelp32Snapshot", self.capture)
+        fixture = self.source("native/capture/thread_fixture.h")
+        for evidence in ("std::launch::async", "BEAMRT_CAPTURE_MULTITHREAD",
+                         "queue-specific capture mixed independent resources",
+                         "invalid queue retained stale descriptor provenance",
+                         "one invalid queue changed the other queue's capture",
+                         "another control thread detached the capture hooks",
+                         "multithread capture changed normal GPU output"):
+            self.assertIn(evidence, fixture)
 
     def test_pinned_dependency_ignored_output_and_independent_ci(self):
         build = self.source("native/capture/build.ps1")
@@ -127,8 +157,11 @@ class NativeCaptureContracts(unittest.TestCase):
                          "unknown descriptor reused stale resource provenance",
                          "unsupported bundle certified a capture",
                          "unsupported multi-thread scope certified",
+                         "capture budget error did not invalidate metadata",
                          "compute interception changed GPU output"):
             self.assertIn(evidence, fixture)
+        self.assertEqual(fixture.count("D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE"), 2)
+        self.assertEqual(fixture.count("D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE"), 2)
         self.assertNotIn("CaptureObserve", fixture)
 
 

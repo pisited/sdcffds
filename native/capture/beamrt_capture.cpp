@@ -40,6 +40,11 @@ struct Command {
 struct BeamRTCaptureSnapshot {
     BeamRTCaptureInfo info{};
     ComPtr<ID3D12Resource> references[8];
+    ComPtr<ID3D12CommandQueue> queueReference;
+};
+struct QueueCapture {
+    ComPtr<ID3D12CommandQueue> resource;
+    std::shared_ptr<BeamRTCaptureSnapshot> latest;
 };
 struct BeamRTCapture {
     std::mutex mutex;ComPtr<ID3D12Device> device;DWORD thread=0;
@@ -49,6 +54,7 @@ struct BeamRTCapture {
     std::map<ID3D12RootSignature*,ComPtr<ID3D12RootSignature>> roots;
     std::map<ID3D12PipelineState*,ComPtr<ID3D12PipelineState>> pipelines;
     std::map<ID3D12GraphicsCommandList*,Command> commands;
+    std::map<ID3D12CommandQueue*,QueueCapture> queues;
     std::shared_ptr<BeamRTCaptureSnapshot> latest;
     uint64_t calls=0,matched=0,submissions=0,captured=0;
     bool healthy=true;std::string reason="no submitted matching pass";
@@ -61,7 +67,7 @@ struct BeamRTCapture {
         if(!object)return false;ComPtr<IUnknown> a,b;
         check(device.As(&a),"device identity");check(object->QueryInterface(IID_PPV_ARGS(&b)),"caller identity");return a.Get()==b.Get();
     }
-    void poison(const char* why){healthy=false;latest.reset();reason=why;}
+    void poison(const char* why){healthy=false;latest.reset();queues.clear();reason=why;}
     Command* list(ID3D12GraphicsCommandList* object) {
         auto found=commands.find(object);return found==commands.end()?nullptr:&found->second;
     }
@@ -140,15 +146,23 @@ struct BeamRTCapture {
         if(found==tables.end()){reason="target table was not observed";return;}
         state->candidate.heap=state->heap;state->candidate.gpu=found->second;
     }
-    void submit(UINT count,ID3D12CommandList* const* lists) {
+    void submit(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists) {
         ++submissions;
         for(UINT i=0;i<count;++i) {
             ComPtr<ID3D12GraphicsCommandList> graphics;
             if(FAILED(lists[i]->QueryInterface(IID_PPV_ARGS(&graphics))))continue;
             auto state=list(graphics.Get());if(!state || !state->targeted)continue;
+            auto foundQueue=queues.find(queue);
+            if(foundQueue==queues.end()){
+                require(queues.size()<32,"queue capture budget exceeded");
+                QueueCapture entry;entry.resource=queue;
+                foundQueue=queues.emplace(queue,std::move(entry)).first;
+            }
             latest.reset();
+            foundQueue->second.latest.reset();
             if(state->poisoned || !state->candidate.heap){reason="unsupported or incomplete submitted target";continue;}
             auto snapshot=std::make_shared<BeamRTCaptureSnapshot>();
+            snapshot->queueReference=queue;snapshot->info.queue=queue;
             snapshot->info.submission=submissions;snapshot->info.recordingGeneration=state->generation;
             snapshot->info.count=config.inputCount;snapshot->info.kind=config.kind;
             bool valid=true;
@@ -159,7 +173,7 @@ struct BeamRTCapture {
                 snapshot->references[n]=found->second.resource;
                 snapshot->info.resources[n]=found->second.resource.Get();snapshot->info.views[n]=found->second.description;
             }
-            if(valid){latest=snapshot;++captured;reason="live bindings captured; GPU ordering/camera/lighting NOT verified";}
+            if(valid){latest=snapshot;foundQueue->second.latest=snapshot;++captured;reason="live bindings captured; GPU ordering/camera/lighting NOT verified";}
             else reason="unknown descriptor provenance or view mismatch";
         }
     }
@@ -168,8 +182,13 @@ static std::atomic<BeamRTCapture*> current{nullptr};
 template<class F>static void observe(F&& fn) noexcept {
     auto host=current.load();if(!host || nested!=1)return;
     try { std::lock_guard<std::mutex> lock(host->mutex);++host->calls;
-        if(GetCurrentThreadId()!=host->thread){host->poison("prototype does not support multiple API-calling threads");return;}
-        if(host->healthy)fn(*host);
+        // Mark callback failures while still holding the metadata lock. Another
+        // thread must not publish partially updated state before invalidation.
+        try {
+            if(host->config.threadMode==BEAMRT_CAPTURE_SINGLE_THREAD && GetCurrentThreadId()!=host->thread){host->poison("single-thread capture received another API-calling thread");return;}
+            if(host->healthy)fn(*host);
+        } catch(const std::exception& e){host->poison(e.what());}
+          catch(...){host->poison("capture callback failed");}
     } catch(const std::exception& e) {
         try{std::lock_guard<std::mutex> lock(host->mutex);host->poison(e.what());}catch(...){}
     } catch(...) {
@@ -262,7 +281,7 @@ static void STDMETHODCALLTYPE hBundle(ID3D12GraphicsCommandList* self,ID3D12Grap
 static void (STDMETHODCALLTYPE *oIndirect)(ID3D12GraphicsCommandList* self,ID3D12CommandSignature* signature,UINT count,ID3D12Resource* args,UINT64 argsOffset,ID3D12Resource* counter,UINT64 countOffset)=nullptr;
 static void STDMETHODCALLTYPE hIndirect(ID3D12GraphicsCommandList* self,ID3D12CommandSignature* signature,UINT count,ID3D12Resource* args,UINT64 argsOffset,ID3D12Resource* counter,UINT64 countOffset) { Call call;oIndirect(self,signature,count,args,argsOffset,counter,countOffset);observe([&](BeamRTCapture& h){auto state=h.list(self);if(state)state->poisoned=true;});}
 static void (STDMETHODCALLTYPE *oExecuteLists)(ID3D12CommandQueue* self,UINT count,ID3D12CommandList* const* lists)=nullptr;
-static void STDMETHODCALLTYPE hExecuteLists(ID3D12CommandQueue* self,UINT count,ID3D12CommandList* const* lists) { Call call;observe([&](BeamRTCapture& h){if(h.owns(self))h.submit(count,lists);});oExecuteLists(self,count,lists);}
+static void STDMETHODCALLTYPE hExecuteLists(ID3D12CommandQueue* self,UINT count,ID3D12CommandList* const* lists) { Call call;observe([&](BeamRTCapture& h){if(h.owns(self))h.submit(self,count,lists);});oExecuteLists(self,count,lists);}
 struct Hook { PVOID* original;PVOID replacement; };
 static Hook hooks[]={
     {reinterpret_cast<PVOID*>(&oCreateHeap),reinterpret_cast<PVOID>(hCreateHeap)},
@@ -318,13 +337,14 @@ static void validateRoot(const BeamRTCaptureConfig& c) {
     for(UINT i=0;i<c.inputCount;++i){require(valid.count(c.offsets[i])!=0 && distinct.insert(c.offsets[i]).second,"SRV offset invalid/duplicate");
         require(c.dimensions[i]==D3D12_SRV_DIMENSION_TEXTURE2D || (c.dimensions[i]==D3D12_SRV_DIMENSION_BUFFER && c.formats[i]==DXGI_FORMAT_UNKNOWN),"unsupported input contract");}
 }
-extern "C" uint32_t BeamRT_CaptureAbiVersion(){return 1;}
+extern "C" uint32_t BeamRT_CaptureAbiVersion(){return 2;}
 extern "C" const char* BeamRT_CaptureLastError(){return lastError.c_str();}
 extern "C" int BeamRT_CaptureStart(ID3D12Device* device,const BeamRTCaptureConfig* cfg,uint32_t quiet,BeamRTCapture** out){
     try{
         lastError.clear();require(device && cfg && out && !*out && quiet==1,"valid caller device/config and explicit API quiescence required");
         require(!current.load() && activeCalls==0,"another capture session or callback is active");
         require(cfg->reserved==0 && (cfg->kind==1 || cfg->kind==2) && cfg->inputCount>0 && cfg->inputCount<=8,"unsupported capture ABI fields");
+        require(cfg->reserved2==0 && cfg->threadMode<=BEAMRT_CAPTURE_MULTITHREAD,"unsupported capture thread mode/ABI fields");
         require(cfg->shader && cfg->shaderBytes>0 && cfg->shaderBytes<=16*1024*1024 && cfg->rootSignature && cfg->rootSignatureBytes>0 && cfg->rootSignatureBytes<=256*1024,"exact shader/root bytecode required");
         validateRoot(*cfg);check(device->GetDeviceRemovedReason(),"caller device");
         auto h=std::make_unique<BeamRTCapture>();h->device=device;h->thread=GetCurrentThreadId();h->config=*cfg;
@@ -343,13 +363,27 @@ extern "C" int BeamRT_CaptureStart(ID3D12Device* device,const BeamRTCaptureConfi
     }catch(const std::exception& e){lastError=e.what();return -1;}
 }
 extern "C" int BeamRT_CaptureGetStatus(BeamRTCapture* h,BeamRTCaptureStatus* out){
+    Call call;
     try{lastError.clear();require(h && h==current.load() && out,"active host/status required");std::lock_guard<std::mutex> lock(h->mutex);
-        *out={h->calls,h->matched,h->captured,1,h->healthy?1u:0u,h->latest?1u:0u,0};return 0;
+        *out={h->calls,h->matched,h->captured,1,h->healthy?1u:0u,h->latest?1u:0u,0,h->config.threadMode,static_cast<uint32_t>(h->queues.size())};return 0;
     }catch(const std::exception& e){lastError=e.what();return -1;}
 }
 extern "C" int BeamRT_CaptureGetSnapshot(BeamRTCapture* h,BeamRTCaptureSnapshot** out){
+    Call call;
     try{lastError.clear();require(h && h==current.load() && out && !*out,"active host/null snapshot output required");std::lock_guard<std::mutex> lock(h->mutex);
         require(h->healthy && bool(h->latest),h->reason.c_str());*out=new BeamRTCaptureSnapshot(*h->latest);return 0;
+    }catch(const std::exception& e){lastError=e.what();return -1;}
+}
+extern "C" int BeamRT_CaptureGetSnapshotForQueue(BeamRTCapture* h,ID3D12CommandQueue* queue,BeamRTCaptureSnapshot** out){
+    Call call;
+    try{
+        lastError.clear();require(h && h==current.load() && queue && out && !*out,"active host/queue/null snapshot output required");
+        std::lock_guard<std::mutex> lock(h->mutex);
+        require(h->healthy,"capture unhealthy; queue snapshot unavailable");
+        require(h->owns(queue),"foreign-device queue rejected");
+        auto found=h->queues.find(queue);
+        require(found!=h->queues.end() && bool(found->second.latest),"no valid matching submission on the requested queue");
+        *out=new BeamRTCaptureSnapshot(*found->second.latest);return 0;
     }catch(const std::exception& e){lastError=e.what();return -1;}
 }
 extern "C" int BeamRT_CaptureReadSnapshot(BeamRTCaptureSnapshot* snapshot,BeamRTCaptureInfo* out){

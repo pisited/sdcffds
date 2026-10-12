@@ -10,6 +10,10 @@
 // BeamNG attachment. Real native interfaces only; no Lua/scene pointers.
 struct BeamRTCapture;
 struct BeamRTCaptureSnapshot;
+enum BeamRTCaptureThreadMode : uint32_t {
+    BEAMRT_CAPTURE_SINGLE_THREAD=0,
+    BEAMRT_CAPTURE_MULTITHREAD=1
+};
 struct BeamRTCaptureConfig {
     const void* shader;uint64_t shaderBytes;
     const void* rootSignature;uint64_t rootSignatureBytes;
@@ -18,31 +22,38 @@ struct BeamRTCaptureConfig {
     uint32_t offsets[8]; // SRV indices inside the exact matched root table
     DXGI_FORMAT formats[8]; // UNKNOWN for structured-buffer inputs
     D3D12_SRV_DIMENSION dimensions[8]; // single-mip Texture2D or structured Buffer
+    uint32_t threadMode,reserved2; // ABI v2; single-thread is the default
 };
 struct BeamRTCaptureInfo {
     uint64_t submission,recordingGeneration;
     uint32_t count,kind;
     ID3D12Resource* resources[8]; // borrowed until snapshot release
     D3D12_SHADER_RESOURCE_VIEW_DESC views[8];
+    ID3D12CommandQueue* queue; // borrowed until snapshot release; NOT a GPU fence
     // Capture alone does not certify camera data, states, fences or lighting.
     uint32_t cameraVerified,gpuOrderingVerified,lightingConsumed,reserved;
 };
 struct BeamRTCaptureStatus {
     uint64_t interceptedCalls,matchedCommands,capturedSubmissions;
     uint32_t attached,captureHealthy,snapshotAvailable,reserved;
+    uint32_t threadMode,queueCount;
 };
 extern "C" {
 BEAMRT_CAPTURE_API uint32_t BeamRT_CaptureAbiVersion();
 BEAMRT_CAPTURE_API const char* BeamRT_CaptureLastError();
 // Before target root/pipeline/heaps/views/list creation; outside DllMain.
-// Prototype: one D3D12 API-calling thread, the Start caller. Caller must quiesce
-// all API callers for Start/Stop and pass apiCallersQuiescent=1. It cannot be
-// inferred from a timer or hooked Present. Other-thread activity poisons capture
-// while original API calls continue. NOT a game-ready multi-thread loader.
+// Caller must quiesce ALL API callers for the entire Start/Stop transaction and
+// pass apiCallersQuiescent=1. No target/trampoline code may be executing there.
+// It cannot be inferred from a timer or hooked Present. Runtime MULTITHREAD mode
+// serializes metadata only; it does not manage game threads, queue fences or
+// same-list/same-descriptor API races. NOT a game-ready loading mechanism.
 BEAMRT_CAPTURE_API int BeamRT_CaptureStart(ID3D12Device*,const BeamRTCaptureConfig*,
     uint32_t apiCallersQuiescent,BeamRTCapture**);
 BEAMRT_CAPTURE_API int BeamRT_CaptureGetStatus(BeamRTCapture*,BeamRTCaptureStatus*);
 BEAMRT_CAPTURE_API int BeamRT_CaptureGetSnapshot(BeamRTCapture*,BeamRTCaptureSnapshot**);
+// Queue-specific historical result. Missing/invalid target submission on that
+// queue cannot borrow another queue's result. Availability is not freshness.
+BEAMRT_CAPTURE_API int BeamRT_CaptureGetSnapshotForQueue(BeamRTCapture*,ID3D12CommandQueue*,BeamRTCaptureSnapshot**);
 BEAMRT_CAPTURE_API int BeamRT_CaptureReadSnapshot(BeamRTCaptureSnapshot*,BeamRTCaptureInfo*);
 BEAMRT_CAPTURE_API void BeamRT_CaptureReleaseSnapshot(BeamRTCaptureSnapshot**);
 // Explicit quiescent detach. Failure retains host/hooks: don't unload the DLL.

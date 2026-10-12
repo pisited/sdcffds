@@ -19,8 +19,12 @@ read-only interception of real public D3D12 calls in an isolated process.
 Exact shader/root matching and observed descriptor creation/copies recover
 actual texture and structured-buffer SRVs at submission. RTX 4070 and WARP
 graphics/compute fixtures passed with unchanged normal output and explicit
-detach. This is not a game-ready host: one API-calling thread, bounded retained
-metadata, and no verified camera, barriers/fences or lighting consumer. No DLL
+detach. ABI v2 adds opt-in multi-thread metadata capture and queue-specific
+snapshots; concurrent two-thread/two-queue tests passed on both backends, including
+invalidation isolation and retained queue ownership after detach. This is not a
+game-ready host: bounded retained metadata and no verified camera, barriers/fences
+or lighting consumer. Live attach/detach still requires externally established
+quiescence across all callers; that game-side policy is not implemented. No DLL
 has been installed into BeamNG. No Lua reload or new game test is needed.
 
 ## First consumer and acceptance gate
@@ -123,11 +127,12 @@ No overlay-only success satisfies the rendering milestone.
 
 The user explicitly approved restoring the matched ABI v2 baseline on 2026-10-11.
 That restoration passed strict compilation and isolated hardware/real-guardhouse
-and WARP/synthetic GPU tests. However, the later source snapshot `f270cf0` again
-contains the ABI-v1 worker implementation while its header/self-test expect v2.
-The current capture cycle leaves that separately committed rollback untouched;
-its independent build does not hide or resolve the mismatch. The matched worker
-baseline must be restored before rebuilding an integrated worker/adapter path.
+and WARP/synthetic GPU tests. Commit `f2d05d6` later reverted the matching
+`b59cc8c` worker implementation to ABI v1 while leaving the v2 header/tests.
+The current cycle restored those known-working changes directly in the PC's
+unpacked BeamRT source; the normalized source matches `b59cc8c` exactly. Strict
+rebuilds and real-guardhouse RTX 4070/synthetic WARP tests passed. New source and
+CI guards check the ABI and every declared entry point to catch that rollback.
 None of those offline checks establishes access to BeamNG resources or GI
 consumption, and the optional acquisition path remains unused in the game.
 
@@ -140,7 +145,7 @@ v0.109 engine-managed backend can schedule the matched pixel producer and GI
 consumer without that DLL, while retaining inline/default rendering fallback.
 
 The read-only capture slice is implemented, but the next native work must address
-real game pass identification, multithread/lifetime handling, camera and output
+real game pass identification, game-scale lifetime handling, camera and output
 bindings and command ordering. Then the reviewed host can record the matched
 receiver export, order native compute and bind its output to the owned GI
 consumer, with original-graph/history restoration on OFF. Only after reviewing

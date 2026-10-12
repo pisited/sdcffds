@@ -118,8 +118,10 @@ appearance, alpha textures and game-side OFF restoration remain unverified. No G
 DLL load, sandbox change or game installation beyond editing this unpacked mod.
 The worker was restored to the user-approved v2 baseline during that cycle.
 The later `f270cf0` snapshot again contains a v1 implementation against a v2
-header/test. That separate mismatch does not participate in this game-side
-backend and is left unchanged by the new independent capture work.
+header/test. The later native capture cycle restored the known-working `b59cc8c`
+implementation directly in this local mod and verified it on RTX 4070 and WARP.
+That worker does not participate in this engine-managed game-side backend;
+restoration is not a new in-game lighting result.
 
 Next: establish real native pass inputs, camera/output contracts and GPU
 ordering before deploying the host. Then prove one intended lighting consumer

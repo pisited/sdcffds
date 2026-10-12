@@ -4,6 +4,7 @@
 #include "beamrt_worker.h"
 #include <windows.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <cmath>
 #include <cstring>
@@ -45,6 +46,7 @@ struct BeamRTWorker {
     std::vector<ComPtr<ID3D12Resource>> inFlight;
     HANDLE event=nullptr;
     uint64_t sequence=0;
+    uint32_t acquisition=1;
     bool pending=false, signaled=false, recording=false;
     ~BeamRTWorker() { if (event) CloseHandle(event); }
     ComPtr<ID3D12Resource> resource(const D3D12_RESOURCE_DESC& desc, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state) {
@@ -107,7 +109,7 @@ static void validate(const BeamRTScene& s, const uint8_t* rgba, uint64_t bytes) 
     require(std::isfinite(determinant) && std::abs(determinant)>1e-10f, "singular scene transform");
     for (uint32_t mode:s.materials) require(mode<=3, "unsupported material policy");
 }
-extern "C" uint32_t BeamRT_WorkerAbiVersion() { return 1; }
+extern "C" uint32_t BeamRT_WorkerAbiVersion() { return 2; }
 extern "C" const char* BeamRT_WorkerLastError() { return lastError.c_str(); }
 extern "C" int BeamRT_WorkerCreate(void* nativeDevice, const void* shader, uint64_t bytes, BeamRTWorker** output) {
     BeamRTWorker* w=nullptr;
@@ -142,6 +144,47 @@ extern "C" int BeamRT_WorkerCreate(void* nativeDevice, const void* shader, uint6
         check(w->device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&w->descriptors)), "CreateDescriptorHeap");
         *output=w; return 0;
     } catch (const std::exception& e) { lastError=e.what(); delete w; return -1; }
+}
+extern "C" int BeamRT_WorkerCreateOnAdapter(uint32_t low, int32_t high,
+    uint32_t candidateCreationAllowed, const void* shader, uint64_t bytes, BeamRTWorker** output) {
+    try {
+        lastError.clear(); require(output && !*output, "output must be a null worker pointer");
+        require(candidateCreationAllowed==1, "candidate device creation requires explicit opt-in");
+        require(shader && bytes>=4 && bytes<=16*1024*1024, "valid compute shader required");
+        ComPtr<IDXGIFactory4> factory; check(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+        const LUID wanted{low,high}; ComPtr<IDXGIAdapter1> adapter;
+        check(factory->EnumAdapterByLuid(wanted,IID_PPV_ARGS(&adapter)), "EnumAdapterByLuid (no default fallback)");
+        ComPtr<ID3D12Device> device;
+        check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)), "D3D12CreateDevice candidate");
+        const LUID actual=device->GetAdapterLuid();
+        require(actual.LowPart==low && actual.HighPart==high, "candidate adapter identity mismatch");
+        const int result=BeamRT_WorkerCreate(device.Get(),shader,bytes,output);
+        if (result==0) (*output)->acquisition=2;
+        return result;
+    } catch (const std::exception& e) { lastError=e.what(); return -1; }
+}
+extern "C" int BeamRT_WorkerGetDeviceInfo(BeamRTWorker* w, BeamRTDeviceInfo* output) {
+    try {
+        lastError.clear(); require(w && output, "worker/device-info output required");
+        std::lock_guard<std::mutex> lock(w->mutex);
+        check(w->device->GetDeviceRemovedReason(), "DeviceRemovedReason");
+        const LUID luid=w->device->GetAdapterLuid();
+        *output={luid.LowPart,luid.HighPart,w->acquisition,0}; return 0;
+    } catch (const std::exception& e) { lastError=e.what(); return -1; }
+}
+extern "C" int BeamRT_WorkerDeviceMatchesResource(BeamRTWorker* w, void* resource, uint32_t* matches) {
+    try {
+        lastError.clear(); require(matches!=nullptr, "device-match output required"); *matches=0;
+        require(w && resource, "worker and valid native resource required");
+        std::lock_guard<std::mutex> lock(w->mutex);
+        check(w->device->GetDeviceRemovedReason(), "DeviceRemovedReason");
+        ComPtr<ID3D12Device> owner;
+        check(static_cast<ID3D12Resource*>(resource)->GetDevice(IID_PPV_ARGS(&owner)), "Resource GetDevice");
+        check(owner->GetDeviceRemovedReason(), "Resource DeviceRemovedReason");
+        ComPtr<IUnknown> ours, theirs;
+        check(w->device.As(&ours), "Worker device IUnknown"); check(owner.As(&theirs), "Resource device IUnknown");
+        *matches=ours.Get()==theirs.Get()?1u:0u; return 0;
+    } catch (const std::exception& e) { lastError=e.what(); return -1; }
 }
 extern "C" int BeamRT_WorkerUpload(BeamRTWorker* w, const BeamRTScene* scene, const uint8_t* rgba, uint64_t bytes) {
     try {

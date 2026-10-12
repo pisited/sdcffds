@@ -31,6 +31,7 @@ struct Renderer {
     void submit(){hr(list->Close());ID3D12CommandList* lists[]={list.Get()};queue->ExecuteCommandLists(1,lists);hr(queue->Signal(fence.Get(),++sequence));HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);require(event!=nullptr,"event failed");hr(fence->SetEventOnCompletion(sequence,event));DWORD result=WaitForSingleObject(event,10000);CloseHandle(event);require(result==WAIT_OBJECT_0,"fixture GPU timeout");hr(device->GetDeviceRemovedReason());uploads.clear();}
     ComPtr<ID3D12Resource> texture(float value){D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=1;d.Height=1;d.DepthOrArraySize=1;d.MipLevels=1;d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;d.SampleDesc.Count=1;auto texture=make(device.Get(),d,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST);D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT rows;UINT64 rowBytes,total;device->GetCopyableFootprints(&d,0,1,0,&footprint,&rows,&rowBytes,&total);auto upload=make(device.Get(),buffer(total),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);float color[]={value,value,value,value};void* mapped;D3D12_RANGE none{0,0};hr(upload->Map(0,&none,&mapped));std::memcpy(static_cast<uint8_t*>(mapped)+footprint.Offset,color,sizeof(color));upload->Unmap(0,nullptr);D3D12_TEXTURE_COPY_LOCATION dst{},src{};dst.pResource=texture.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;src.pResource=upload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=footprint;list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);transition(list.Get(),texture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);uploads.push_back(upload);return texture;}
 };
+#include "thread_fixture.h"
 int wmain(int argc,wchar_t** argv){BeamRTCapture* host=nullptr;BeamRTCaptureSnapshot* snapshot=nullptr;
     try{
         require(argc==4 || argc==5,"usage: capture_test fixture.vs.cso fixture.ps.cso fixture.cs.cso [--warp]");const bool warp=argc==5 && std::wstring(argv[4])==L"--warp";require(argc!=5 || warp,"unknown option");
@@ -43,8 +44,9 @@ int wmain(int argc,wchar_t** argv){BeamRTCapture* host=nullptr;BeamRTCaptureSnap
         ComPtr<ID3DBlob> encoded,errors;hr(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&encoded,&errors));
         BeamRTCaptureConfig config{};config.shader=ps.data();config.shaderBytes=ps.size();config.rootSignature=encoded->GetBufferPointer();config.rootSignatureBytes=encoded->GetBufferSize();config.kind=1;config.inputCount=3;
         for(UINT i=0;i<3;++i){config.offsets[i]=i;config.formats[i]=i==2?DXGI_FORMAT_UNKNOWN:DXGI_FORMAT_R32G32B32A32_FLOAT;config.dimensions[i]=i==2?D3D12_SRV_DIMENSION_BUFFER:D3D12_SRV_DIMENSION_TEXTURE2D;}
-        require(BeamRT_CaptureAbiVersion()==1,"capture ABI mismatch");require(BeamRT_CaptureStart(device.Get(),&config,0,&host)!=0 && !host,"unapproved API quiescence accepted");
+        require(BeamRT_CaptureAbiVersion()==2,"capture ABI mismatch");require(BeamRT_CaptureStart(device.Get(),&config,0,&host)!=0 && !host,"unapproved API quiescence accepted");
         auto invalid=config;invalid.offsets[2]=3;require(BeamRT_CaptureStart(device.Get(),&invalid,1,&host)!=0 && !host,"out-of-range root binding accepted");
+        invalid=config;invalid.threadMode=2;require(BeamRT_CaptureStart(device.Get(),&invalid,1,&host)!=0 && !host,"unsupported thread mode accepted");
         success(BeamRT_CaptureStart(device.Get(),&config,1,&host));
         Renderer render(device.Get());render.begin();auto first=render.texture(1),second=render.texture(2),alternate=render.texture(4);render.submit();
         auto lights=make(device.Get(),buffer(16),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);float light[]={3,3,3,3};void* mapped;D3D12_RANGE none{0,0};hr(lights->Map(0,&none,&mapped));std::memcpy(mapped,light,16);lights->Unmap(0,nullptr);
@@ -89,7 +91,44 @@ int wmain(int argc,wchar_t** argv){BeamRTCapture* host=nullptr;BeamRTCaptureSnap
         device->CreateShaderResourceView(first.Get(),&view,address(computeCpu.Get(),0));device->CreateShaderResourceView(second.Get(),&view,address(computeCpu.Get(),1));
         auto structured=view;structured.Format=DXGI_FORMAT_UNKNOWN;structured.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;structured.Buffer={0,1,16,D3D12_BUFFER_SRV_FLAG_NONE};device->CreateShaderResourceView(lights.Get(),&structured,address(computeCpu.Get(),2));device->CopyDescriptorsSimple(3,address(computeGpu.Get(),0),address(computeCpu.Get(),0),heapDesc.Type);
         auto outputDesc=buffer(16);outputDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;auto output=make(device.Get(),outputDesc,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);auto outputRead=make(device.Get(),buffer(16),D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-        Renderer computeRenderer(device.Get());computeRenderer.begin();computeRenderer.list->SetPipelineState(compute.Get());computeRenderer.list->SetComputeRootSignature(computeRoot.Get());ID3D12DescriptorHeap* computeHeaps[]={computeGpu.Get()};computeRenderer.list->SetDescriptorHeaps(1,computeHeaps);computeRenderer.list->SetComputeRootDescriptorTable(0,computeGpu->GetGPUDescriptorHandleForHeapStart());computeRenderer.list->SetComputeRootUnorderedAccessView(1,output->GetGPUVirtualAddress());computeRenderer.list->Dispatch(1,1,1);transition(computeRenderer.list.Get(),output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);computeRenderer.list->CopyBufferRegion(outputRead.Get(),0,output.Get(),0,16);computeRenderer.submit();success(BeamRT_CaptureGetSnapshot(host,&snapshot));success(BeamRT_CaptureReadSnapshot(snapshot,&info));require(info.kind==2 && info.resources[2]==lights.Get(),"compute bindings not intercepted");D3D12_RANGE outputRange{0,16};hr(outputRead->Map(0,&outputRange,&mapped));require(std::abs(*static_cast<float*>(mapped)-3.75f)<.00001f,"compute interception changed GPU output");outputRead->Unmap(0,&none);BeamRT_CaptureReleaseSnapshot(&snapshot);success(BeamRT_CaptureStop(&host,1));
+        Renderer computeRenderer(device.Get());computeRenderer.begin();
+        // These inputs came from the graphics fixture. Compute texture reads
+        // need NON_PIXEL_SHADER_RESOURCE, even if a driver tolerates omission.
+        transition(computeRenderer.list.Get(),first.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        transition(computeRenderer.list.Get(),second.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        computeRenderer.list->SetPipelineState(compute.Get());
+        computeRenderer.list->SetComputeRootSignature(computeRoot.Get());
+        ID3D12DescriptorHeap* computeHeaps[]={computeGpu.Get()};
+        computeRenderer.list->SetDescriptorHeaps(1,computeHeaps);
+        computeRenderer.list->SetComputeRootDescriptorTable(0,computeGpu->GetGPUDescriptorHandleForHeapStart());
+        computeRenderer.list->SetComputeRootUnorderedAccessView(1,output->GetGPUVirtualAddress());
+        computeRenderer.list->Dispatch(1,1,1);
+        transition(computeRenderer.list.Get(),output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        computeRenderer.list->CopyBufferRegion(outputRead.Get(),0,output.Get(),0,16);
+        transition(computeRenderer.list.Get(),first.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(computeRenderer.list.Get(),second.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        computeRenderer.submit();
+        success(BeamRT_CaptureGetSnapshot(host,&snapshot));success(BeamRT_CaptureReadSnapshot(snapshot,&info));
+        require(info.kind==2 && info.resources[2]==lights.Get(),"compute bindings not intercepted");
+        D3D12_RANGE outputRange{0,16};hr(outputRead->Map(0,&outputRange,&mapped));
+        require(std::abs(*static_cast<float*>(mapped)-3.75f)<.00001f,"compute interception changed GPU output");
+        outputRead->Unmap(0,&none);BeamRT_CaptureReleaseSnapshot(&snapshot);success(BeamRT_CaptureStop(&host,1));
+        testMultithreadCapture(host,device.Get(),config,vs,first.Get(),second.Get(),alternate.Get(),lights.Get());
+        // Exceed a capture budget with otherwise valid, GPU-idle API calls.
+        // The callback error must not turn a successful renderer call into failure.
+        success(BeamRT_CaptureStart(device.Get(),&config,1,&host));
+        {
+            std::vector<ComPtr<ID3D12DescriptorHeap>> held(65);
+            D3D12_DESCRIPTOR_HEAP_DESC heapDescSmall{};heapDescSmall.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            heapDescSmall.NumDescriptors=1;
+            for(auto& heap:held)hr(device->CreateDescriptorHeap(&heapDescSmall,IID_PPV_ARGS(&heap)));
+            success(BeamRT_CaptureGetStatus(host,&status));
+            require(!status.captureHealthy && !status.snapshotAvailable,"capture budget error did not invalidate metadata");
+            require(BeamRT_CaptureGetSnapshot(host,&snapshot)!=0 && !snapshot,
+                    "poisoned capture returned a snapshot");
+            draw(false,3.75f);
+            success(BeamRT_CaptureStop(&host,1));
+        }
         ComPtr<ID3D12InfoQueue> messages;if(SUCCEEDED(device.As(&messages)))for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T bytes=0;hr(messages->GetMessage(i,nullptr,&bytes));std::vector<uint8_t> storage(bytes);auto message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());hr(messages->GetMessage(i,message,&bytes));require(message->Severity>D3D12_MESSAGE_SEVERITY_ERROR,message->pDescription);}
         std::cout<<"PASS: actual public-API interception, exact pass/root match, live texture+structured-buffer capture, descriptor copies, reset generations, invalidation, quiescent detach, unchanged GPU output\n";
         std::cout<<"Debug layer "<<(debugEnabled?"enabled":"unavailable; not debug-clean proof")<<". No BeamNG attachment or lighting correction.\n";return 0;

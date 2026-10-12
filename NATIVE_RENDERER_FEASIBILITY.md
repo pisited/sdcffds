@@ -25,8 +25,11 @@ RTX 4070 and WARP only in its own process. It matches exact shader/root bytecode
 tracks descriptor provenance and returns actual bound SRV resource references
 without changing GPU output. It has no BeamNG loading mechanism and does not
 verify frame camera, GPU ordering, output bindings or lighting consumption.
-Single-thread and retained-object limits prohibit treating it as a game-ready
-host. Existing Lua/HLSL rendering remains unchanged by this native-only cycle.
+ABI v2 adds opt-in multi-thread metadata capture and per-queue snapshots, tested
+with concurrent real D3D12 calls. This does not implement live-game thread
+quiescence or GPU synchronization. Retained-object limits and missing lifecycle
+handling prohibit treating it as a game-ready host. Existing Lua/HLSL rendering
+remains unchanged by this native-only cycle.
 
 The user subsequently asked to continue. A small no-ReShade native BVH GPU worker
 has now been built and loaded **only in its separate offline self-test process**.
@@ -166,5 +169,7 @@ actual world-mesh visibility affects intended lighting and disable restores the
 original rendering. No overlay-only success, repeated proxy lookup, guardhouse
 alignment or unchanged legacy-path comparison establishes that connection.
 The parked v0.109 comparison should not restart until there is new resource or
-lighting evidence. The separate worker v1-source/v2-header mismatch at `f270cf0`
-also remains outstanding; the independent capture fixture does not repair it.
+lighting evidence. The worker mismatch present at `f270cf0` was restored in this
+cycle to the known-working `b59cc8c` implementation, with successful hardware
+and WARP rebuild/tests and new source/CI rollback guards. That restoration does
+not connect the worker to the capture snapshots or establish game integration.

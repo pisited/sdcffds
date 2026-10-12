@@ -25,8 +25,11 @@ fabricate observations or feed a list of pretend resource handles to the DLL.
   recording generation. Bundles/indirect commands conservatively invalidate
   capture for that list; the original API calls still run unchanged.
 - A snapshot retains its actual `ID3D12Resource` references after explicit host
-  detachment. It contains the submitted view descriptions and a recording and
-  submission serial. It is **not automatically current-frame data**.
+  detachment, plus the actual submitting `ID3D12CommandQueue` reference. It
+  contains the submitted view descriptions and a recording and submission serial.
+  `GetSnapshotForQueue` isolates each queue's result: an invalid target on one
+  queue cannot borrow or erase another queue's result. These are CPU observation
+  serials, **not GPU fence values or automatically current-frame data**.
 - The DLL does not record GPU work, replace draws, allocate a visibility target,
   submit commands, read GPU pixels or modify lighting. Errors disable capture;
   callbacks forward the renderer's original arguments/results.
@@ -43,11 +46,26 @@ target root, pipeline, heaps, views and command lists are created. Late attach
 does not recover existing descriptors. An unsupported/unknown binding produces
 no certified capture.
 
-This prototype supports **one D3D12 API-calling thread**, the Start caller.
-Start and Stop require externally established API-call quiescence, explicitly
-passed as `apiCallersQuiescent=1`. A timer, paused simulation or Present hook does
-not establish that condition. Other-thread API activity poisons capture while
-forwarding the original call. This guard is not a multithread-safe game host.
+The default `BEAMRT_CAPTURE_SINGLE_THREAD` mode supports only the Start caller;
+API calls from another thread poison capture while forwarding the original call.
+Opt-in `BEAMRT_CAPTURE_MULTITHREAD` mode serializes capture metadata updates and
+keeps the latest snapshot separate for each observed command queue. It does not
+make concurrent use of the same command list, descriptor slot, or other D3D12
+object race-safe. Queue identity also does not establish GPU execution order or
+snapshot freshness.
+
+Both modes require Start and Stop to run only with externally established
+quiescence across **all** D3D12 API callers and capture queries, explicitly passed as
+`apiCallersQuiescent=1`. A timer, paused simulation or Present hook does not
+establish that condition. Stop must run on the original Start thread. This
+limited metadata synchronization is not a multithread-safe game host or a
+BeamNG loading mechanism.
+
+The transaction currently enlists only its control thread. All other callers
+must remain outside target/trampoline code for the entire transaction; enlisting
+the current thread does not make live-game attach/detach safe. The fixture starts
+its rendering threads after installation and joins them before removal. No game
+thread enumeration or suspension is implemented or performed.
 
 Only legacy CreateCommandList and graphics/compute pipeline creation are
 observed. Supported views are one-mip, non-array, non-MSAA Texture2D views and
@@ -59,7 +77,8 @@ Non-target submissions can leave a historical snapshot available; callers must
 never treat availability alone as evidence of frame freshness.
 
 Metadata holds strong references until Stop and has hard limits: 64 heaps,
-512 tracked SRVs, 32 matching roots, 64 matching pipelines and 64 command lists.
+512 tracked SRVs, 32 matching roots, 64 matching pipelines, 64 command lists and
+32 observed target queues.
 Budget exhaustion disables capture. It intentionally lacks game-scale object
 retirement, heap recreation/resize, device-removal recovery and queue retirement.
 References prevent premature deletion, but do not prove safe GPU use or fences.
@@ -92,24 +111,41 @@ Latest local strict `/W4 /WX` C/C++ and `/Ges /WX` shader builds passed. The
 graphics and compute fixtures passed on RTX 4070 and WARP, including actual
 texture/structured-buffer binding recovery, both descriptor-copy APIs,
 pre-submit descriptor changes, null-view invalidation, unsupported-bundle
-rejection, other-thread rejection, retained snapshot lifetime and explicit
-detach/reattach. Known GPU output remains unchanged before, during and after
+rejection, default single-thread rejection, retained snapshot lifetime and
+explicit detach/reattach. The ABI-v2 test also creates, records and submits on
+two concurrent API threads and two independent queues, verifies per-queue
+resource provenance and invalidation isolation, tests sequential list handoff
+to another thread, and retains queue/resource snapshots after detach. Known GPU
+output remains unchanged before, during and after
 capture. The debug layer was unavailable locally; these are **not debug-clean
 proof or performance results**. Windows WARP CI is defined separately and has
 not been run remotely by this change.
 
-The capture build does not depend on the older worker. At source snapshot
-`f270cf0`, `native/worker/beamrt_worker.cpp` reports ABI v1 while its header/test
-expect v2. That separate rollback is not repaired by this prototype and must be
-resolved before rebuilding an integrated worker/adapter path.
+Callback errors mark the session unhealthy under the metadata lock, before
+another thread can publish partially updated state. A valid 65-heap fixture
+exceeds the capture budget and confirms that original API success is preserved
+while capture is invalidated. All 135 local regression/source-contract tests
+passed; the existing offline GI producer/consumer restoration fixture also
+passed after the worker restoration. None of these uses BeamNG resources.
+
+The capture build is independent of `native/worker`. The current worker source
+reports ABI v2, matching its header and self-test. This agreement does not create
+an integration between the capture snapshots and the offline worker.
+The worker was restored directly in the local unpacked mod to the known-working
+`b59cc8c` implementation and passed real-guardhouse RTX 4070 and synthetic WARP
+tests. `test_native_worker_contracts.py` and worker CI now check the implementation
+against all declared entry points so the observed v1 rollback is caught early.
 
 ## API and removal contract
 
-Capture ABI v1 is separate from the worker ABI. Start/Stop and exported calls
-are caller-serialized; valid native interfaces/handles are required, not Lua
+Capture ABI **v2** is separate from the worker ABI. Check AbiVersion and rebuild
+clients with the current header; config/info/status layouts have changed.
+Lifecycle operations are caller-serialized; runtime metadata queries are locked,
+but must finish before Stop. Valid native interfaces/handles are required, not Lua
 objects or integers guessed to be addresses. Config bytecode is copied on Start.
 Snapshot output handles must initially be null. Resource pointers returned by
-ReadSnapshot are borrowed until ReleaseSnapshot; obtain your own COM reference
+ReadSnapshot, including the queue pointer, are borrowed until ReleaseSnapshot;
+obtain your own COM reference
 if you need them afterward. Copy LastError before another API call on that thread.
 
 Start installs hooks only when called explicitly, outside loader-lock work.
@@ -122,7 +158,9 @@ does not install anything into the game.
 ## Next milestone
 
 Before any BeamNG deployment, review early loading, quiescence/thread handling,
-resource retirement and complete removal with the user. Establish the actual
+resource retirement and complete removal with the user. Multi-thread metadata
+capture is now tested, but game-scale lifetime/resize handling, GPU fences and
+resource-state tracking remain missing. Establish the actual
 owned GI or source-lighting pass's compiled shader/root contract, camera and
 output bindings and command ordering. Then connect one real GPU visibility
 result to the intended lighting contribution with reliable OFF restoration.
@@ -137,6 +175,9 @@ Input capture alone cannot correct either issue.
 ## Public API references
 
 - [Detours signatures, transactions and thread enlistment](https://github.com/microsoft/Detours/wiki/Using-Detours).
+- [Why un-enlisted executing threads cannot be assumed safe](https://github.com/microsoft/Detours/wiki/DetourUpdateThread).
+- [Command-list/allocator recording and reuse restrictions](https://learn.microsoft.com/en-us/windows/win32/direct3d12/recording-command-lists-and-bundles).
+- [Descriptor copies require non-conflicting access](https://learn.microsoft.com/en-us/windows/win32/direct3d12/copying-descriptors).
 - [D3D12 descriptor-copy source restrictions](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-copydescriptorssimple).
 - [Heap changes and descriptor-table invalidation](https://learn.microsoft.com/en-us/windows/win32/direct3d12/setting-descriptor-heaps).
 - [D3D12 root signatures](https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signatures).

@@ -5,6 +5,7 @@ on:
       - 'native/worker/**'
       - 'native/gi/**'
       - 'tools/tests/test_native_gi_contracts.py'
+      - 'tools/tests/test_native_worker_contracts.py'
       - 'shaders/beamrt/beamrtGITrace*'
       - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
       - 'shaders/beamrt/beamrtGIReceiverExportP_v002.hlsl'
@@ -24,6 +25,7 @@ on:
       - 'native/worker/**'
       - 'native/gi/**'
       - 'tools/tests/test_native_gi_contracts.py'
+      - 'tools/tests/test_native_worker_contracts.py'
       - 'shaders/beamrt/beamrtGITrace*'
       - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
       - 'shaders/beamrt/beamrtGIReceiverExportP_v002.hlsl'
@@ -52,6 +54,8 @@ jobs:
         run: python -B tools/tests/test_native_fixture.py
       - name: Native GI integration source contracts
         run: python -B tools/tests/test_native_gi_contracts.py
+      - name: Worker header and implementation ABI regression guard
+        run: python -B tools/tests/test_native_worker_contracts.py
       - name: Compile DLL and compute shader; run isolated WARP validation
         shell: pwsh
         run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp
