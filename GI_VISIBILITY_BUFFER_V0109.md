@@ -1,5 +1,14 @@
 # BeamRT v0.109: game-side geometry visibility handoff
 
+Current status, 2026-10-11: **parked after the bounded live comparison**. Logs
+confirmed underground selection and active buffer settings, but the user saw
+no noticeable lighting improvement. Native shadows blinked in/out and prevented
+an exact screenshot match. GPU consumption and a real lighting correction were
+not established; activation is not a passed rendering milestone. Keep the
+existing opt-in code and fallback, but do not repeat these commands/tests without
+new evidence. The next native input-capture work is recorded in
+[native/capture/README.md](native/capture/README.md); it is not installed in-game.
+
 ## Missing / changed / implemented
 
 The native worker and GPU visibility consumer existed offline, but no game-side
@@ -52,7 +61,7 @@ appearance evidence. Status deliberately keeps those verification flags false.
 If no world samples or supported opaque material resolve, read the inactive
 reason; do not add another wire/debug shader.
 
-## One compact game validation
+## Archived compact game validation (already attempted; do not repeat)
 
 Use **GE Lua**, one line per console entry. Park in/near a prepared WCU steel
 factory sewer/underground section. Keep daytime, car/walk mode, lights and camera
@@ -104,12 +113,17 @@ offline GPU validation, not the full BeamNG GI draw or live underground proof.
 All 120 tracked Python/Lua tests and 26 local full-main integration/motion tests
 passed. The original v082 pixel binary remains byte-identical (SHA256
 `924033ff8e0473e83e7fc8983d56f5d405acdfbbe58cdd733181c83a79a37cdc`).
-Debug layer unavailable locally; performance, live bindings, sewer appearance,
-alpha textures and game-side OFF restoration remain unverified. No Git publish,
+Debug layer unavailable locally; performance, GPU consumption, a corrected sewer
+appearance, alpha textures and game-side OFF restoration remain unverified. No Git publish,
 DLL load, sandbox change or game installation beyond editing this unpacked mod.
-The committed old worker ABI mismatch was restored to the v2 baseline already
-chosen by the user; it does not participate in this game-side backend.
+The worker was restored to the user-approved v2 baseline during that cycle.
+The later `f270cf0` snapshot again contains a v1 implementation against a v2
+header/test. That separate mismatch does not participate in this game-side
+backend and is left unchanged by the new independent capture work.
 
-Next: prove this one game GI handoff, expand to adjacent real mesh instances,
-then light visibility at secondary hits. Native C++ resource capture remains a
-separate reviewed host task; an engine-managed mask is not proof of DLL access.
+Next: establish real native pass inputs, camera/output contracts and GPU
+ordering before deploying the host. Then prove one intended lighting consumer
+and reliable OFF restoration. Secondary-hit light visibility, adjacent mesh
+instances and alpha textures follow that connection. An engine-managed mask
+is not proof of DLL access, and this query does not replace daytime ambient/sun
+or native headlight shadowing.

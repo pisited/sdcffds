@@ -1,14 +1,27 @@
 # Native-to-GI connection: loading and interception review
 
-Status: design review only, 2026-10-11. No DLL loading/injection, hook installation,
-game-file change or new in-game test is authorized or performed by this document.
-No standalone tracer expansion. Current working Lua/HLSL renderer stays intact.
+Status: deployment review plus isolated capture implementation, 2026-10-11.
+No BeamNG DLL loading/injection, hook installation, game-file change or new
+in-game test is authorized or performed by this document. No standalone tracer
+expansion. Current working Lua/HLSL renderer stays intact.
 
 Update v0.109: an opt-in engine-managed PostFX producer/consumer route is now
 registered through game-side Lua, with underground mesh GI selection. See
 [game-side integration and bounded activation](GI_VISIBILITY_BUFFER_V0109.md).
-This is not native DLL loading/resource interception; no native C++ host has
-been installed, and live game consumption/appearance remains unverified.
+This is not native DLL loading/resource interception. The user subsequently
+reported no noticeable lighting improvement with the underground buffer
+activated; native shadows also blinked in/out. Correct selection/settings are
+not GPU consumption proof. That bounded experiment is parked, not a passed
+lighting milestone, and should not be repeated without new evidence.
+
+Update, native capture: [native/capture](native/capture/README.md) now implements
+read-only interception of real public D3D12 calls in an isolated process.
+Exact shader/root matching and observed descriptor creation/copies recover
+actual texture and structured-buffer SRVs at submission. RTX 4070 and WARP
+graphics/compute fixtures passed with unchanged normal output and explicit
+detach. This is not a game-ready host: one API-calling thread, bounded retained
+metadata, and no verified camera, barriers/fences or lighting consumer. No DLL
+has been installed into BeamNG. No Lua reload or new game test is needed.
 
 ## First consumer and acceptance gate
 
@@ -106,15 +119,17 @@ Never accumulate the result repeatedly into native lightinfo, run both replaceme
 and original contributions, or use final-image darkness as visibility proof.
 No overlay-only success satisfies the rendering milestone.
 
-## Resolved worker baseline and next implementation
+## Worker baseline history and next implementation
 
 The user explicitly approved restoring the matched ABI v2 baseline on 2026-10-11.
-native/worker/beamrt_worker.cpp again implements the v2 candidate acquisition and
-resource-owner checks declared by its header and exercised by its self-test.
-Strict compilation and isolated hardware/real-guardhouse and WARP/synthetic GPU
-tests passed after restoration. The optional acquisition path remains unused in
-BeamNG; no DLL was installed or loaded into the game. These offline checks do
-not establish access to game resources or consumption by its GI pass.
+That restoration passed strict compilation and isolated hardware/real-guardhouse
+and WARP/synthetic GPU tests. However, the later source snapshot `f270cf0` again
+contains the ABI-v1 worker implementation while its header/self-test expect v2.
+The current capture cycle leaves that separately committed rollback untouched;
+its independent build does not hide or resolve the mismatch. The matched worker
+baseline must be restored before rebuilding an integrated worker/adapter path.
+None of those offline checks establishes access to BeamNG resources or GI
+consumption, and the optional acquisition path remains unused in the game.
 
 The resource adapter and GPU output/owned-GI consumer slice is implemented;
 see [native GI contract and validation](native/gi/README.md). Existing Lua does
@@ -124,10 +139,15 @@ resources, submit work, load itself or install interception. The separate
 v0.109 engine-managed backend can schedule the matched pixel producer and GI
 consumer without that DLL, while retaining inline/default rendering fallback.
 
-Next implementation is the reviewed loading/interception host: identify the
-owned GI draw, capture its real resources/constants, record the matched receiver
-export, order native compute and bind its output to the owned GI consumer, with
-original-graph/history restoration on OFF. Only after reviewing a complete
-loading mechanism should a bounded in-game test check real lighting consumption
-and restoration. No old sun/guardhouse comparison, LUID-only game probe, further
-BVH rewrite or additional screen-space algorithm.
+The read-only capture slice is implemented, but the next native work must address
+real game pass identification, multithread/lifetime handling, camera and output
+bindings and command ordering. Then the reviewed host can record the matched
+receiver export, order native compute and bind its output to the owned GI
+consumer, with original-graph/history restoration on OFF. Only after reviewing
+a complete loading mechanism should a bounded in-game test check lighting
+consumption and restoration. No old sun/guardhouse comparison, LUID-only game
+probe, further BVH rewrite or additional screen-space algorithm.
+
+Receiver-to-surfel visibility cannot by itself remove daytime sky/ambient fill
+or fix a surface that was lit through a wall. Visibility to the light at secondary
+surfaces and the real local-light consumer remain required for those problems.

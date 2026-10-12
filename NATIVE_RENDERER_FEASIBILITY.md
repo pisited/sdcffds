@@ -14,15 +14,28 @@ device acquisition alone does not pass the in-game integration gate.
 Update v0.109: the same GPU visibility format/query is now connected to an
 opt-in BeamNG-managed pixel-pass GI backend, including prepared underground
 geometry. [Game-side activation](GI_VISIBILITY_BUFFER_V0109.md) records the
-small workload, fallback and remaining live validation. This does not establish
-native C++ graphics interception or hardware-buffer sharing with the worker.
+small workload and fallback. The user's bounded live comparison showed no
+noticeable lighting improvement; that route is parked without claiming GPU
+consumption. This does not establish native C++ graphics interception or
+hardware-buffer sharing with the worker.
+
+Update, native capture: [native/capture/README.md](native/capture/README.md)
+describes an implemented read-only public-D3D12 interception slice, tested on
+RTX 4070 and WARP only in its own process. It matches exact shader/root bytecode,
+tracks descriptor provenance and returns actual bound SRV resource references
+without changing GPU output. It has no BeamNG loading mechanism and does not
+verify frame camera, GPU ordering, output bindings or lighting consumption.
+Single-thread and retained-object limits prohibit treating it as a game-ready
+host. Existing Lua/HLSL rendering remains unchanged by this native-only cycle.
 
 The user subsequently asked to continue. A small no-ReShade native BVH GPU worker
 has now been built and loaded **only in its separate offline self-test process**.
 The real guardhouse GPU queries passed on the RTX 4070; synthetic WARP tests also
 passed. See [native/worker/README.md](native/worker/README.md). No BeamNG attachment,
-game DLL installation/injection, game-file/setting or process memory modification
-was performed. Existing rendering and the default-off clustered guard remain.
+game DLL installation/injection, game-file/setting or BeamNG process-memory
+modification was performed. Existing rendering and the default-off clustered
+guard remain. The new isolated capture fixture does install API detours inside
+its own test process, not inside BeamNG.
 
 ## Evidence checked
 
@@ -122,8 +135,8 @@ intensity from vehicle declarations.
 
 ## Risks / what remains unverified
 
-Actual pipeline interception and complete root-state restoration are the largest
-risks. A mismatch can cause missing lighting, double accumulation, invalid GPU
+Actual BeamNG pipeline interception and complete root-state restoration are the
+largest risks. A mismatch can cause missing lighting, double accumulation, invalid GPU
 access or a crash. Native shader/cache revisions and other add-ons can conflict.
 The graphics-API route still depends on this game's lighting ABI and will not
 automatically support Vulkan or all future BeamNG releases.
@@ -142,8 +155,9 @@ into an unrelated complete renderer while the connection is unproven.
 
 Next is a verified **no-ReShade host adapter** supplying the actual game device,
 camera/depth, command execution/synchronization and an intended lighting consumer.
-No such native D3D12 interception adapter has been implemented or installed. Loading the worker with
-ffi.load does not provide those capabilities; the installed external-DLL example
+The capture prototype implements only the initial read-only interception slice,
+not that complete host adapter, and nothing has been installed into BeamNG.
+Loading the worker with ffi.load does not provide those capabilities; the installed external-DLL example
 also requires a disabled Lua sandbox, which we have not changed.
 
 Before any deployment, review the exact adapter, installation/removal steps and
@@ -151,3 +165,6 @@ compatibility gates with the user. Then perform one bounded comparison proving
 actual world-mesh visibility affects intended lighting and disable restores the
 original rendering. No overlay-only success, repeated proxy lookup, guardhouse
 alignment or unchanged legacy-path comparison establishes that connection.
+The parked v0.109 comparison should not restart until there is new resource or
+lighting evidence. The separate worker v1-source/v2-header mismatch at `f270cf0`
+also remains outstanding; the independent capture fixture does not repair it.
