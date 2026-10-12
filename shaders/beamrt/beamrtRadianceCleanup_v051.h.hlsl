@@ -136,7 +136,7 @@ float3 beamrtDiffuseLikeRadiance(float2 prepassUv, float2 backbufferUv)
         // prepass RT1.a. Rejecting it prevents road signs/plates from becoming
         // implausibly powerful diffuse emitters. Other permutations may reuse
         // alpha, so the amount remains a live, bounded control.
-#ifdef BEAMRT_SHARED_MESH_GI
+#if defined(BEAMRT_SHARED_MESH_GI) || defined(BEAMRT_NATIVE_GI)
         float retro = saturate(beamrtSharedRetro(prepassUv));
 #else
         float retro = saturate(tex2Dlod(materialSpecTex, float4(prepassUv, 0.0, 0.0)).a);

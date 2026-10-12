@@ -3,6 +3,12 @@ on:
   push:
     paths:
       - 'native/worker/**'
+      - 'native/gi/**'
+      - 'tools/tests/test_native_gi_contracts.py'
+      - 'shaders/beamrt/beamrtGITrace*'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
+      - 'shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtRadianceCleanup*'
       - 'tools/beamrt_native_fixture.py'
       - 'tools/beamrt_bvh_pack.py'
       - 'tools/beamrt_scene_import.py'
@@ -13,6 +19,12 @@ on:
   pull_request:
     paths:
       - 'native/worker/**'
+      - 'native/gi/**'
+      - 'tools/tests/test_native_gi_contracts.py'
+      - 'shaders/beamrt/beamrtGITrace*'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
+      - 'shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtRadianceCleanup*'
       - 'tools/beamrt_native_fixture.py'
       - 'tools/beamrt_bvh_pack.py'
       - 'tools/beamrt_scene_import.py'
@@ -32,7 +44,14 @@ jobs:
           python-version: '3.11'
       - name: Existing packed-scene fixture regressions
         run: python -B tools/tests/test_native_fixture.py
+      - name: Native GI integration source contracts
+        run: python -B tools/tests/test_native_gi_contracts.py
       - name: Compile DLL and compute shader; run isolated WARP validation
         shell: pwsh
         run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp
+      - name: Compile GPU-only GI adapter and exercise producer-consumer restoration
+        shell: pwsh
+        run: ./native/gi/build.ps1 -SyntheticFixture -RunTest -Warp
+      # Full GI/export compilation requires local BeamNG includes; CI uses the
+      # exact shared consumer predicate without redistributing engine headers.
       # WARP tests correctness only, not BeamNG integration or GPU performance.

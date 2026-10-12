@@ -1413,6 +1413,14 @@ void beamrtTraceLightingSample(
 
             if (visibilityConfidence > 0.0001)
             {
+#ifdef BEAMRT_NATIVE_GI
+                // Only this receiver-to-selected-surfel contribution changes.
+                // Missing, stale or uncertain native data retains original GI.
+                if(beamrtNativeGIBlocked(currentUv,surfelIndex))
+                {
+                    sampleRadiance=0.0;sampleConfidence=0.0;return;
+                }
+#endif
 #ifdef BEAMRT_SHARED_MESH_GI
                 // Native-declared opaque full mesh may reject this bounce.
                 // Unknown alpha/data/budget/missing scene retains existing GI.
@@ -1456,6 +1464,25 @@ void beamrtTraceLightingSample(
     }
 }
 
+// Shared by the beauty pass and native receiver export: identical camera,
+// decoded depth, geometric-normal selection and world-distance origin bias.
+#ifdef BEAMRT_NATIVE_GI
+float3 beamrtGIReceiverOrigin(PFXVertToPix IN,float4 decoded,
+                             float3 worldPosition,float3 eyeRayDu,float3 eyeRayDv,
+                             out float3 receiverGeometricNormal)
+{
+#ifdef BEAMRT_GEOMETRIC_SURFACE_GUARD
+    receiverGeometricNormal = beamrtGeometricSurfaceNormal(
+        IN.uv0, decoded.w, worldPosition,
+        IN.wsEyeRay, eyeRayDu, eyeRayDv, IN.uv0, decoded.xyz);
+    return worldPosition + receiverGeometricNormal * max(rayNormalBias, 0.0);
+#else
+    receiverGeometricNormal = decoded.xyz;
+    return worldPosition + decoded.xyz * max(rayNormalBias, 0.0);
+#endif
+}
+#endif
+
 float4 mainP(PFXVertToPix IN) : SV_Target0
 {
     float4 packedPrepass = tex2D(prepassTex, IN.uv0);
@@ -1481,6 +1508,10 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     float3 worldPosition = eyePosWorld + IN.wsEyeRay * decoded.w;
     float3 eyeRayDu = ddx(IN.wsEyeRay) / uvDx;
     float3 eyeRayDv = ddy(IN.wsEyeRay) / uvDy;
+#ifdef BEAMRT_NATIVE_GI
+    float3 receiverGeometricNormal;
+    float3 rayOrigin = beamrtGIReceiverOrigin(IN,decoded,worldPosition,eyeRayDu,eyeRayDv,receiverGeometricNormal);
+#else
 #ifdef BEAMRT_GEOMETRIC_SURFACE_GUARD
     float3 receiverGeometricNormal = beamrtGeometricSurfaceNormal(
         IN.uv0, decoded.w, worldPosition,
@@ -1488,6 +1519,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     float3 rayOrigin = worldPosition + receiverGeometricNormal * max(rayNormalBias, 0.0);
 #else
     float3 rayOrigin = worldPosition + decoded.xyz * max(rayNormalBias, 0.0);
+#endif
 #endif
     float receiverRoughness = saturate(packedPrepass.b);
 #ifdef BEAMRT_RECEIVER_RESPONSE_AT_COMPOSE

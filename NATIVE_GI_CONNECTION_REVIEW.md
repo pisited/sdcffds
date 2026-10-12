@@ -19,8 +19,10 @@ still receive legitimate indirect light. Unknown alpha coverage keeps fallback.
 The pass must consume native GPU visibility, not a displayed diagnostic image or
 a per-frame CPU readback. Source packing already frees the sixth sampler slot
 for geometry; the native consumer can use the corresponding slot for visibility
-without adding a seventh 2D input. This requires a matched new consumer variant
-and validated per-view/pixel correspondence; it is not implemented yet.
+without adding a seventh 2D input. The matched v084 consumer and GPU-only
+resource adapter are now implemented under native/gi, with frame/view, scene
+and surfel keys. Actual game-resource capture, activation and full GI draw
+consumption remain unimplemented; offline fixtures are not game integration.
 
 The initial useful comparison uses the same geometry, light, GI settings and
 view: bridge OFF = original GI; bridge ON = only the intended geometry visibility
@@ -108,8 +110,16 @@ tests passed after restoration. The optional acquisition path remains unused in
 BeamNG; no DLL was installed or loaded into the game. These offline checks do
 not establish access to game resources or consumption by its GI pass.
 
-Next implementation is the resource adapter and GPU output/owned-GI consumer as
-one small slice, with offline lifecycle/binding/restore validation. Only after
-reviewing an actual complete loading mechanism should a bounded in-game test
-check real lighting consumption and restoration. No old sun/guardhouse comparison,
-LUID-only game probe, further BVH rewrite or additional screen-space algorithm.
+The resource adapter and GPU output/owned-GI consumer slice is implemented;
+see [native GI contract and validation](native/gi/README.md). Existing Lua does
+not register or activate these shaders. The adapter accepts verified host
+resources and records on a dedicated DIRECT list; it does not discover game
+resources, submit work, load itself or install interception.
+
+Next implementation is the reviewed loading/interception host: identify the
+owned GI draw, capture its real resources/constants, record the matched receiver
+export, order native compute and bind its output to the owned GI consumer, with
+original-graph/history restoration on OFF. Only after reviewing a complete
+loading mechanism should a bounded in-game test check real lighting consumption
+and restoration. No old sun/guardhouse comparison, LUID-only game probe, further
+BVH rewrite or additional screen-space algorithm.

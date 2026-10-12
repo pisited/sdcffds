@@ -11,6 +11,8 @@ uniform_sampler2D(lightInfoTex, 3);
 uniform_sampler2D(auxiliaryTex, 4);
 #ifdef BEAMRT_SHARED_MESH_GI
 uniform_sampler2D(meshDataTex, 5);
+#elif defined(BEAMRT_NATIVE_GI)
+uniform_sampler2D(nativeGIVisibilityTex, 5);
 #else
 uniform_sampler2D(materialSpecTex, 5);
 #endif
@@ -230,12 +232,17 @@ cbuffer perDraw : register(b0)
 #ifdef BEAMRT_SHARED_MESH_GI
     #include "beamrtMeshBVHUniforms.h.hlsl"
 #endif
+#ifdef BEAMRT_NATIVE_GI
+    uniform float nativeGIVisibilityEnabled;
+    uniform float2 nativeGIVisibilitySize;
+    uniform float4 nativeGIVisibilityKey;
+#endif
     POSTFX_UNIFORMS
 };
 
 #include "shaders/common/postFx/postFx.hlsl"
 
-#ifdef BEAMRT_SHARED_MESH_GI
+#if defined(BEAMRT_SHARED_MESH_GI) || defined(BEAMRT_NATIVE_GI)
 float beamrtSharedRetro(float2 prepassUv)
 {
     float2 viewport=(prepassUv-rtParams0.xy)/rtParams0.zw;
@@ -244,7 +251,12 @@ float beamrtSharedRetro(float2 prepassUv)
     int2 p=clamp((int2)floor(uv*float2(width,height)),int2(0,0),int2(width,height)-1);
     return lightInfoTexTex.Load(int3(p,0)).a;
 }
+#endif
+#ifdef BEAMRT_SHARED_MESH_GI
 #include "beamrtMeshBVHCommon.h.hlsl"
+#endif
+#ifdef BEAMRT_NATIVE_GI
+#include "beamrtNativeGIVisibility_v001.h.hlsl"
 #endif
 
 #ifdef BEAMRT_SIX_INPUT_BINDINGS

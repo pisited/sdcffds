@@ -161,7 +161,7 @@ float3 beamrtDiffuseLikeRadiance(float2 prepassUv, float2 backbufferUv)
         // Ordinary opaque material permutations store retroreflectivity in
         // prepass RT1.a. Reject it after reconstruction so the fallback used in
         // uncertain/dark regions cannot preserve amplified retro response.
-#ifdef BEAMRT_SHARED_MESH_GI
+#if defined(BEAMRT_SHARED_MESH_GI) || defined(BEAMRT_NATIVE_GI)
         float retro = saturate(beamrtSharedRetro(prepassUv));
 #else
         float retro = saturate(tex2Dlod(materialSpecTex, float4(prepassUv, 0.0, 0.0)).a);
