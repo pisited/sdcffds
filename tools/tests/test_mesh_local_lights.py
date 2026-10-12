@@ -79,6 +79,17 @@ class Local(unittest.TestCase):
     def obj(self,name):return self.lua.globals().objects[name]
     def tick(self,n=30):
         for _ in range(n):self.module.onPreRender()
+    def test_same_underground_scene_can_feed_gi_without_installing_local_light_hooks(self):
+        self.lua.globals().ClusteredShading=self.lua.table()
+        data=self.scene.prepare()
+        self.lua.execute("giConstants={};giEffect={setShaderConst=function(_,name,value)giConstants[name]=value end}")
+        self.scene.applySceneConsts(self.lua.globals().giEffect,data,True)
+        self.assertEqual(self.lua.globals().giConstants['$meshNodeCount'],1)
+        self.assertEqual(self.lua.globals().giConstants['$meshVisibilityEnabled'],1)
+        self.assertEqual(self.lua.globals().giConstants['$meshMaterialModes0'],'1 0 0 0')
+        self.assertEqual(self.obj('AL_PointLightMaterial').fields['shader'][0],'AL_PointLightShader')
+        self.assertEqual(self.obj('AL_SpotLightMaterial').fields['shader'][0],'AL_SpotLightShader')
+        self.assertFalse(self.module.getStatus().enabled)
     def test_select_by_actual_mesh_bounds_not_object_origin(self):
         selected=self.scene.prepare();self.assertEqual(selected.objectId,42)
         self.assertEqual(selected.distanceToBounds,0)

@@ -17,10 +17,10 @@ Compile-BeamRTGI (Join-Path $PSScriptRoot 'consumer_test.hlsl') ps_5_0 mainP con
 if($NativeIncludes) {
     $beamrtIncludePath=[IO.Path]::GetFullPath($NativeIncludes)
     if(!(Test-Path -LiteralPath (Join-Path $beamrtIncludePath 'shaders/common/postFx/postFx.h.hlsl'))) { throw 'BeamNG include directory invalid; no game headers bundled.' }
-    foreach($beamrtEntry in @('beamrtGITraceP_v082.hlsl','beamrtGITraceP_v083.hlsl','beamrtGITraceP_v084.hlsl','beamrtGIReceiverExportP_v001.hlsl')) {
+    foreach($beamrtEntry in @('beamrtGITraceP_v082.hlsl','beamrtGITraceP_v083.hlsl','beamrtGITraceP_v084.hlsl','beamrtGIReceiverExportP_v001.hlsl','beamrtGIReceiverExportP_v002.hlsl','beamrtGIVisibilityBufferP_v001.hlsl')) {
         $beamrtSource=Join-Path $beamrtRoot "shaders/beamrt/$beamrtEntry"
         Compile-BeamRTGI $beamrtSource vs_5_0 main "$beamrtEntry.vs.cso" @('/I',$beamrtIncludePath,'/D','SHADER_STAGE_VS=1')
-        $beamrtMain=if($beamrtEntry -like '*ReceiverExport*') {'beamrtReceiverMain'} else {'main'}
+        $beamrtMain=if($beamrtEntry -eq 'beamrtGIReceiverExportP_v001.hlsl') {'beamrtReceiverMain'} else {'main'}
         Compile-BeamRTGI $beamrtSource ps_5_0 $beamrtMain "$beamrtEntry.ps.cso" @('/I',$beamrtIncludePath)
     }
 }
@@ -28,12 +28,13 @@ Push-Location $beamrtOutput
 try {
     & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD /LD (Join-Path $PSScriptRoot 'beamrt_gi.cpp') /Febeamrt_native_gi.dll /link d3d12.lib
     if($LASTEXITCODE) { throw 'Native GI resource adapter compilation failed' }
-    & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD (Join-Path $PSScriptRoot 'self_test.cpp') /Febeamrt_gi_test.exe /link beamrt_native_gi.lib d3d12.lib dxgi.lib
+    & cl.exe /nologo /W4 /WX /EHsc /std:c++17 /MD (Join-Path $PSScriptRoot 'self_test.cpp') /Febeamrt_gi_test.exe /link beamrt_native_gi.lib d3d12.lib dxgi.lib d3dcompiler.lib
     if($LASTEXITCODE) { throw 'Native GI GPU test compilation failed' }
 } finally { Pop-Location }
 if($RunTest) {
     $beamrtArgs=@((Join-Path $beamrtRoot '.beamrt-validation/native-worker/fixture.bin'),(Join-Path $beamrtOutput 'visibility.cso'),(Join-Path $beamrtOutput 'consumer.vs.cso'),(Join-Path $beamrtOutput 'consumer.ps.cso'))
     if($Warp) { $beamrtArgs+='--warp' }
+    if($NativeIncludes) { $beamrtArgs+=@('--pixel-producer',(Join-Path $beamrtOutput 'beamrtGIVisibilityBufferP_v001.hlsl.ps.cso')) }
     & (Join-Path $beamrtOutput 'beamrt_gi_test.exe') @beamrtArgs
     if($LASTEXITCODE) { throw 'Offline native-to-GI validation failed' }
 }

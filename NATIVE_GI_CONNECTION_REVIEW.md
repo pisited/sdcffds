@@ -4,6 +4,12 @@ Status: design review only, 2026-10-11. No DLL loading/injection, hook installat
 game-file change or new in-game test is authorized or performed by this document.
 No standalone tracer expansion. Current working Lua/HLSL renderer stays intact.
 
+Update v0.109: an opt-in engine-managed PostFX producer/consumer route is now
+registered through game-side Lua, with underground mesh GI selection. See
+[game-side integration and bounded activation](GI_VISIBILITY_BUFFER_V0109.md).
+This is not native DLL loading/resource interception; no native C++ host has
+been installed, and live game consumption/appearance remains unverified.
+
 ## First consumer and acceptance gate
 
 Target BeamRT's owned GI pass, not native headlights or the clustered shade pass.
@@ -114,7 +120,9 @@ The resource adapter and GPU output/owned-GI consumer slice is implemented;
 see [native GI contract and validation](native/gi/README.md). Existing Lua does
 not register or activate these shaders. The adapter accepts verified host
 resources and records on a dedicated DIRECT list; it does not discover game
-resources, submit work, load itself or install interception.
+resources, submit work, load itself or install interception. The separate
+v0.109 engine-managed backend can schedule the matched pixel producer and GI
+consumer without that DLL, while retaining inline/default rendering fallback.
 
 Next implementation is the reviewed loading/interception host: identify the
 owned GI draw, capture its real resources/constants, record the matched receiver

@@ -9,9 +9,12 @@ cbuffer Test : register(b0) {
     float4 rtParams0;
 };
 #include "shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl"
-struct V { float4 position:SV_Position;float2 uv:TEXCOORD; };
+// Match the full engine PostFX input signature, including unused semantics.
+struct V { float4 position:SV_Position;float2 uv:TEXCOORD0;
+    float2 uv1:TEXCOORD1;float2 uv2:TEXCOORD2;float2 uv3:TEXCOORD3;float3 eye:TEXCOORD4; };
 V mainV(uint index:SV_VertexID) {
     V v;v.uv=float2((index<<1)&2,index&2);
+    v.uv1=v.uv2=v.uv3=v.uv;v.eye=float3(0,0,1);
     v.position=float4(v.uv*float2(2,-2)+float2(-1,1),0,1);return v;
 }
 float4 mainP(V v):SV_Target0 {

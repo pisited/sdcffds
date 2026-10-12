@@ -28,23 +28,15 @@ cbuffer Frame : register(b1) {
 #define meshMaterialModes2 float4(materials[2])
 #define meshMaterialModes3 float4(materials[3])
 #define meshVisibilityEnabled 1.0
-#include "shaders/beamrt/beamrtMeshBVHCommon.h.hlsl"
+float4 beamrtGIProducerSurfel(uint index) { return surfels[index]; }
+#define beamrtGIProducerKey key
+#define beamrtGIProducerSize dimensions.xy
+#define beamrtGIProducerCount dimensions.z
+#define beamrtGIProducerReceivers receivers
+#include "shaders/beamrt/beamrtGIVisibilityProducer_v001.h.hlsl"
 [numthreads(8,8,1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
     if(id.x>=dimensions.x || id.y>dimensions.y) return;
-    if(id.y==0) { visibility[id.xy]=id.x==0 ? key : 0.0;return; }
-    float4 receiver=receivers.Load(int3(id.x,id.y-1,0));
-    uint blocked=0;
-    if(receiver.w!=1.0 || !all(isfinite(receiver.xyz))) { visibility[id.xy]=-1.0;return; }
-    [loop]for(uint i=0;i<dimensions.z;++i)
-    {
-        float3 delta=surfels[i].xyz-receiver.xyz;float distance=length(delta);
-        if(!isfinite(distance)) { visibility[id.xy]=-1.0;return; }
-        if(distance<.2) continue;
-        uint visits;int hit=beamrtMeshTrace(receiver.xyz,delta/distance,distance-.08,.08,visits);
-        if(hit<0) { visibility[id.xy]=-1.0;return; }
-        if(hit==2) blocked|=1u<<i;
-    }
-    visibility[id.xy]=float4(blocked&255u,(blocked>>8)&255u,(blocked>>16)&255u,(blocked>>24)&255u);
+    visibility[id.xy]=beamrtGIVisibilityPixel(id.xy);
 }

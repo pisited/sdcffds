@@ -2,12 +2,18 @@
 // Reuses the beauty path's depth/camera/geometric origin, without reinterpreting
 // BeamNG depth in native compute. Host must duplicate the exact original draw
 // inputs, then restore the original pass; no Lua registration or auto activation.
+#define BEAMRT_GI_PIXEL_ENTRY beamrtUnusedBeautyMain
 #include "beamrtGITraceP_v084.hlsl"
+#undef BEAMRT_GI_PIXEL_ENTRY
 #ifdef SHADER_STAGE_VS
 // The included GI vertex entry is unchanged.
 #else
 #undef main
+#ifdef BEAMRT_RECEIVER_ENGINE_ENTRY
+float4 main(PFXVertToPix IN) : SV_Target0
+#else
 float4 beamrtReceiverMain(PFXVertToPix IN) : SV_Target0
+#endif
 {
     float4 decoded=decodeGBuffer(TEX_SAMPLER(prepassDepthTex),TEX_SAMPLER(prepassTex),IN.uv0,projParams);
     if(!(decoded.w>=0) || decoded.w>=0.9999) return 0.0;

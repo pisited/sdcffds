@@ -118,5 +118,20 @@ function M.defines(data)
   table.sort(values)
   return table.concat(values,';'),blockers
 end
+-- GI consumes the same actual instance without installing the blocked legacy
+-- local-light hook. Opacity policy matches existing GI, not a transparency guess.
+function M.applySceneConsts(effect,data,enabled)
+  local function vector(name,v)effect:setShaderConst('$'..name,string.format('%.9g %.9g %.9g',v[1],v[2],v[3]))end
+  vector('meshOrigin',data.placement.basis.origin)
+  for i,name in ipairs({'meshInvX','meshInvY','meshInvZ'})do vector(name,data.inverse[i])end
+  vector('meshQuantMin',data.gpuData.quantMin);vector('meshQuantExtent',data.gpuData.quantExtent)
+  effect:setShaderConst('$meshAtlasSize',string.format('%d %d',data.gpuData.width,data.gpuData.height))
+  for name,key in pairs({meshNodeCount='nodeCount',meshTriangleCount='triangleCount',meshTriangleOffset='triangleOffset'})do
+    effect:setShaderConst('$'..name,data.gpuData[key])
+  end
+  effect:setShaderConst('$meshVisibilityEnabled',enabled and 1 or 0);effect:setShaderConst('$meshMaterialPolicyEnabled',1)
+  for bank=0,3 do local values={};for i=1,4 do values[i]=tostring(data.policy.modes[bank*4+i] or 0)end
+    effect:setShaderConst('$meshMaterialModes'..bank,table.concat(values,' '))end
+end
 function M.clear()scene=nil end
 return M

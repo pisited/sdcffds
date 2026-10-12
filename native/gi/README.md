@@ -1,8 +1,10 @@
 # Native GPU visibility to owned GI: first adapter slice
 
 Status 2026-10-11: implemented, offline-validated resource adapter and matched
-shader consumer. **Not attached to BeamNG.** No loader, launcher, graphics hooks,
-resource discovery, Lua registration, ReShade dependency or game installation.
+shader consumer. **Native C++ adapter not attached to BeamNG.** No loader,
+launcher, graphics hooks, resource discovery, ReShade dependency or DLL install.
+v0.109 separately registers an opt-in engine-managed pixel-pass backend using
+the same producer query and consumer format; see [game-side activation](../../GI_VISIBILITY_BUFFER_V0109.md).
 The existing worker remains ABI v2; this separate adapter has its own ABI v1.
 
 ## What this implements
@@ -25,7 +27,8 @@ The existing worker remains ABI v2; this separate adapter has its own ABI v1.
    It rejects only the selected world-surfel bounce inside the existing
    integrator. Screen-space samples, sun/headlight shading, sampling, temporal
    reconstruction and denoising are not replaced. Existing Lua selects v082
-   or opt-in v083, never v084 or the receiver-export shader.
+   or opt-in v083 by default. Explicit v0.109 buffer selection registers v084
+   and the engine-entry receiver-export v002; native v001 named entry is retained.
 5. Every frame retains input/output resources, private descriptors, constants
    and pipeline objects until a host fence completes **after the last consumer**.
    Retirement is nonblocking and refuses unmarked/in-flight recorded work.

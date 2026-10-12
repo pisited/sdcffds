@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
+#include <d3dcompiler.h>
+#include <d3d11shader.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <cmath>
@@ -13,10 +15,13 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 using Microsoft::WRL::ComPtr;
 static void require(bool ok,const char* why) { if(!ok) throw std::runtime_error(why); }
-static void hr(HRESULT value) { require(SUCCEEDED(value),"D3D12 fixture operation failed"); }
+static void hr(HRESULT value,const char* operation="D3D12 fixture operation") {
+    if(FAILED(value)) throw std::runtime_error(std::string(operation)+" failed HRESULT="+std::to_string(value));
+}
 static void success(int value) { require(value==0,BeamRT_GILastError()); }
 static void read(std::ifstream& stream,void* output,size_t bytes) { stream.read(static_cast<char*>(output),static_cast<std::streamsize>(bytes));require(bool(stream),"truncated fixture"); }
 static std::vector<uint8_t> file(const wchar_t* path) {
@@ -71,9 +76,49 @@ struct Host {
 };
 struct TestConstants { float key[4],size[2],enabled;int32_t index;float viewport[4]; };
 static_assert(sizeof(TestConstants)==48,"consumer test ABI");
+// Execute the actual game pixel producer, using reflection rather than guessed
+// engine constant offsets. Only offline fixture inputs, never game resources.
+struct PixelOutput { ComPtr<ID3D12Resource> resource;ComPtr<ID3D12DescriptorHeap> srv; };
+static PixelOutput pixelProducer(Host& host,const BeamRTGIInputs& input,
+    const std::vector<uint8_t>& vs,const std::vector<uint8_t>& ps) {
+    ComPtr<ID3D11ShaderReflection> reflection;hr(D3DReflect(ps.data(),ps.size(),IID_PPV_ARGS(&reflection)),"pixel producer reflection");
+    auto fields=reflection->GetConstantBufferByName("perDraw");D3D11_SHADER_BUFFER_DESC cbDesc{};hr(fields->GetDesc(&cbDesc),"pixel producer perDraw");
+    std::vector<uint8_t> constants((cbDesc.Size+255)&~size_t(255));
+    auto set=[&](const char* name,const void* data,size_t bytes) { D3D11_SHADER_VARIABLE_DESC v{};hr(fields->GetVariableByName(name)->GetDesc(&v),name);
+        require(bytes<=v.Size && uint64_t(v.StartOffset)+bytes<=constants.size(),"pixel constant layout mismatch");std::memcpy(constants.data()+v.StartOffset,data,bytes); };
+    const auto& scene=input.scene;
+    set("meshOrigin",scene.origin,12);set("meshInvX",scene.inverseX,12);set("meshInvY",scene.inverseY,12);set("meshInvZ",scene.inverseZ,12);
+    set("meshQuantMin",scene.quantMin,12);set("meshQuantExtent",scene.quantExtent,12);
+    auto scalar=[&](const char* name,float value) { set(name,&value,4); };
+    scalar("meshNodeCount",static_cast<float>(scene.counts[0]));scalar("meshTriangleCount",static_cast<float>(scene.counts[1]));scalar("meshTriangleOffset",static_cast<float>(scene.counts[2]));scalar("meshMaterialPolicyEnabled",1);
+    float atlas[]={static_cast<float>(scene.atlas[0]),static_cast<float>(scene.atlas[1])};set("meshAtlasSize",atlas,sizeof(atlas));
+    float modes[16];for(int i=0;i<16;++i) modes[i]=static_cast<float>(scene.materials[i]);
+    for(int bank=0;bank<4;++bank) { const auto name="meshMaterialModes"+std::to_string(bank);set(name.c_str(),modes+bank*4,16); }
+    float size[]={static_cast<float>(input.width),static_cast<float>(input.height)};set("visibilitySize",size,sizeof(size));set("nativeGIVisibilityKey",input.key,sizeof(input.key));scalar("surfelCount",static_cast<float>(input.surfelCount));
+    for(int i=0;i<32;++i) { const auto name="surfelPositionRadius"+std::to_string(i);set(name.c_str(),input.surfels[i],16); }
+    auto device=host.device.Get();auto cb=make(device,buffer(constants.size()),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);fill(cb.Get(),constants.data(),constants.size());
+    D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=2;
+    D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[1].DescriptorTable={1,&range};
+    D3D12_ROOT_SIGNATURE_DESC desc{};desc.NumParameters=2;desc.pParameters=params;ComPtr<ID3DBlob> encoded,errors;hr(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&encoded,&errors));
+    ComPtr<ID3D12RootSignature> root;hr(device->CreateRootSignature(0,encoded->GetBufferPointer(),encoded->GetBufferSize(),IID_PPV_ARGS(&root)));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=root.Get();p.VS={vs.data(),vs.size()};p.PS={ps.data(),ps.size()};p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;p.RasterizerState.DepthClipEnable=TRUE;
+    p.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;p.SampleMask=UINT_MAX;p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT;p.SampleDesc.Count=1;
+    ComPtr<ID3D12PipelineState> pipeline;hr(device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&pipeline)),"pixel producer pipeline");
+    auto targetDesc=static_cast<ID3D12Resource*>(input.receivers)->GetDesc();targetDesc.Height+=1;targetDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    PixelOutput output;output.resource=make(device,targetDesc,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.NumDescriptors=1;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;ComPtr<ID3D12DescriptorHeap> rtv;hr(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&rtv)));device->CreateRenderTargetView(output.resource.Get(),nullptr,rtv->GetCPUDescriptorHandleForHeapStart());
+    heap.NumDescriptors=3;heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;hr(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&output.srv)));
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    auto cpu=output.srv->GetCPUDescriptorHandleForHeapStart();const auto stride=device->GetDescriptorHandleIncrementSize(heap.Type);
+    device->CreateShaderResourceView(static_cast<ID3D12Resource*>(input.receivers),&srv,cpu);cpu.ptr+=stride;srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;device->CreateShaderResourceView(static_cast<ID3D12Resource*>(input.mesh),&srv,cpu);cpu.ptr+=stride;srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;device->CreateShaderResourceView(output.resource.Get(),&srv,cpu);
+    host.begin();host.list->SetPipelineState(pipeline.Get());host.list->SetGraphicsRootSignature(root.Get());ID3D12DescriptorHeap* heaps[]={output.srv.Get()};host.list->SetDescriptorHeaps(1,heaps);host.list->SetGraphicsRootConstantBufferView(0,cb->GetGPUVirtualAddress());host.list->SetGraphicsRootDescriptorTable(1,output.srv->GetGPUDescriptorHandleForHeapStart());
+    const D3D12_VIEWPORT viewport{0,0,static_cast<float>(input.width),static_cast<float>(input.height+1),0,1};const D3D12_RECT scissor{0,0,static_cast<LONG>(input.width),static_cast<LONG>(input.height+1)};
+    host.list->RSSetViewports(1,&viewport);host.list->RSSetScissorRects(1,&scissor);cpu=rtv->GetCPUDescriptorHandleForHeapStart();host.list->OMSetRenderTargets(1,&cpu,FALSE,nullptr);host.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);host.list->DrawInstanced(3,1,0,0);
+    transition(host.list.Get(),output.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);host.execute();host.wait();return output;
+}
 static void draw(Host& host,BeamRTGIFrame* frame,const std::vector<uint8_t>& vs,const std::vector<uint8_t>& ps,
-                 TestConstants constants,bool blocked) {
-    void* nativeOutput=nullptr;uint64_t outputSrv=0;success(BeamRT_GIGetOutput(frame,&nativeOutput,&outputSrv));
+                 TestConstants constants,bool blocked,uint64_t outputSrv=0) {
+    void* nativeOutput=nullptr;if(!outputSrv) success(BeamRT_GIGetOutput(frame,&nativeOutput,&outputSrv));
     auto device=host.device.Get();D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=5;
     D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[1].DescriptorTable={1,&range};
     D3D12_ROOT_SIGNATURE_DESC desc{};desc.NumParameters=2;desc.pParameters=params;
@@ -111,8 +156,11 @@ static void draw(Host& host,BeamRTGIFrame* frame,const std::vector<uint8_t>& vs,
 }
 int wmain(int argc,wchar_t** argv) {
     try {
-        require(argc==5 || argc==6,"usage: self_test fixture.bin visibility.cso consumer.vs.cso consumer.ps.cso [--warp]");
-        const bool warp=argc==6 && std::wstring(argv[5])==L"--warp";require(argc!=6 || warp,"unknown option");
+        require(argc>=5 && argc<=8,"usage: self_test fixture.bin visibility.cso consumer.vs.cso consumer.ps.cso [--warp] [--pixel-producer path]");
+        bool warp=false;std::vector<uint8_t> pixelShader;
+        for(int i=5;i<argc;++i) { if(std::wstring(argv[i])==L"--warp") warp=true;
+            else if(std::wstring(argv[i])==L"--pixel-producer") { require(i+1<argc,"pixel producer path missing");pixelShader=file(argv[++i]); }
+            else require(false,"unknown option"); }
         ComPtr<ID3D12Debug> debug;const bool debugEnabled=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));if(debugEnabled) debug->EnableDebugLayer();
         ComPtr<IDXGIFactory6> factory;hr(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)));ComPtr<ID3D12Device> device;
         if(warp) { ComPtr<IDXGIAdapter> adapter;hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));hr(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));std::cout<<"WARP offline GI resource host\n"; }
@@ -154,6 +202,12 @@ int wmain(int argc,wchar_t** argv) {
         success(BeamRT_GIMarkSubmitted(frame,lifetime.Get(),1));require(BeamRT_GIDestroyFrame(&frame)!=0 && frame,"in-flight frame freed");host.execute();host.wait();
         TestConstants c{};std::memcpy(c.key,inputs.key,sizeof(c.key));c.size[0]=2;c.size[1]=1;c.enabled=1;c.index=31;c.viewport[2]=c.viewport[3]=1;
         for(int index:{0,7,8,15,16,23,24,31}) { c.index=index;draw(host,frame,vs,ps,c,true); }
+        if(!pixelShader.empty()) {
+            auto output=pixelProducer(host,inputs,vs,pixelShader);
+            const uint64_t handle=output.srv->GetCPUDescriptorHandleForHeapStart().ptr+2*uint64_t(device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+            draw(host,frame,vs,ps,c,true,handle);c.enabled=0;draw(host,frame,vs,ps,c,false,handle);c.enabled=1;
+            std::cout<<"Actual game pixel producer -> exact GI consumer GPU fixture passed\n";
+        }
         c.enabled=0;draw(host,frame,vs,ps,c,false);c.enabled=1;draw(host,frame,vs,ps,c,true);c.enabled=0;draw(host,frame,vs,ps,c,false);c.enabled=1;
         c.enabled=std::numeric_limits<float>::quiet_NaN();draw(host,frame,vs,ps,c,false);c.enabled=1;
         for(int i=0;i<3;++i) { c.key[i]+=1;draw(host,frame,vs,ps,c,false);c.key[i]-=1; }

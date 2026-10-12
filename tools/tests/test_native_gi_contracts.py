@@ -12,11 +12,15 @@ class NativeGIContracts(unittest.TestCase):
     def source(self, name):
         return (ROOT / name).read_text(encoding="utf-8")
 
-    def test_no_automatic_runtime_registration(self):
+    def test_native_worker_not_loaded_and_buffer_backend_opt_in(self):
         lua = self.source("lua/ge/extensions/beamrt/main.lua")
         for entry in ("beamrtGITraceP_v084", "beamrtGIReceiverExport", "beamrt_native_gi"):
             self.assertNotIn(entry, lua)
         self.assertIn("beamrtGITraceP_v083.hlsl", lua)
+        self.assertIn("backend='inline',source='guardhouse'", lua)
+        buffer = self.source("lua/ge/extensions/beamrt/giVisibilityBuffer.lua")
+        self.assertIn("state={active=false", buffer)
+        self.assertNotIn("ffi.load", buffer)
 
     def test_matched_receiver_origin_is_shared_not_reimplemented(self):
         core = self.source("shaders/beamrt/beamrtGITraceP_v067_core.hlsl")
@@ -37,9 +41,11 @@ class NativeGIContracts(unittest.TestCase):
         producer = self.source("native/gi/visibility.cs.hlsl")
         fixture = self.source("native/gi/consumer_test.hlsl")
         header = self.source("shaders/beamrt/beamrtGITrace_v065.h.hlsl")
-        self.assertIn('#include "shaders/beamrt/beamrtMeshBVHCommon.h.hlsl"', producer)
-        self.assertIn("if(hit==2) blocked|=1u<<i;", producer)
-        self.assertIn("if(hit<0)", producer)
+        common = self.source("shaders/beamrt/beamrtGIVisibilityProducer_v001.h.hlsl")
+        self.assertIn('beamrtGIVisibilityProducer_v001.h.hlsl', producer)
+        self.assertIn('#include "beamrtMeshBVHCommon.h.hlsl"', common)
+        self.assertIn("if(hit==2) blocked|=1u<<i;", common)
+        self.assertIn("if(hit<0)", common)
         self.assertIn("beamrtNativeGIVisibility_v001.h.hlsl", fixture)
         self.assertIn("beamrtNativeGIVisibility_v001.h.hlsl", header)
         self.assertIn("uniform_sampler2D(nativeGIVisibilityTex, 5);", header)

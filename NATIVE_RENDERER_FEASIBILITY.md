@@ -11,6 +11,12 @@ engine exports. [NATIVE_DEVICE_BOOTSTRAP_V0108.md](NATIVE_DEVICE_BOOTSTRAP_V0108
 records the route and its limits. Real frame resource access is still missing;
 device acquisition alone does not pass the in-game integration gate.
 
+Update v0.109: the same GPU visibility format/query is now connected to an
+opt-in BeamNG-managed pixel-pass GI backend, including prepared underground
+geometry. [Game-side activation](GI_VISIBILITY_BUFFER_V0109.md) records the
+small workload, fallback and remaining live validation. This does not establish
+native C++ graphics interception or hardware-buffer sharing with the worker.
+
 The user subsequently asked to continue. A small no-ReShade native BVH GPU worker
 has now been built and loaded **only in its separate offline self-test process**.
 The real guardhouse GPU queries passed on the RTX 4070; synthetic WARP tests also
@@ -136,7 +142,7 @@ into an unrelated complete renderer while the connection is unproven.
 
 Next is a verified **no-ReShade host adapter** supplying the actual game device,
 camera/depth, command execution/synchronization and an intended lighting consumer.
-No such adapter has been implemented or installed. Loading the worker with
+No such native D3D12 interception adapter has been implemented or installed. Loading the worker with
 ffi.load does not provide those capabilities; the installed external-DLL example
 also requires a disabled Lua sandbox, which we have not changed.
 

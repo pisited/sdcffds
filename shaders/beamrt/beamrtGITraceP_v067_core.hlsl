@@ -1483,7 +1483,11 @@ float3 beamrtGIReceiverOrigin(PFXVertToPix IN,float4 decoded,
 }
 #endif
 
+#ifdef BEAMRT_GI_PIXEL_ENTRY
+float4 BEAMRT_GI_PIXEL_ENTRY(PFXVertToPix IN) : SV_Target0
+#else
 float4 mainP(PFXVertToPix IN) : SV_Target0
+#endif
 {
     float4 packedPrepass = tex2D(prepassTex, IN.uv0);
     float4 decoded = decodeGBuffer(
