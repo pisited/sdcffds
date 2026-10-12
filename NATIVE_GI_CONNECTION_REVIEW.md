@@ -98,12 +98,15 @@ Never accumulate the result repeatedly into native lightinfo, run both replaceme
 and original contributions, or use final-image darkness as visibility proof.
 No overlay-only success satisfies the rendering milestone.
 
-## Current code blocker and next implementation
+## Resolved worker baseline and next implementation
 
-An uncommitted edit currently returns native/worker/beamrt_worker.cpp to ABI v1,
-removing the v2 bootstrap/owner checks, while its header and self-test still expect
-v2. It has been left untouched. Resolve the intended baseline before modifying
-or validating shared worker/output code; do not silently discard the user's edit.
+The user explicitly approved restoring the matched ABI v2 baseline on 2026-10-11.
+native/worker/beamrt_worker.cpp again implements the v2 candidate acquisition and
+resource-owner checks declared by its header and exercised by its self-test.
+Strict compilation and isolated hardware/real-guardhouse and WARP/synthetic GPU
+tests passed after restoration. The optional acquisition path remains unused in
+BeamNG; no DLL was installed or loaded into the game. These offline checks do
+not establish access to game resources or consumption by its GI pass.
 
 Next implementation is the resource adapter and GPU output/owned-GI consumer as
 one small slice, with offline lifecycle/binding/restore validation. Only after
