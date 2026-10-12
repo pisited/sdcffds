@@ -7,7 +7,7 @@ renderer is unchanged. This is an input-capture milestone, not a shadow fix.
 
 ## What is actually implemented
 
-`beamrt_capture.dll` intercepts 24 real public D3D12 API method implementations
+`beamrt_capture.dll` intercepts 39 real public D3D12 API method implementations
 using Microsoft Detours. The fixture invokes normal SDK methods; it does not
 fabricate observations or feed a list of pretend resource handles to the DLL.
 
@@ -24,6 +24,15 @@ fabricate observations or feed a list of pretend resource handles to the DLL.
   both table sets, including a sampler-heap change. Reset/ClearState start a new
   recording generation. Bundles/indirect commands conservatively invalidate
   capture for that list; the original API calls still run unchanged.
+- Matched draws snapshot root 32-bit values, root CBV/UAV GPU addresses,
+  viewport/scissor rectangles and RTV resources. Root buffer contents are not
+  copied or interpreted. RTV provenance resolves at submission; DSV output,
+  unsupported descriptor forms or capacity overflow mark the context incomplete.
+- Transition barriers recorded before the matched draw are retained with their
+  resource references. Queue-local Execute serials and the latest successful
+  Signal/Wait fence pointers and values are recorded as observations. They do
+  not establish initial resource state, a complete state chain, cross-queue GPU
+  ordering or fence completion.
 - A snapshot retains its actual `ID3D12Resource` references after explicit host
   detachment, plus the actual submitting `ID3D12CommandQueue` reference. It
   contains the submitted view descriptions and a recording and submission serial.
@@ -68,26 +77,30 @@ its rendering threads after installation and joins them before removal. No game
 thread enumeration or suspension is implemented or performed.
 
 Only legacy CreateCommandList and graphics/compute pipeline creation are
-observed. Supported views are one-mip, non-array, non-MSAA Texture2D views and
-structured-buffer SRVs. Raw/typed buffers, texture arrays, unbounded tables,
-pipeline streams, newer creation methods and other method implementations are
-not supported. The root contract is decoded through the version-1 deserializer.
-Only the last matched draw/dispatch in a command-list recording is published.
+observed. Supported input views are one-mip, non-array, non-MSAA Texture2D views
+and structured-buffer SRVs; output capture supports RTVs without a DSV. Raw/typed
+buffers, texture arrays, unbounded tables, pipeline streams, newer creation
+methods and other method implementations are not supported. The root contract
+is decoded through the version-1 deserializer. Only the last matched draw/dispatch
+in a command-list recording is published.
 Non-target submissions can leave a historical snapshot available; callers must
 never treat availability alone as evidence of frame freshness.
 
 Metadata holds strong references until Stop and has hard limits: 64 heaps,
-512 tracked SRVs, 32 matching roots, 64 matching pipelines, 64 command lists and
-32 observed target queues.
+512 tracked SRVs, 256 RTVs, 32 matching roots, 64 matching pipelines, 64 command
+lists and 32 observed target queues. A snapshot retains output, transition and
+fence references in addition to its SRVs.
 Budget exhaustion disables capture. It intentionally lacks game-scale object
 retirement, heap recreation/resize, device-removal recovery and queue retirement.
 References prevent premature deletion, but do not prove safe GPU use or fences.
 
-`cameraVerified`, `gpuOrderingVerified` and `lightingConsumed` always remain zero.
-No camera matrices/root constants, viewport, depth interpretation, RTV/UAV
-output, barriers, fences or producer-to-consumer synchronization are certified.
-Matching resource format/size does not establish its semantic role. There is
-no connection from these snapshots to `native/gi` or the offline worker yet.
+`resourceStateChainVerified`, `cameraVerified`, `gpuOrderingVerified` and
+`lightingConsumed` always remain zero. Root constants and output/viewport values
+are raw per-draw observations; camera meaning is not inferred. Barrier records
+do not include a verified initial state or replay across queues. Queue Signal and
+Wait records are not completion proof. Matching resource format/size does not
+establish semantic role. The capture API still does not submit work or feed the
+GI adapter or offline worker automatically.
 
 ## Build and isolated verification
 
@@ -112,7 +125,10 @@ graphics and compute fixtures passed on RTX 4070 and WARP, including actual
 texture/structured-buffer binding recovery, both descriptor-copy APIs,
 pre-submit descriptor changes, null-view invalidation, unsupported-bundle
 rejection, default single-thread rejection, retained snapshot lifetime and
-explicit detach/reattach. The ABI-v2 test also creates, records and submits on
+explicit detach/reattach. The ABI-v3 test also captures deterministic root
+constants, viewport/scissor, RTV identity, transition barriers and queue
+Signal/Wait events, while checking all verification flags remain false. It
+creates, records and submits on
 two concurrent API threads and two independent queues, verifies per-queue
 resource provenance and invalidation isolation, tests sequential list handoff
 to another thread, and retains queue/resource snapshots after detach. Known GPU
@@ -124,9 +140,10 @@ not been run remotely by this change.
 Callback errors mark the session unhealthy under the metadata lock, before
 another thread can publish partially updated state. A valid 65-heap fixture
 exceeds the capture budget and confirms that original API success is preserved
-while capture is invalidated. All 135 local regression/source-contract tests
-passed; the existing offline GI producer/consumer restoration fixture also
-passed after the worker restoration. None of these uses BeamNG resources.
+while capture is invalidated. Local regression/source-contract tests pass in the
+isolated test environment; the existing offline GI producer/consumer restoration
+fixture also passed after the worker restoration. None of these uses BeamNG
+resources.
 
 The capture build is independent of `native/worker`. The current worker source
 reports ABI v2, matching its header and self-test. This agreement does not create
@@ -138,7 +155,7 @@ against all declared entry points so the observed v1 rollback is caught early.
 
 ## API and removal contract
 
-Capture ABI **v2** is separate from the worker ABI. Check AbiVersion and rebuild
+Capture ABI **v3** is separate from the worker ABI. Check AbiVersion and rebuild
 clients with the current header; config/info/status layouts have changed.
 Lifecycle operations are caller-serialized; runtime metadata queries are locked,
 but must finish before Stop. Valid native interfaces/handles are required, not Lua
@@ -159,8 +176,9 @@ does not install anything into the game.
 
 Before any BeamNG deployment, review early loading, quiescence/thread handling,
 resource retirement and complete removal with the user. Multi-thread metadata
-capture is now tested, but game-scale lifetime/resize handling, GPU fences and
-resource-state tracking remain missing. Establish the actual
+and raw draw/queue context capture are tested, but game-scale lifetime/resize
+handling, complete resource-state-chain validation and GPU completion proof
+remain missing. Establish the actual
 owned GI or source-lighting pass's compiled shader/root contract, camera and
 output bindings and command ordering. Then connect one real GPU visibility
 result to the intended lighting contribution with reliable OFF restoration.

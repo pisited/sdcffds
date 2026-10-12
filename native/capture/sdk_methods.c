@@ -17,6 +17,7 @@ void* beamrtSDKMethod(void* device,void* list,void* queue,unsigned method) {
     case CreateSRV:return DEVICE_SLOT(CreateShaderResourceView);
     case CreateCBV:return DEVICE_SLOT(CreateConstantBufferView);
     case CreateUAV:return DEVICE_SLOT(CreateUnorderedAccessView);
+    case CreateRTV:return DEVICE_SLOT(CreateRenderTargetView);
     case CopySimple:return DEVICE_SLOT(CopyDescriptorsSimple);
     case CopyRanges:return DEVICE_SLOT(CopyDescriptors);
     case CreateRoot:return DEVICE_SLOT(CreateRootSignature);
@@ -31,12 +32,26 @@ void* beamrtSDKMethod(void* device,void* list,void* queue,unsigned method) {
     case SetComputeRoot:return LIST_SLOT(SetComputeRootSignature);
     case SetGraphicsTable:return LIST_SLOT(SetGraphicsRootDescriptorTable);
     case SetComputeTable:return LIST_SLOT(SetComputeRootDescriptorTable);
+    case SetGraphicsConstant:return LIST_SLOT(SetGraphicsRoot32BitConstant);
+    case SetComputeConstant:return LIST_SLOT(SetComputeRoot32BitConstant);
+    case SetGraphicsConstants:return LIST_SLOT(SetGraphicsRoot32BitConstants);
+    case SetComputeConstants:return LIST_SLOT(SetComputeRoot32BitConstants);
+    case SetGraphicsCBV:return LIST_SLOT(SetGraphicsRootConstantBufferView);
+    case SetComputeCBV:return LIST_SLOT(SetComputeRootConstantBufferView);
+    case SetGraphicsUAV:return LIST_SLOT(SetGraphicsRootUnorderedAccessView);
+    case SetComputeUAV:return LIST_SLOT(SetComputeRootUnorderedAccessView);
+    case SetViewports:return LIST_SLOT(RSSetViewports);
+    case SetScissors:return LIST_SLOT(RSSetScissorRects);
+    case SetRenderTargets:return LIST_SLOT(OMSetRenderTargets);
+    case ResourceBarrier:return LIST_SLOT(ResourceBarrier);
     case Draw:return LIST_SLOT(DrawInstanced);
     case DrawIndexed:return LIST_SLOT(DrawIndexedInstanced);
     case Dispatch:return LIST_SLOT(Dispatch);
     case Bundle:return LIST_SLOT(ExecuteBundle);
     case Indirect:return LIST_SLOT(ExecuteIndirect);
     case ExecuteLists:return (*(void***)queue)[offsetof(ID3D12CommandQueueVtbl,ExecuteCommandLists)/sizeof(void*)];
+    case QueueSignal:return (*(void***)queue)[offsetof(ID3D12CommandQueueVtbl,Signal)/sizeof(void*)];
+    case QueueWait:return (*(void***)queue)[offsetof(ID3D12CommandQueueVtbl,Wait)/sizeof(void*)];
     default:return NULL;
     }
 }

@@ -80,6 +80,7 @@ struct MultiQueuePass {
         list->SetPipelineState(pipeline.Get());list->SetGraphicsRootSignature(root.Get());
         ID3D12DescriptorHeap* heaps[]={gpu.Get()};list->SetDescriptorHeaps(1,heaps);
         list->SetGraphicsRootDescriptorTable(0,gpu->GetGPUDescriptorHandleForHeapStart());
+        const UINT rootValue=0;list->SetGraphicsRoot32BitConstant(1,rootValue,0);
         const D3D12_VIEWPORT viewport{0,0,1,1,0,1};const D3D12_RECT scissor{0,0,1,1};
         list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&scissor);
         auto rt=rtv->GetCPUDescriptorHandleForHeapStart();list->OMSetRenderTargets(1,&rt,FALSE,nullptr);

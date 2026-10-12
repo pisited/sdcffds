@@ -10,6 +10,10 @@
 // BeamNG attachment. Real native interfaces only; no Lua/scene pointers.
 struct BeamRTCapture;
 struct BeamRTCaptureSnapshot;
+static const uint32_t BEAMRT_CAPTURE_MAX_VIEWPORTS=16;
+static const uint32_t BEAMRT_CAPTURE_MAX_OUTPUTS=8;
+static const uint32_t BEAMRT_CAPTURE_MAX_ROOT_VALUES=64;
+static const uint32_t BEAMRT_CAPTURE_MAX_TRANSITIONS=32;
 enum BeamRTCaptureThreadMode : uint32_t {
     BEAMRT_CAPTURE_SINGLE_THREAD=0,
     BEAMRT_CAPTURE_MULTITHREAD=1
@@ -22,7 +26,13 @@ struct BeamRTCaptureConfig {
     uint32_t offsets[8]; // SRV indices inside the exact matched root table
     DXGI_FORMAT formats[8]; // UNKNOWN for structured-buffer inputs
     D3D12_SRV_DIMENSION dimensions[8]; // single-mip Texture2D or structured Buffer
-    uint32_t threadMode,reserved2; // ABI v2; single-thread is the default
+    uint32_t threadMode,reserved2; // ABI v3; single-thread is the default
+};
+struct BeamRTCaptureRootValue { uint32_t parameter,offset,value; };
+struct BeamRTCaptureRootAddress { uint32_t parameter,reserved;uint64_t address; };
+struct BeamRTCaptureTransition {
+    ID3D12Resource* resource;
+    uint32_t before,after,subresource;
 };
 struct BeamRTCaptureInfo {
     uint64_t submission,recordingGeneration;
@@ -30,8 +40,21 @@ struct BeamRTCaptureInfo {
     ID3D12Resource* resources[8]; // borrowed until snapshot release
     D3D12_SHADER_RESOURCE_VIEW_DESC views[8];
     ID3D12CommandQueue* queue; // borrowed until snapshot release; NOT a GPU fence
-    // Capture alone does not certify camera data, states, fences or lighting.
-    uint32_t cameraVerified,gpuOrderingVerified,lightingConsumed,reserved;
+    uint32_t viewportCount,scissorCount,renderTargetCount,rootValueCount;
+    uint32_t rootCbvCount,rootUavCount,transitionCount,contextComplete;
+    D3D12_VIEWPORT viewports[BEAMRT_CAPTURE_MAX_VIEWPORTS];
+    D3D12_RECT scissors[BEAMRT_CAPTURE_MAX_VIEWPORTS];
+    ID3D12Resource* renderTargets[BEAMRT_CAPTURE_MAX_OUTPUTS]; // borrowed until snapshot release
+    DXGI_FORMAT renderTargetFormats[BEAMRT_CAPTURE_MAX_OUTPUTS];
+    BeamRTCaptureRootValue rootValues[BEAMRT_CAPTURE_MAX_ROOT_VALUES];
+    BeamRTCaptureRootAddress rootCbvs[64],rootUavs[64]; // GPU VAs, not copied constant contents
+    BeamRTCaptureTransition transitions[BEAMRT_CAPTURE_MAX_TRANSITIONS]; // observed list barriers, not a state-chain proof
+    uint64_t queueExecutionSerial,queueEventSerial,queueSignalValue,queueWaitValue;
+    ID3D12Fence* queueSignalFence; // borrowed until snapshot release
+    ID3D12Fence* queueWaitFence; // borrowed until snapshot release
+    // Observation flags only. These never certify engine camera, complete state,
+    // cross-queue GPU order or lighting consumption.
+    uint32_t resourceStateChainVerified,gpuOrderingVerified,cameraVerified,lightingConsumed;
 };
 struct BeamRTCaptureStatus {
     uint64_t interceptedCalls,matchedCommands,capturedSubmissions;
@@ -51,8 +74,8 @@ BEAMRT_CAPTURE_API int BeamRT_CaptureStart(ID3D12Device*,const BeamRTCaptureConf
     uint32_t apiCallersQuiescent,BeamRTCapture**);
 BEAMRT_CAPTURE_API int BeamRT_CaptureGetStatus(BeamRTCapture*,BeamRTCaptureStatus*);
 BEAMRT_CAPTURE_API int BeamRT_CaptureGetSnapshot(BeamRTCapture*,BeamRTCaptureSnapshot**);
-// Queue-specific historical result. Missing/invalid target submission on that
-// queue cannot borrow another queue's result. Availability is not freshness.
+// Queue-specific historical result. Draw context, barriers and queue events are
+// observed metadata only; availability is not freshness or synchronization proof.
 BEAMRT_CAPTURE_API int BeamRT_CaptureGetSnapshotForQueue(BeamRTCapture*,ID3D12CommandQueue*,BeamRTCaptureSnapshot**);
 BEAMRT_CAPTURE_API int BeamRT_CaptureReadSnapshot(BeamRTCaptureSnapshot*,BeamRTCaptureInfo*);
 BEAMRT_CAPTURE_API void BeamRT_CaptureReleaseSnapshot(BeamRTCaptureSnapshot**);

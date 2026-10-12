@@ -37,12 +37,15 @@ class NativeCaptureContracts(unittest.TestCase):
         self.assertIn("aliased/missing SDK method implementation unsupported", self.capture)
 
     def test_actual_hooks_forward_renderer_calls(self):
-        methods = ("CreateHeap", "CreateSRV", "CreateCBV", "CreateUAV", "CopySimple",
+        methods = ("CreateHeap", "CreateSRV", "CreateCBV", "CreateUAV", "CreateRTV", "CopySimple",
                    "CopyRanges", "CreateRoot", "CreateGraphics", "CreateCompute",
                    "CreateList", "ResetList", "ClearList", "SetHeaps", "SetPipeline",
                    "SetGraphicsRoot", "SetComputeRoot", "SetGraphicsTable",
-                   "SetComputeTable", "Draw", "DrawIndexed", "Dispatch", "Bundle",
-                   "Indirect", "ExecuteLists")
+               "SetComputeTable", "SetGraphicsConstant", "SetComputeConstant",
+               "SetGraphicsConstants", "SetComputeConstants", "SetGraphicsCBV", "SetComputeCBV",
+               "SetGraphicsUAV", "SetComputeUAV", "SetViewports", "SetScissors",
+               "SetRenderTargets", "ResourceBarrier", "Draw", "DrawIndexed", "Dispatch",
+               "Bundle", "Indirect", "ExecuteLists", "QueueSignal", "QueueWait")
         for method in methods:
             self.assertRegex(self.capture, rf"STDMETHODCALLTYPE h{method}\(")
             self.assertRegex(self.capture, rf"\bo{method}\(self,")
@@ -113,12 +116,12 @@ class NativeCaptureContracts(unittest.TestCase):
         self.assertIn("h->queues.find(queue)", method)
         self.assertIn("new BeamRTCaptureSnapshot(*found->second.latest)", method)
         self.assertNotIn("*h->latest", method)
-        self.assertIn("foundQueue->second.latest.reset()", self.capture)
+        self.assertIn("queueState.latest.reset()", self.capture)
         self.assertIn("snapshot->queueReference=queue;snapshot->info.queue=queue", self.capture)
         self.assertIn("queues.clear()", self.capture)
 
-    def test_v2_threading_contract_retains_quiescent_owner_detach(self):
-        self.assertRegex(self.capture, r"BeamRT_CaptureAbiVersion\(\)\s*\{return 2;")
+    def test_v3_threading_contract_retains_quiescent_owner_detach(self):
+        self.assertRegex(self.capture, r"BeamRT_CaptureAbiVersion\(\)\s*\{return 3;")
         self.assertIn("threadMode,reserved2", self.header)
         self.assertIn("cfg->threadMode<=BEAMRT_CAPTURE_MULTITHREAD", self.capture)
         self.assertIn("std::lock_guard<std::mutex> lock(host->mutex)", self.capture)
@@ -132,6 +135,20 @@ class NativeCaptureContracts(unittest.TestCase):
                          "one invalid queue changed the other queue's capture",
                          "another control thread detached the capture hooks",
                          "multithread capture changed normal GPU output"):
+            self.assertIn(evidence, fixture)
+
+    def test_draw_context_is_bounded_and_observational(self):
+        for field in ("viewports[BEAMRT_CAPTURE_MAX_VIEWPORTS]", "scissors[BEAMRT_CAPTURE_MAX_VIEWPORTS]",
+                      "renderTargets[BEAMRT_CAPTURE_MAX_OUTPUTS]", "rootValues[BEAMRT_CAPTURE_MAX_ROOT_VALUES]",
+                      "transitions[BEAMRT_CAPTURE_MAX_TRANSITIONS]", "queueSignalFence", "queueWaitFence"):
+            self.assertIn(field, self.header)
+        self.assertIn("info.resourceStateChainVerified=0", self.capture)
+        self.assertIn("gpuOrderingVerified", self.header)
+        self.assertIn("queueExecutionSerial", self.capture)
+        fixture = self.source("native/capture/self_test.cpp")
+        for evidence in ("viewport/scissor context mismatch", "render-target provenance mismatch",
+                         "per-draw root constant mismatch", "resource transition evidence missing",
+                         "queue signal/wait evidence missing", "compute output binding not captured"):
             self.assertIn(evidence, fixture)
 
     def test_pinned_dependency_ignored_output_and_independent_ci(self):
@@ -158,6 +175,7 @@ class NativeCaptureContracts(unittest.TestCase):
                          "unsupported bundle certified a capture",
                          "unsupported multi-thread scope certified",
                          "capture budget error did not invalidate metadata",
+                         "capture ABI mismatch",
                          "compute interception changed GPU output"):
             self.assertIn(evidence, fixture)
         self.assertEqual(fixture.count("D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE"), 2)

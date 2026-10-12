@@ -25,9 +25,11 @@ RTX 4070 and WARP only in its own process. It matches exact shader/root bytecode
 tracks descriptor provenance and returns actual bound SRV resource references
 without changing GPU output. It has no BeamNG loading mechanism and does not
 verify frame camera, GPU ordering, output bindings or lighting consumption.
-ABI v2 adds opt-in multi-thread metadata capture and per-queue snapshots, tested
-with concurrent real D3D12 calls. This does not implement live-game thread
-quiescence or GPU synchronization. Retained-object limits and missing lifecycle
+ABI v3 adds raw per-draw root/viewport/RTV observations, transition-barrier
+records, queue Signal/Wait metadata, opt-in multi-thread capture and per-queue
+snapshots, tested with concurrent real D3D12 calls. These fields are evidence,
+not resource-state-chain or GPU completion proof. This does not implement
+live-game thread quiescence or GPU synchronization. Retained-object limits and missing lifecycle
 handling prohibit treating it as a game-ready host. Existing Lua/HLSL rendering
 remains unchanged by this native-only cycle.
 

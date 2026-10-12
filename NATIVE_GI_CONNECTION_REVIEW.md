@@ -19,11 +19,12 @@ read-only interception of real public D3D12 calls in an isolated process.
 Exact shader/root matching and observed descriptor creation/copies recover
 actual texture and structured-buffer SRVs at submission. RTX 4070 and WARP
 graphics/compute fixtures passed with unchanged normal output and explicit
-detach. ABI v2 adds opt-in multi-thread metadata capture and queue-specific
-snapshots; concurrent two-thread/two-queue tests passed on both backends, including
-invalidation isolation and retained queue ownership after detach. This is not a
-game-ready host: bounded retained metadata and no verified camera, barriers/fences
-or lighting consumer. Live attach/detach still requires externally established
+detach. ABI v3 records opt-in multi-thread metadata, queue-specific snapshots,
+raw root/viewport/output context, transition barriers and queue fence events;
+concurrent two-thread/two-queue tests passed on both backends, including
+invalidation isolation and retained queue ownership after detach. These are not
+verified camera semantics, complete resource-state chains, GPU completion or a
+lighting consumer. This is not a game-ready host. Live attach/detach still requires externally established
 quiescence across all callers; that game-side policy is not implemented. No DLL
 has been installed into BeamNG. No Lua reload or new game test is needed.
 
