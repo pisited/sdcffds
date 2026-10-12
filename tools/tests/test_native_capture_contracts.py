@@ -150,6 +150,7 @@ class NativeCaptureContracts(unittest.TestCase):
                          "per-draw root constant mismatch", "resource transition evidence missing",
                          "queue signal/wait evidence missing", "compute output binding not captured"):
             self.assertIn(evidence, fixture)
+        self.assertIn("barrier.Flags!=D3D12_RESOURCE_BARRIER_FLAG_NONE", self.capture)
 
     def test_pinned_dependency_ignored_output_and_independent_ci(self):
         build = self.source("native/capture/build.ps1")

@@ -63,7 +63,8 @@ int wmain(int argc,wchar_t** argv) {
         require(BeamRT_GIDestroyFrame(&frame)!=0 && frame,"compute completion incorrectly retired a consumer-live frame");
         hr(host.queue->Signal(lifetime.Get(),1));host.wait(); // AFTER the LAST consumer
         success(BeamRT_GIDestroyFrame(&frame));
-        testCaptureToGIHandoff(device.Get(),cs,inputs,handoffVS,handoffPS,vs,ps);
+        float expectedBase[3];for(int i=0;i<3;++i)expectedBase[i]=receivers[0][i]+static_cast<float>(pixels[i])/255.0f;
+        testCaptureToGIHandoff(device.Get(),cs,inputs,handoffVS,handoffPS,vs,ps,expectedBase);
         UINT64 completion=1;
         auto fallback=[&]() {
             success(create(inputs));host.begin();success(BeamRT_GIRecord(frame,host.list.Get()));success(BeamRT_GIMarkSubmitted(frame,lifetime.Get(),++completion));host.execute();host.wait();

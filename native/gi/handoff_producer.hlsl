@@ -1,5 +1,8 @@
 Texture2D<float4> receiverOriginTex : register(t0);
 Texture2D<float4> meshDataTex : register(t1);
+cbuffer HandoffFixture : register(b0) {
+    float4 fixtureControl;
+};
 
 struct HandoffVertex {
     float4 position : SV_Position;
@@ -15,5 +18,5 @@ HandoffVertex mainV(uint vertexId : SV_VertexID) {
 float4 mainP(HandoffVertex input) : SV_Target0 {
     float4 receiver = receiverOriginTex.Load(int3(0, 0, 0));
     float4 mesh = meshDataTex.Load(int3(0, 0, 0));
-    return float4(receiver.rgb + mesh.rgb, 1);
+    return float4(receiver.rgb + mesh.rgb + fixtureControl.rgb, fixtureControl.w);
 }

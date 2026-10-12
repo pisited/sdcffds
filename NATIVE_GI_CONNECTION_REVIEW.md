@@ -34,6 +34,22 @@ dimensions, scene/surfel data and generations are explicit fixture inputs. It
 records compute and consumer on the same queue and checks retirement after the
 consumer fence. This validates module composition, not live BeamNG bindings.
 
+Update 2026-10-12: [the offline handoff validator](native/gi/HANDOFF_VALIDATION.md)
+now rejects incomplete context, incompatible ownership/views/viewport, missing
+starting states, broken or unsupported transitions, stale generations and
+unsuitable fence/consumer receipts. Inputs are published only after validation;
+actual completion is queried separately from CPU queue bookkeeping. The owned
+fixture still supplies the semantic/state/serialization evidence explicitly.
+No camera decoder, general game-state converter or native loading is added.
+
+The offline validator now also checks reflected producer/consumer shader layouts
+against their serialized root signatures. A retained fixture-owned UPLOAD buffer
+registry resolves captured CBV addresses using actual allocation bounds and
+explicit current byte mirrors; a nonzero-offset binding is verified by GPU
+output. Consumer constants use reflected fields. This does not discover live
+game CBV resources/contents or establish camera meaning; those mappings and the
+early-load/quiescence policy still require a verified BeamNG host contract.
+
 ## First consumer and acceptance gate
 
 Target BeamRT's owned GI pass, not native headlights or the clustered shade pass.
@@ -66,17 +82,29 @@ No automatic load, silent installer, system-DLL replacement or background
 remote-process injector. Any deployment requires explicit user review of the
 binary, dependency versions, path, loading method and complete removal steps.
 
+Update 2026-10-12: an [opt-in startup host review build](native/startup/README.md)
+now exists. It defaults to no-launch file/argument/hash review and has a separately
+gated new-suspended-child insertion branch. The inert bootstrap only reports DLL
+attach; capture/GI are not linked or activated. Strict builds, no-launch contracts
+and read-only review ran. The user subsequently approved a disposable-process
+test only: nine startup/receipt/failure cases passed, including real insertion,
+target-side status and actual exit-code checks, pre-resume cleanup and the real
+missing-receipt timeout. All private fixture jobs drained. No BeamNG startup or
+game deployment occurred. Safe game-thread/device handoff and actual GI bindings
+remain unimplemented; this fixture approval is not approval for BeamNG launch mode.
+
 The installed BeamNG raw-LiDAR example documents external ffi.load as requiring
 a disabled Lua security sandbox (that particular sensor also requires .tech).
 We must not silently disable the sandbox or assume that example is a general
 renderer plug-in API. Lua reload is not native DLL load/unload.
 
-Candidate to review: an explicit startup launcher that loads the native adapter
+Candidate under review: an explicit startup launcher that would load the native adapter
 before the required resource/view creation, using a pinned interception library
 such as Microsoft Detours. This **is DLL insertion into the new game process**,
 not an engine-supported mod API. It avoids treating a same-named d3d12.dll proxy
-as reliable, but introduces compatibility/loader risks and is not yet selected,
-built or approved for deployment. Normal startup without the launcher must remain
+as reliable, but introduces compatibility/loader risks and is not yet approved
+for deployment. The current inert startup build does not attach that
+adapter. Normal startup without the launcher must remain
 unmodified. Steam/arguments/working directory and other loaded mods must be preserved.
 
 Primary references: [Detours usage](https://github.com/microsoft/Detours/wiki/Using-Detours),

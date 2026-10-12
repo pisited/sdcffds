@@ -255,7 +255,8 @@ struct BeamRTCapture {
         if(count>BEAMRT_CAPTURE_MAX_TRANSITIONS || (count && !barriers)){state->context.complete=false;return;}
         for(UINT i=0;i<count;++i){
             const auto& barrier=barriers[i];
-            if(barrier.Type!=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource){
+            if(barrier.Type!=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION
+                || barrier.Flags!=D3D12_RESOURCE_BARRIER_FLAG_NONE || !barrier.Transition.pResource){
                 state->context.complete=false;continue;
             }
             if(!owns(barrier.Transition.pResource)){state->context.complete=false;continue;}

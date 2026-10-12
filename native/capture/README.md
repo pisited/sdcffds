@@ -33,6 +33,8 @@ fabricate observations or feed a list of pretend resource handles to the DLL.
   Signal/Wait fence pointers and values are recorded as observations. They do
   not establish initial resource state, a complete state chain, cross-queue GPU
   ordering or fence completion.
+  Split BEGIN/END barriers mark context incomplete; their flags cannot be
+  discarded and interpreted as completed full transitions.
 - A snapshot retains its actual `ID3D12Resource` references after explicit host
   detachment, plus the actual submitting `ID3D12CommandQueue` reference. It
   contains the submitted view descriptions and a recording and submission serial.

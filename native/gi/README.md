@@ -48,6 +48,22 @@ algorithm. The remaining host integration must actually capture and supply the
 game resources and order these passes; a manually fabricated host is not proof
 that those resources are exposed by BeamNG.
 
+Update 2026-10-12: the offline handoff now passes through a
+[fail-closed contract validator](HANDOFF_VALIDATION.md). It checks ownership,
+explicit starting states and supported pre-draw transitions, current fixture
+keys, RTV/viewport compatibility and real producer/final-consumer fence values.
+Missing or incompatible evidence clears the pending GI inputs. This does not
+automatically turn raw capture observations into verified game state, and the
+adapter's existing retirement implementation is unchanged.
+
+The next offline layer now checks reflected producer/consumer shader fields and
+serialized root layouts, and resolves a root CBV against a retained, same-device
+UPLOAD buffer registry. Its nonzero-offset contents are checked against actual
+GPU output; consumer constants use reflected offsets. Unknown layouts, missing
+bytes, stale generations and allocation overruns reject the handoff. This is an
+owned-fixture contract, not BeamNG camera decoding or automatic game-buffer
+discovery; see the validator document for the remaining host-supplied evidence.
+
 ## Matched host contract (not yet implemented)
 
 The host must identify the **exact owned GI shader bytecode and root layout**,

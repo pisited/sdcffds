@@ -4,6 +4,10 @@ on:
     paths:
       - 'native/worker/**'
       - 'native/gi/**'
+      - 'native/capture/**'
+      - 'native/startup/**'
+      - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
       - 'shaders/beamrt/beamrtGITrace*'
@@ -24,6 +28,10 @@ on:
     paths:
       - 'native/worker/**'
       - 'native/gi/**'
+      - 'native/capture/**'
+      - 'native/startup/**'
+      - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
       - 'shaders/beamrt/beamrtGITrace*'
@@ -54,8 +62,15 @@ jobs:
         run: python -B tools/tests/test_native_fixture.py
       - name: Native GI integration source contracts
         run: python -B tools/tests/test_native_gi_contracts.py
+      - name: Capture input and context safety contracts
+        run: python -B tools/tests/test_native_capture_contracts.py
       - name: Worker header and implementation ABI regression guard
         run: python -B tools/tests/test_native_worker_contracts.py
+      - name: Startup review-only source contracts
+        run: python -B tools/tests/test_native_startup_contracts.py
+      - name: Build review startup host and run no-launch argument/payload tests
+        shell: pwsh
+        run: ./native/startup/build.ps1 -RunContractTests
       - name: Compile DLL and compute shader; run isolated WARP validation
         shell: pwsh
         run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp
