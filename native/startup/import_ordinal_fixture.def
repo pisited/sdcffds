@@ -1,0 +1,5 @@
+; Test-only import library matching the installed public D3D12 export table.
+; Production lookup resolves by name and never hardcodes this ordinal.
+LIBRARY d3d12.dll
+EXPORTS
+    D3D12CreateDevice @101 NONAME

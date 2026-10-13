@@ -8,6 +8,13 @@ on:
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
       - 'tools/tests/test_native_device_observer_contracts.py'
+      - 'tools/tests/test_native_entry_contracts.py'
+      - 'tools/tests/test_native_import_observer_contracts.py'
+      - 'tools/tests/test_native_pipeline_audit_contracts.py'
+      - 'tools/tests/test_native_pipeline_handoff_contracts.py'
+      - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_shader_cache_manifest.py'
+      - 'tools/beamrt_shader_cache.py'
       - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
@@ -33,6 +40,13 @@ on:
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
       - 'tools/tests/test_native_device_observer_contracts.py'
+      - 'tools/tests/test_native_entry_contracts.py'
+      - 'tools/tests/test_native_import_observer_contracts.py'
+      - 'tools/tests/test_native_pipeline_audit_contracts.py'
+      - 'tools/tests/test_native_pipeline_handoff_contracts.py'
+      - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_shader_cache_manifest.py'
+      - 'tools/beamrt_shader_cache.py'
       - 'tools/tests/test_native_capture_contracts.py'
       - 'tools/tests/test_native_gi_contracts.py'
       - 'tools/tests/test_native_worker_contracts.py'
@@ -72,6 +86,23 @@ jobs:
         run: python -B tools/tests/test_native_startup_contracts.py
       - name: Device creation observer source contracts
         run: python -B tools/tests/test_native_device_observer_contracts.py
+      - name: Native entry rendezvous source contracts
+        run: python -B tools/tests/test_native_entry_contracts.py
+      - name: Image-scoped import observer source contracts
+        run: python -B tools/tests/test_native_import_observer_contracts.py
+      - name: Shader cache and creation-only audit contracts
+        run: |
+          python -B tools/tests/test_shader_cache_manifest.py
+          python -B tools/tests/test_native_pipeline_audit_contracts.py
+          python -B tools/tests/test_native_pipeline_handoff_contracts.py
+      - name: Compile creation-only audit and run isolated WARP fixture
+        shell: pwsh
+        run: ./native/startup/build_pipeline_audit.ps1 -RunTest -Warp
+      - name: Recording-binding source contracts and isolated WARP fixture
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_native_binding_contracts.py
+          ./native/startup/build_bindings.ps1 -RunTest -Warp
       - name: Build review startup host and run no-launch argument/payload tests
         shell: pwsh
         run: ./native/startup/build.ps1 -RunContractTests

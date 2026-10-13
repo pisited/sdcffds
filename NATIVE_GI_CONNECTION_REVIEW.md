@@ -1,8 +1,9 @@
 # Native-to-GI connection: loading and interception review
 
-Status: deployment review plus isolated capture implementation, 2026-10-11.
-No BeamNG DLL loading/injection, hook installation, game-file change or new
-in-game test is authorized or performed by this document. No standalone tracer
+Status: deployment review plus isolated capture implementation, updated 2026-10-12.
+This document does not authorize BeamNG DLL loading/injection, hook installation,
+game-file changes or tests. A separately approved passive startup test is recorded
+below; native graphics/GI activation remains unverified. No standalone tracer
 expansion. Current working Lua/HLSL renderer stays intact.
 
 Update v0.109: an opt-in engine-managed PostFX producer/consumer route is now
@@ -25,8 +26,9 @@ concurrent two-thread/two-queue tests passed on both backends, including
 invalidation isolation and retained queue ownership after detach. These are not
 verified camera semantics, complete resource-state chains, GPU completion or a
 lighting consumer. This is not a game-ready host. Live attach/detach still requires externally established
-quiescence across all callers; that game-side policy is not implemented. No DLL
-has been installed into BeamNG. No Lua reload or new game test is needed.
+quiescence across all callers; that game-side policy is not implemented. No
+capture/GI DLL has been installed into BeamNG. A separate passive bootstrap was
+loaded for the authorized startup observations below; neither activated capture/GI.
 
 The offline GI fixture now exercises capture-to-frame handoff using a synthetic
 producer. Only its mesh/receiver SRVs come from capture; resource states,
@@ -89,8 +91,8 @@ attach; capture/GI are not linked or activated. Strict builds, no-launch contrac
 and read-only review ran. The user subsequently approved a disposable-process
 test only: nine startup/receipt/failure cases passed, including real insertion,
 target-side status and actual exit-code checks, pre-resume cleanup and the real
-missing-receipt timeout. All private fixture jobs drained. No BeamNG startup or
-game deployment occurred. Safe game-thread/device handoff and actual GI bindings
+missing-receipt timeout. All private fixture jobs drained. At that stage no BeamNG
+startup or game deployment occurred. Safe game-thread/device handoff and actual GI bindings
 remain unimplemented; this fixture approval is not approval for BeamNG launch mode.
 
 A dormant [post-loader device creation observer](native/startup/DEVICE_OBSERVER.md)
@@ -100,6 +102,76 @@ identity and reject ambiguity, unexpected threads and stale generations. It
 does not initialize itself from DllMain or add an automatic game callback. The
 real BeamNG control/thread handoff remains required; creation observation is not
 render-pass or lighting integration, and no in-game activation was performed.
+
+The [native-entry rendezvous](native/startup/ENTRY_RENDEZVOUS.md) now reaches an
+automatic post-loader callback without a game-side API call. Production only
+records entry reach and one-shot detachment in parent-validated CPU status;
+automatic device initialization is separately compiled for known fixtures only.
+Four fixture entry cases pass, including pre-main hardware/WARP creation and
+failure fallback. The installed EXE's native PE structure was reviewed read-only,
+not executed at that stage. No graphics-quiescence claim follows from that callback.
+
+Subsequent live update, 2026-10-12: the user authorized one **production-passive
+BeamNG startup**. DLL receipt, native-entry reach/one-shot restoration and menu
+startup passed on 0.39.4.0 build 20972, D3D12/RTX 4070. The user closed normally;
+the game recorded shutdown and neither launcher nor game process remains.
+See [exact tested hashes and limitations](native/startup/ENTRY_RENDEZVOUS.md#actual-passive-beamng-startup-evidence--2026-10-12).
+The direct launch reported a Steam initialization error; Steam behavior was not
+validated. Output binaries changed after shutdown, so the newer hashes are
+not live-tested. Device observation, resource capture and native GI stayed OFF.
+This establishes one actual startup handoff, not graphics quiescence, gameplay
+stability, camera/resource access, GPU ordering or lighting consumption.
+
+New implementation: a separately opted-in [image-scoped import observer](native/startup/IMPORT_OBSERVER.md)
+atomically swaps one verified main-EXE D3D12CreateDevice import after entry
+restoration. Named and ordinal hardware/WARP fixtures passed actual candidate/
+resource ownership, ambiguity rejection, concurrent forwarding and disable with
+retained late-call lifetime; a missing-import application continued normally.
+This avoids guessing quiescence for a process-wide instruction detour, but does
+not provide that condition for capture, identify a game rendering device/pass,
+recover prior resource creation or connect GI. The new route is default OFF and
+was subsequently tested in one separately authorized BeamNG startup. An actual
+returned candidate was observed at import slot RVA 0x1ce75f0; the user confirmed
+the menu and normal closure, and shutdown/process absence were verified. See the
+[new exact-build receipt and limits](native/startup/IMPORT_OBSERVER.md#actual-beamng-creation-receipt--2026-10-12).
+This is real creation observation, not a verified rendering device/pass or GI
+resource connection. The previous passive startup is not its validation.
+
+Creation-audit update: [the exact cached GI manifest and new SDK-slot audit](native/startup/PIPELINE_AUDIT.md)
+are implemented separately. The installed cache's v082 shaders are SM6.0/DXIL,
+not the offline fixture's SM5.0; both vertex and pixel byte hashes are preserved.
+Hardware/WARP fixtures recover an actually observed root and matching PSO,
+including the real cached GI bytecode under a fixture-created compatible layout.
+Pipeline streams are explicitly unsupported/counted, and draw/resource/camera/
+GPU/lighting flags stay false. The [startup-host connection](native/startup/STARTUP_PIPELINE_HANDOFF.md)
+now passes eight inserted-process cases, including independent root-byte transfer
+validation and fail-closed/no-overwrite checks. One subsequently authorized
+BeamNG probe installed the audit and observed real legacy creation calls, but
+metadata invalidated and the exact-match wait expired: 50 roots, 34 legacy PSO
+calls, no matches and health 0. The reason was not exported; the 32-root limit
+is a hypothesis to verify, not a confirmed diagnosis. No live pipeline/root or
+bindings were established. The old capture
+thread contract and GI adapter's fence retirement are unchanged.
+The follow-up audit v2 exports the immutable first failure/HRESULT and replaces
+the strong root-object cap with object-owned CPU tags, bounded weak layout reuse
+and a 2 MiB accounted metadata budget. Pressure skips unclassified roots rather
+than poisoning the session. Hardware/WARP fixtures verify capacity, native-root
+lifetime retirement, matching after cache eviction, precise conflict reporting
+and eight startup handoff cases. One separately authorized **live v2 probe** now
+captured the exact reviewed GI shader pair with an actually observed **168-byte
+same-device root signature**. Host and game exited **0**, with normal closure and
+no remaining test processes. This establishes live creation identity/root capture,
+not draw execution, descriptor/resource/CBV contents, camera meaning, GPU ordering,
+a lighting fix, resource retirement proof or native GI deployment. Next inspect
+the actual root and fixture-test the matched binding observer; no automatic use
+of the old capture module or relaxation of GPU retirement is authorized.
+The [standalone recording observer](native/startup/GI_BINDING_OBSERVER.md) now
+SDK-decodes the actual root (b0 CBV, t0–t5 and s0–s5 tables) and fixture-validates
+draw-time address/handle metadata on hardware/WARP. All descriptor-provenance,
+CBV-content, camera, GPU-ordering and lighting flags remain false. It is not
+connected to the production bootstrap's audit session; that routing/control/
+receipt bridge must be designed and tested before a separately approved live
+binding probe. These CPU recording observations cannot become BeamRTGIInputs.
 
 The installed BeamNG raw-LiDAR example documents external ffi.load as requiring
 a disabled Lua security sandbox (that particular sensor also requires .tech).

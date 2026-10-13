@@ -176,6 +176,11 @@ does not install anything into the game.
 
 ## Next milestone
 
+Update 2026-10-12: a separate [creation-only pipeline audit](../startup/PIPELINE_AUDIT.md)
+and read-only cache manifest now identify the game's actual SM6.0/DXIL candidate
+bytes. Hardware/WARP creation fixtures pass. This does not activate this capture
+DLL, establish its all-caller quiescence, recover live bindings or certify a GI frame.
+
 Before any BeamNG deployment, review early loading, quiescence/thread handling,
 resource retirement and complete removal with the user. Multi-thread metadata
 and raw draw/queue context capture are tested, but game-scale lifetime/resize

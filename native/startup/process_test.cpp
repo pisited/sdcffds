@@ -70,17 +70,38 @@ struct Case {
     std::wstring fault;DWORD hostExit=0,hold=0,targetExit=0,totalProcesses=2;
     bool expectEntry=true,expectAliveAfterHost=false;
     bool device=false,warp=false;
+    bool entry=false,autoEntry=false,initFailure=false;
+    bool imports=false,missingImport=false;
+    bool ordinalImport=false;
+    bool pipeline=false,pipelineMiss=false,badShaderHash=false,existingRoot=false,wrongShaderStage=false;
+    bool pipelineConflict=false;
 };
 static void run(const fs::path& root,const fs::path& directory,const Case& test) {
-    const auto target=test.device?root/L"beamrt_device_fixture.exe":root/L"beamrt_startup_fixture.exe";
+    const auto target=test.pipeline?root/L"beamrt_pipeline_startup_fixture.exe":test.imports && !test.missingImport?root/(test.ordinalImport?L"beamrt_import_ordinal_fixture.exe":L"beamrt_import_fixture.exe"):test.entry?root/L"beamrt_entry_fixture.exe":test.device?root/L"beamrt_device_fixture.exe":root/L"beamrt_startup_fixture.exe";
     const auto host=root/(test.faultHost?L"beamrt_startup_fault_host.exe":L"beamrt_startup_host.exe");
-    const auto dll=root/(test.noReceipt?L"beamrt_startup_no_receipt.dll":L"beamrt_startup_bootstrap.dll");
+    const auto dll=root/(test.entry?(test.initFailure?L"beamrt_entry_fail_fixture.dll":test.autoEntry?L"beamrt_entry_auto_fixture.dll":L"beamrt_entry_passive_fixture.dll")
+        :test.noReceipt?L"beamrt_startup_no_receipt.dll":L"beamrt_startup_bootstrap.dll");
     const auto report=directory/(std::string(test.name)+".bin");
     std::vector<std::wstring> args={L"--launch-reviewed",L"--target",target.wstring(),L"--dll",dll.wstring(),
         L"--workdir",directory.wstring(),L"--expected-target-sha256",hash(target),L"--expected-dll-sha256",test.badHash?std::wstring(64,L'0'):hash(dll),
         L"--acknowledge-native-insertion",L"startup-observation-only",L"--"};
+    if(test.entry || test.imports || test.pipeline)args.insert(args.end()-1,L"--entry-rendezvous");
+    if(test.imports || test.pipeline)args.insert(args.end()-1,L"--observe-device-import");
+    const auto vs=root.parent_path()/L"native-capture/fixture.vs.cso",ps=root.parent_path()/L"native-capture/fixture.ps.cso";
+    const auto rootOutput=directory/(std::string(test.name)+".root.bin");
+    if(test.pipeline){
+        const auto expectedPixel=test.wrongShaderStage?vs:test.pipelineMiss?root/L"fixture.alt.ps.cso":ps;
+        if(test.existingRoot){std::ofstream sentinel(rootOutput,std::ios::binary);sentinel<<"preserve existing artifact";require(bool(sentinel),"root-output sentinel failed");}
+        args.insert(args.end()-1,{L"--observe-gi-creation",L"--gi-vertex",vs.wstring(),L"--gi-pixel",expectedPixel.wstring(),
+            L"--expected-gi-vertex-sha256",hash(vs),L"--expected-gi-pixel-sha256",test.badShaderHash?std::wstring(64,L'0'):hash(expectedPixel),
+            L"--pipeline-root-out",rootOutput.wstring(),L"--pipeline-wait-seconds",(test.pipelineMiss || test.pipelineConflict)?L"1":L"10"});
+    }
     if(!test.fault.empty())args.insert(args.end(),{L"--fixture-host-fault",test.fault});
-    if(test.device)args.insert(args.end(),{L"--device-backend",test.warp?L"warp":L"hardware"});
+    if(test.device || test.pipeline || (test.imports && !test.missingImport))args.insert(args.end(),{L"--device-backend",test.warp?L"warp":L"hardware"});
+    if(test.pipeline)args.insert(args.end(),{L"--vs",vs.wstring(),L"--ps",ps.wstring()});
+    if(test.pipelineConflict)args.insert(args.end(),L"--root-conflict");
+    if(test.entry)args.insert(args.end(),{L"--entry-mode",test.initFailure?L"init-failure":test.autoEntry?L"auto":L"passive",
+        L"--device-backend",test.warp?L"warp":L"hardware"});
     args.insert(args.end(),{L"--report",report.wstring(),L"--module",dll.filename().wstring(),L"--hold-ms",std::to_wstring(test.hold),
         L"--exit-code",std::to_wstring(test.targetExit),L"--",L"",L"space value",L"ends\\",L"a\\\"b",L"\u96ea",L"--launch-reviewed"});
     auto command=quote(host.wstring());for(const auto& a:args)command+=L" "+quote(a);
@@ -117,7 +138,40 @@ static void run(const fs::path& root,const fs::path& directory,const Case& test)
     waitEmpty(job.value);stats=accounting(job.value);require(!stats.ActiveProcesses,"fixture child orphaned");
     if(test.expectEntry){
         BeamRTStartupFixtureReport result{};
-        if(test.device){
+        if(test.pipeline){
+            const auto data=read<BeamRTPipelineFixtureReport>(report);result=data.startup;
+            const auto& info=data.audit;require(info.bytes==sizeof(info) && info.abi==beamrtPipelineAuditInfoABI
+                && info.enabled && info.rootsObserved>50 && info.cacheEvictions && info.metadataBytes<=beamrtPipelineMetadataBudget
+                && info.attachedSlots>=2 && info.ownerThread==result.status.attachThread
+                && !info.drawBindingsVerified && !info.cameraVerified && !info.gpuOrderingVerified && !info.lightingConsumed,"creation audit falsely certified draw/resources");
+            if(test.pipelineConflict)require(!info.healthy && !info.creationMatchAvailable
+                && info.failureReason==static_cast<uint32_t>(BeamRTPipelineFailure::rootEvidenceConflict) && info.failureResult==E_INVALIDARG,
+                "startup fault did not preserve precise first failure");
+            else require(info.healthy && !info.failureReason && info.liveRootTags==1 && info.liveLayouts==1,"startup metadata pressure/lifetime failed");
+            require(data.matched==uint32_t(!test.pipelineMiss && !test.pipelineConflict) && !data.reserved,"creation match expectation failed");
+            if(test.pipelineMiss || test.pipelineConflict)require(!data.ownerMatches && !data.rootBytes && !fs::exists(rootOutput),"no-match run wrote a root artifact");
+            else {std::wstring digest;const wchar_t* hex=L"0123456789abcdef";for(uint8_t value:data.rootDigest){digest+=hex[value>>4];digest+=hex[value&15];}
+                require(data.ownerMatches && data.rootBytes && fs::file_size(rootOutput)==data.rootBytes && hash(rootOutput)==digest,"parent root bytes differ from fixture's native root");}
+        }else if(test.imports && !test.missingImport){
+            const auto imported=read<BeamRTImportFixtureReport>(report);result=imported.startup;
+            require(imported.testsMask==2047 && imported.guardsRejected>=7 && imported.warp==uint32_t(test.warp) && !imported.reserved,"import observer fixture guards/backend mismatch");
+            const auto& before=imported.beforeDisable;const auto& after=imported.afterDisable;
+            require(before.hookAttached && before.ambiguous && !before.complete && before.candidateReady && before.deviceResults>=2
+                && !before.cameraVerified && !before.resourceStateChainVerified && !before.gpuOrderingVerified && !before.lightingConsumed,
+                "import observation improperly certified a render device or graphics state");
+            require(!after.hookAttached && after.slotRestored && after.protectionRestored && after.disabled && after.ambiguous && !after.complete,
+                "import observer failed atomic disable/concurrent forwarding");
+        }else if(test.entry){
+            const auto entryReport=read<BeamRTEntryFixtureReport>(report);result=entryReport.startup;
+            require(entryReport.frameMatches==1 && entryReport.preMainReached==1 && entryReport.warp==uint32_t(test.warp),"native entry state forwarding/pre-main/backend mismatch");
+            const auto& info=entryReport.entry;
+            require(info.abi==1 && info.bytes==sizeof(info) && info.armed && info.reached && info.released && !info.hookAttached
+                && info.entryBytesRestored && SUCCEEDED(info.result) && !info.graphicsQuiescenceVerified && !info.cameraVerified
+                && !info.gpuOrderingVerified && !info.lightingConsumed,"entry rendezvous improperly certified graphics context");
+            if(test.autoEntry && !test.initFailure)require(info.deviceStarted && info.deviceStopped && SUCCEEDED(info.deviceResult)
+                && entryReport.device.deviceResults==1 && entryReport.device.complete && !entryReport.device.lightingConsumed,"automatic fixture observer missed pre-main device");
+            else require(!info.deviceStarted && !info.deviceStopped && (test.initFailure?FAILED(info.deviceResult):info.deviceResult==E_NOTIMPL),"passive/failed entry path activated device observer");
+        }else if(test.device){
             const auto deviceReport=read<BeamRTDeviceFixtureReport>(report);result=deviceReport.startup;
             if(deviceReport.errorStep || deviceReport.testsMask!=511)throw std::runtime_error(std::string(test.name)+": device test step="
                 +std::to_string(deviceReport.errorStep)+", mask="+std::to_string(deviceReport.testsMask));
@@ -138,16 +192,22 @@ static void run(const fs::path& root,const fs::path& directory,const Case& test)
             && result.status.processId==result.processId && !result.status.captureInstalled && !result.status.gpuWorkSubmitted
             && !result.status.lightingConsumed && done==test.targetExit,"startup receipt incorrectly certified rendering or wrong fixture exit");
     }else require(!fs::exists(report) && !fs::exists(report.wstring()+L".done"),"pre-resume failure executed target entry");
+    if(test.existingRoot){std::ifstream sentinel(rootOutput,std::ios::binary);const std::string content((std::istreambuf_iterator<char>(sentinel)),std::istreambuf_iterator<char>());
+        require(content=="preserve existing artifact","existing root output was overwritten");}
     std::cout<<"PASS: "<<test.name<<"; hostExit="<<exit<<"; totalProcesses="<<stats.TotalProcesses<<"; active=0\n"<<std::flush;
 }
 int wmain(int argc,wchar_t** argv) {
     try {
-        require(argc==2 || (argc==3 && std::wstring(argv[2])==L"--device"),"usage: process_test <owned native-startup artifact directory> [--device]");const auto root=fs::canonical(argv[1]);
-        const bool devices=argc==3;
+        require(argc==2 || (argc==3 && (std::wstring(argv[2])==L"--device" || std::wstring(argv[2])==L"--entry" || std::wstring(argv[2])==L"--import" || std::wstring(argv[2])==L"--pipeline")),"usage: process_test <owned native-startup artifact directory> [--device|--entry|--import|--pipeline]");const auto root=fs::canonical(argv[1]);
+        const bool devices=argc==3 && std::wstring(argv[2])==L"--device",entries=argc==3 && std::wstring(argv[2])==L"--entry",imports=argc==3 && std::wstring(argv[2])==L"--import",pipelines=argc==3 && std::wstring(argv[2])==L"--pipeline";
         require(root.filename()==L"native-startup" && root.parent_path().filename()==L".beamrt-validation","fixture confined to native-startup artifacts");
         for(const wchar_t* name:{L"beamrt_startup_fixture.exe",L"beamrt_startup_host.exe",L"beamrt_startup_fault_host.exe",
             L"beamrt_startup_bootstrap.dll",L"beamrt_startup_no_receipt.dll"})require(fs::is_regular_file(root/name),"required owned fixture artifact missing");
         if(devices)require(fs::is_regular_file(root/L"beamrt_device_fixture.exe"),"device fixture missing");
+        if(pipelines)require(fs::is_regular_file(root/L"beamrt_pipeline_startup_fixture.exe") && fs::is_regular_file(root/L"fixture.alt.ps.cso"),"pipeline startup fixtures missing");
+        if(imports)for(const wchar_t* name:{L"beamrt_import_fixture.exe",L"beamrt_import_ordinal_fixture.exe"})require(fs::is_regular_file(root/name),"import fixture missing");
+        if(entries)for(const wchar_t* name:{L"beamrt_entry_fixture.exe",L"beamrt_entry_passive_fixture.dll",L"beamrt_entry_auto_fixture.dll",L"beamrt_entry_fail_fixture.dll"})
+            require(fs::is_regular_file(root/name),"entry fixture missing");
         // No dialogs/windows on expected loader/test failures; children inherit.
         SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
         const auto directory=root/(L"process-tests-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
@@ -163,10 +223,26 @@ int wmain(int argc,wchar_t** argv) {
             {"missing-receipt-child-exit",false,true,false,L"",2,250},
             {"missing-receipt-real-timeout",false,true,false,L"",2,18000,0,2,true,true}
         };
-        if(devices){
+        if(pipelines){
+            for(bool warp:{false,true}){Case test{warp?"pipeline-startup-warp":"pipeline-startup-hardware"};test.pipeline=true;test.warp=warp;test.hold=1000;run(root,directory,test);}
+            for(bool warp:{false,true}){Case test{warp?"pipeline-conflict-warp":"pipeline-conflict-hardware"};test.pipeline=true;test.pipelineConflict=true;
+                test.warp=warp;test.hostExit=7;test.hold=2500;test.expectAliveAfterHost=true;run(root,directory,test);}
+            Case miss{"pipeline-installed-without-match"};miss.pipeline=true;miss.pipelineMiss=true;miss.hostExit=7;miss.hold=2500;miss.expectAliveAfterHost=true;run(root,directory,miss);
+            Case bad{"pipeline-shader-hash-refused"};bad.pipeline=true;bad.badShaderHash=true;bad.hostExit=1;bad.totalProcesses=1;bad.expectEntry=false;run(root,directory,bad);
+            Case exists{"pipeline-output-preserved"};exists.pipeline=true;exists.existingRoot=true;exists.hostExit=1;exists.totalProcesses=1;exists.expectEntry=false;run(root,directory,exists);
+            Case stage{"pipeline-wrong-stage-refused"};stage.pipeline=true;stage.wrongShaderStage=true;stage.hostExit=1;stage.totalProcesses=1;stage.expectEntry=false;run(root,directory,stage);
+        }else if(imports){
+            for(bool warp:{false,true}){Case test{warp?"import-warp":"import-hardware"};test.imports=true;test.warp=warp;test.hold=1000;run(root,directory,test);}
+            for(bool warp:{false,true}){Case test{warp?"import-ordinal-warp":"import-ordinal-hardware"};test.imports=true;test.ordinalImport=true;test.warp=warp;test.hold=1000;run(root,directory,test);}
+            Case absent{"import-absent-fails-closed"};absent.imports=true;absent.missingImport=true;absent.hostExit=5;absent.hold=1000;run(root,directory,absent);
+        }else if(entries){
+            Case passive{"entry-passive"};passive.entry=true;passive.hold=1000;run(root,directory,passive);
+            for(bool warp:{false,true}){Case test{warp?"entry-auto-warp":"entry-auto-hardware"};test.entry=true;test.autoEntry=true;test.warp=warp;test.hold=1000;run(root,directory,test);}
+            Case failed{"entry-init-failure-fallback"};failed.entry=true;failed.autoEntry=true;failed.initFailure=true;failed.hold=1000;run(root,directory,failed);
+        }else if(devices){
             for(bool warp:{false,true}){Case test{warp?"device-warp":"device-hardware"};test.device=true;test.warp=warp;test.hold=1000;run(root,directory,test);}
         }else for(const auto& test:tests)run(root,directory,test);
-        std::wcout<<L"PASS: "<<(devices?2:9)<<L" disposable "<<(devices?L"device-observer":L"startup")<<L" cases; all private jobs drained. Reports: "<<directory.wstring()
+        std::wcout<<L"PASS: "<<(pipelines?8:imports?5:entries?4:devices?2:9)<<L" disposable "<<(pipelines?L"startup-connected pipeline":imports?L"import-observer":entries?L"entry-rendezvous":devices?L"device-observer":L"startup")<<L" cases; all private jobs drained. Reports: "<<directory.wstring()
             <<L"\nNo game executable selected or started; no capture/GI renderer loaded.\n";return 0;
     }catch(const std::exception& error){std::cerr<<"Startup process fixture failed: "<<error.what()<<'\n';return 1;}
 }

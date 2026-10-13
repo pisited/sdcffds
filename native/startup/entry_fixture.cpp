@@ -36,7 +36,9 @@ struct BeforeMain {
     BeforeMain() {
         int count=0;auto values=CommandLineToArgvW(GetCommandLineW(),&count);if(!values)return;
         args.assign(values,values+count);LocalFree(values);
-        if(args.size()<13 || args[1]!=L"--entry-mode" || args[3]!=L"--device-backend" || args[5]!=L"--report" || args[7]!=L"--module")return;
+        if(args.size()<13 || args[1]!=L"--entry-mode" || (args[2]!=L"passive" && args[2]!=L"auto" && args[2]!=L"init-failure")
+            || args[3]!=L"--device-backend" || (args[4]!=L"hardware" && args[4]!=L"warp") || args[5]!=L"--report" || args[7]!=L"--module"
+            || args[9]!=L"--hold-ms" || args[11]!=L"--exit-code")return;
         report.mode=args[2]==L"auto"?1u:args[2]==L"init-failure"?2u:0u;report.warp=args[4]==L"warp"?1u:0u;
         module=GetModuleHandleW(args[8].c_str());if(!module)return;
         entryQuery=reinterpret_cast<EntryQuery>(GetProcAddress(module,"BeamRT_EntryQuery"));

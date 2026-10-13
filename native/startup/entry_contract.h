@@ -7,13 +7,14 @@ struct BeamRTEntryPayload {
     uint64_t magic;
     uint32_t processId,initialThread;
     uint64_t receiptEvent;
+    uint64_t statusMapping;
     uint32_t expectedEntryRva,reserved;
 };
-static_assert(sizeof(BeamRTEntryPayload)==40,"entry payload layout");
+static_assert(sizeof(BeamRTEntryPayload)==48,"entry payload layout");
 inline bool beamrtEntryPayloadValid(const BeamRTEntryPayload* p,DWORD bytes,DWORD pid,DWORD tid) {
     return p && bytes==sizeof(*p) && p->bytes==sizeof(*p) && p->abi==1 && p->magic==beamrtEntryMagic
         && pid && tid && p->processId==pid && p->initialThread==tid && p->expectedEntryRva && !p->reserved
-        && p->receiptEvent && p->receiptEvent!=UINT64_MAX;
+        && p->receiptEvent && p->receiptEvent!=UINT64_MAX && p->statusMapping && p->statusMapping!=UINT64_MAX;
 }
 struct BeamRTEntryStatus {
     uint32_t bytes,abi,armed,reached,released,hookAttached,entryBytesRestored,ownerThread;

@@ -1,7 +1,9 @@
-# Opt-in native startup host: disposable-process validation only
+# Opt-in native startup host: passive startup, not GI integration
 
-Implemented 2026-10-12 directly in the unpacked BeamRT source. **Tested only in
-disposable fixtures; not deployed or approved for BeamNG deployment.** No game files,
+Implemented 2026-10-12 directly in the unpacked BeamRT source. Disposable fixtures
+and **separately authorized passive and import-observation BeamNG startups** passed.
+The second observed a real device-creation output; native capture/GI deployment
+remains unverified. No game files,
 Steam launch options, registry settings, Lua sandbox settings or normal startup
 were changed. No ReShade, proxy system DLL, installer or persistent background
 process is included.
@@ -17,6 +19,47 @@ insertion itself still performs no graphics initialization. Hardware/WARP
 disposable fixtures observed actual creation outputs and resource ownership;
 the corresponding BeamNG initialization/thread handoff is still unverified.
 
+The [opt-in native-entry rendezvous](ENTRY_RENDEZVOUS.md) now provides an automatic
+post-loader callback and parent-validated startup status. Its production path
+is passive; device auto-start and entry-register snapshot exports are fixture-only.
+The installed game's passive native-entry handoff and menu startup subsequently
+passed, followed by user-requested normal closure and verified process absence.
+See [the dated live-test evidence and exact tested hashes](ENTRY_RENDEZVOUS.md#actual-passive-beamng-startup-evidence--2026-10-12).
+Thread quiescence and rendering integration remain unverified. Later output
+updates have different hashes and are not covered by that live test.
+
+New, separate route: [image-scoped device-import observation](IMPORT_OBSERVER.md)
+is implemented behind `--observe-device-import` plus `--entry-rendezvous`. It
+atomically swaps one verified main-image import pointer outside DLL attach, not
+the process-wide D3D12 function instructions. Default startup remains passive.
+This is not quiescence for capture or a game GI connection. Named/ordinal imports
+passed disposable hardware/WARP fixtures. A subsequent authorized game run also
+observed an actual creation output and closed normally; see the
+[exact-build live observation evidence](IMPORT_OBSERVER.md#actual-beamng-creation-receipt--2026-10-12).
+The previous passive test does not validate this observer/new binary.
+
+Next implemented slice: [exact cached shader manifest and creation-only audit](PIPELINE_AUDIT.md).
+The game cache contains SM6.0/DXIL GI shaders. A separate, default-inactive audit
+matches exact VS/PS bytes and observed root creation; its hardware/WARP fixtures
+pass, including real cached GI bytecode. A separate [startup connection](STARTUP_PIPELINE_HANDOFF.md)
+is now implemented and passes eight real inserted-fixture handoffs. It is default
+OFF. A subsequent authorized BeamNG probe installed it and observed legacy
+creation calls, but metadata became unhealthy and no exact shader/root match
+was captured. It is **not connected to live resource capture or native GI**;
+the handoff document records the failed match and next boundary.
+The updated v2 audit now reports the exact first failure/HRESULT and uses bounded,
+object-owned CPU root metadata rather than retaining 32 root objects. Pressure,
+retirement, matching after cache eviction and parent-visible conflict refusals
+pass hardware/WARP fixtures. A separately authorized v2 BeamNG probe now captured
+the exact target GI shader pair and an actual **168-byte root**; host and game
+both exited **0** after normal closure. That is creation identity, not an executed
+draw, descriptor/resource access, camera data or native GI consumption. Those
+remaining boundaries are unchanged; see the handoff's dated live v2 evidence.
+Next slice: [GI recording-binding observer](GI_BINDING_OBSERVER.md) SDK-inspects
+the captured root and fixture-tests actual draw CBV/table/viewport/output metadata.
+It is separate/default-off and not linked into the production startup build;
+no new live binding capture, native GI or lighting result is claimed.
+
 ## Files and default behavior
 
 - `launcher.cpp`: Windows x64 host. No arguments show help. Normal configuration
@@ -28,7 +71,9 @@ the corresponding BeamNG initialization/thread handoff is still unverified.
   startup payload for its own PID, restores Detours' temporary in-memory import
   edit and signals one inherited receipt event. No hooks, device creation, GPU
   commands, thread creation, waiting, file logging or renderer initialization are
-  performed in `DllMain`. No detach-time rendering cleanup is attempted.
+  performed in `DllMain` in presence-only mode. Opt-in entry mode arms an EXE
+  entry detour there, but never executes its initializer or installs graphics
+  hooks there. No detach-time rendering cleanup is attempted.
 - `startup_contract.h`: shared POD-only x64 payload and presence status. The
   exported `BeamRT_StartupQuery` always reports capture/GPU/lighting fields zero.
   The launcher does not remotely invoke this export. It uses the receipt event.
@@ -45,7 +90,7 @@ Detours' required ordinal 1; this host does not use a mixed-bitness helper.
 Detours is the existing official MIT-licensed v4.0.1 source pinned to
 `e4bfd6b03e50de46b47abfbd1e46b384f0c5f833`.
 
-## Explicit launch branch — exercised only with disposable fixtures
+## Explicit launch branch — disposable fixtures and bounded game observations
 
 Launching requires **all** of these separate inputs: `--launch-reviewed`,
 `--expected-target-sha256`, `--expected-dll-sha256`, and
@@ -86,7 +131,7 @@ game. Controlled child tests now exercise these paths, as described below.
 
 No launcher shortcut, game-bin copy, service, scheduled task, registry entry,
 environment override or automatic activation is installed. A future reviewed
-test would be opt-in for that one process. To return to an unmodified process,
+test is opt-in for that one process. To return to an unmodified process,
 close it normally and start BeamNG through its original startup route. Removing
 the bootstrap file while it is loaded is **not** hot-unloading. No safe live
 hook detach or in-game OFF restoration is claimed by this inert bootstrap.
@@ -108,7 +153,7 @@ alone does not establish any of those conditions. Capture/GI remain disabled.
   hashes and intended working directory without launching it. SHA-256 output is
   cross-checked with PowerShell's independent file hash implementation.
 - Review mode rejects an incorrect DLL hash and a DLL passed as the target EXE.
-- Full Python/Lua source/regression suite passes **153/153**.
+- Full Python/Lua source/regression suite passes **161/161**.
 - Explicitly authorized disposable-process testing passes **9/9** cases. This
   includes actual DLL insertion/receipt and target entry, exact Unicode/empty/
   quote/backslash arguments and directory preservation, hash refusal before a
@@ -129,8 +174,12 @@ alone does not establish any of those conditions. Capture/GI remain disabled.
   process to its private job; using the existing test console removed that
   harness-only accounting mismatch. Unicode command display was also repaired
   so it cannot truncate the later startup receipt/log output.
-- No BeamNG launch, graphics-device acquisition, live GI/camera/resource capture,
-  game rendering or in-game OFF/removal behavior is verified. No in-game success claim.
+- One separately approved production-passive BeamNG launch reached/restored the
+  native entry and displayed the main menu on D3D12/RTX 4070. Normal closure and
+  process absence were verified. Steam initialization reported error 1; normal
+  Steam-launch equivalence and gameplay were not tested. No graphics-device
+  acquisition, live GI/camera/resource capture, native lighting consumption,
+  hot-unload or native GI OFF/restoration behavior is verified.
 
 Fault injection and suppressed receipts exist **only** in separately compiled
 test host/DLL variants, not production artifacts. The fixture GUI process creates
@@ -145,10 +194,12 @@ Build and safe review commands (neither launches BeamNG):
 ./.beamrt-validation/native-startup/beamrt_startup_host.exe --review --target "E:\SteamLibrary\steamapps\common\BeamNG.drive\Bin64\BeamNG.drive.x64.exe" --dll "C:\Users\ab\AppData\Local\BeamNG\BeamNG.drive\current\mods\unpacked\beamrt\.beamrt-validation\native-startup\beamrt_startup_bootstrap.dll" --workdir "E:\SteamLibrary\steamapps\common\BeamNG.drive"
 ```
 
-No runnable launch command is supplied in this review stage. Review source,
+No reusable game-launch command is supplied here. Review source,
 binary/dependency identity, startup/receipt behavior and remaining threading
-gates with the user before authorizing **BeamNG** deployment. The user separately
-approved only the disposable test program. CI still runs only build/no-launch
+gates with the user before any further **BeamNG** deployment. Approval for the
+completed passive/import observations is not approval for rendering capture, GI
+activation or repeat launches.
+CI still runs only build/no-launch
 contracts, not insertion. Disposable process testing is a separate explicit opt-in:
 
 ```powershell

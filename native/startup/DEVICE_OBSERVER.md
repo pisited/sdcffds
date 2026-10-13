@@ -1,17 +1,32 @@
 # Explicit post-loader device observer
 
 Implemented 2026-10-12; validated only in the startup-inserted disposable test
-program on hardware and WARP. **Not deployed or initialized in BeamNG.** This is
+program on hardware and WARP. The containing production DLL has now passed one
+passive BeamNG startup, but **this observer was not initialized in BeamNG**. This is
 read-only observation of public D3D12 device creation, not rendering-pass capture,
 automatic game-thread handoff or a lighting improvement.
 
 ## Activation boundary
 
-The startup DLL's `DllMain` still only validates its presence payload, restores
+In presence-only mode, the startup DLL's `DllMain` only validates its payload, restores
 Detours' import edit and signals a receipt. It does not call observer Start, load
 a runtime, install graphics hooks or create a thread/device. The DLL contains
 observer exports, but they stay dormant unless the host explicitly invokes them.
 Binary inspection still shows only `KERNEL32.dll` as a runtime DLL dependency.
+
+Update: [opt-in native-entry rendezvous](ENTRY_RENDEZVOUS.md) adds a narrowly
+scoped EXE-entry detour during attach, with its callback executing later. This
+is not a D3D12 hook or observer initialization in DllMain. Production remains
+passive; automatic observer initialization has passed only in known fixture
+entry callbacks before EXE static-constructor device creation. BeamNG thread
+quiescence and activation remain unverified.
+
+Separate alternative: the new [image-scoped import observer](IMPORT_OBSERVER.md)
+uses an atomic main-EXE import pointer rather than this instruction detour.
+Its disposable named/ordinal hardware/WARP tests passed; it does not change the
+quiescence requirements of this API or capture. A subsequently authorized BeamNG
+startup observed one actual returned device candidate through that separate route;
+see its dated live evidence. This process-wide instruction observer remains dormant.
 
 `BeamRT_DeviceObserveStart` must be called **outside loader-lock work**, after the
 host has loaded `d3d12.dll` and before the device calls it wants to observe. It
@@ -92,7 +107,7 @@ Both hardware and WARP runs passed nine behavior groups (mask 511):
 The bootstrap submits no GPU commands. The target creates an upload buffer for
 owner verification but no rendering queue, shader, visibility pass or GI frame.
 No camera, scene geometry, game resources or live-game behavior is validated.
-Strict builds and the full Python/Lua source suite pass **153/153**. Startup
+Strict builds and the full Python/Lua source suite pass **157/157**. Startup
 presence/failure tests remain separate and capture/GI adapter code is unchanged.
 
 Explicit disposable device test (not game deployment):
@@ -105,9 +120,12 @@ The hardware/WARP ambiguity tests require an available hardware adapter as well
 as WARP. Remote CI compiles the dormant observer and runs source/no-launch tests;
 it does not initialize the observer or run a game.
 
-The next required boundary is a verified BeamNG initialization/control point
-outside loader lock that really establishes the hook-installation thread
-conditions. Only then can a separately reviewed in-game observation establish
+The entry rendezvous now supplies a controlled post-loader callback, and its
+passive BeamNG startup/menu/normal-exit path passed once on 2026-10-12; see the
+[exact-build live evidence](ENTRY_RENDEZVOUS.md#actual-passive-beamng-startup-evidence--2026-10-12).
+The next required boundary is a policy that really establishes hook-installation
+thread conditions in BeamNG. The passive entry-only game probe did not establish those
+graphics conditions; only a separately reviewed graphics observation can establish
 actual device/pass identity. Render-target/CBV lifetimes, shader/root bindings,
 submission ordering and one real GI consumer remain additional requirements.
 

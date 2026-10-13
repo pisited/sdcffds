@@ -1,14 +1,18 @@
 #define BEAMRT_ENTRY_BUILD
+#define BEAMRT_DEVICE_OBSERVER_BUILD
 #include "entry_contract.h"
+#include "import_observer.h"
 #include <detours.h>
 #include <cstring>
 extern "C" { PVOID beamrtOriginalEntry=nullptr;void BeamRT_EntryThunk(); }
 static SRWLOCK entryLock=SRWLOCK_INIT;
 static BeamRTEntryStatus info{};
 static HANDLE receipt=nullptr;
+static HANDLE statusMapping=nullptr;
 static PVOID originalAddress=nullptr;
 static uint8_t originalBytes[5]{};
 static BeamRTDeviceObserver* fixtureDevice=nullptr;
+static void closeEntryHandles(){if(receipt)CloseHandle(receipt);if(statusMapping)CloseHandle(statusMapping);receipt=statusMapping=nullptr;}
 #ifdef BEAMRT_ENTRY_TEST_FRAME
 static BeamRTEntryTestFrame savedFrame{};
 #endif
@@ -30,6 +34,7 @@ HRESULT BeamRT_EntryArmFromPayload() {
     info.bytes=sizeof(info);info.abi=1;info.ownerThread=GetCurrentThreadId();info.result=E_INVALIDARG;info.deviceResult=E_NOTIMPL;
     if(!beamrtEntryPayloadValid(p,bytes,GetCurrentProcessId(),GetCurrentThreadId()))return info.result;
     receipt=reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(p->receiptEvent));
+    statusMapping=reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(p->statusMapping));
     const auto exe=GetModuleHandleW(nullptr);const auto base=reinterpret_cast<const uint8_t*>(exe);
     const auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto nt=reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
@@ -38,15 +43,24 @@ HRESULT BeamRT_EntryArmFromPayload() {
     if(dos->e_magic!=IMAGE_DOS_SIGNATURE || nt->Signature!=IMAGE_NT_SIGNATURE
         || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC
         || nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress
+        || nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size
         || nt->OptionalHeader.AddressOfEntryPoint!=p->expectedEntryRva
-        || uint64_t(p->expectedEntryRva)+5>nt->OptionalHeader.SizeOfImage){CloseHandle(receipt);receipt=nullptr;return info.result;}
+        || uint64_t(p->expectedEntryRva)+5>nt->OptionalHeader.SizeOfImage){closeEntryHandles();return info.result;}
     originalAddress=DetourGetEntryPoint(exe);
     if(!originalAddress || originalAddress!=base+p->expectedEntryRva || DetourGetContainingModule(originalAddress)!=exe){
-        CloseHandle(receipt);receipt=nullptr;return info.result;
+        closeEntryHandles();return info.result;
+    }
+    MEMORY_BASIC_INFORMATION memory{};
+    const auto address=reinterpret_cast<ULONG_PTR>(originalAddress);
+    if(!VirtualQuery(originalAddress,&memory,sizeof(memory)) || memory.AllocationBase!=exe || memory.State!=MEM_COMMIT
+        || memory.Type!=MEM_IMAGE || (memory.Protect&(PAGE_GUARD|PAGE_NOACCESS))
+        || !(memory.Protect&(PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))
+        || address-reinterpret_cast<ULONG_PTR>(memory.BaseAddress)+5>memory.RegionSize){
+        closeEntryHandles();return info.result;
     }
     std::memcpy(originalBytes,originalAddress,sizeof(originalBytes));beamrtOriginalEntry=originalAddress;
     info.result=entryTransaction(true);
-    if(FAILED(info.result)){CloseHandle(receipt);receipt=nullptr;return info.result;}
+    if(FAILED(info.result)){closeEntryHandles();return info.result;}
     info.armed=info.hookAttached=1;return S_OK;
 }
 extern "C" void BeamRT_EntryInitialize(const void* raw) noexcept {
@@ -66,6 +80,9 @@ extern "C" void BeamRT_EntryInitialize(const void* raw) noexcept {
         if(SUCCEEDED(info.result)){
             info.hookAttached=0;info.entryBytesRestored=std::memcmp(originalAddress,originalBytes,sizeof(originalBytes))==0?1u:0u;
         }
+        // Separate runtime payload opt-in. Import-slot observation has its own
+        // receipt; never asserts graphics-caller quiescence or activates GI.
+        if(SUCCEEDED(info.result) && info.entryBytesRestored)BeamRT_ImportStartFromPayload();
 #ifdef BEAMRT_ENTRY_FIXTURE_AUTOSTART
         // This trusted lifecycle assertion is ONLY for the owned fixture. An
         // EXE entry point alone does not certify arbitrary game-thread quiescence.
@@ -81,7 +98,13 @@ extern "C" void BeamRT_EntryInitialize(const void* raw) noexcept {
 #endif
     }
     info.released=1;
-    if(receipt){SetEvent(receipt);CloseHandle(receipt);receipt=nullptr;}
+    // One-time typed CPU startup status, not rendering memory or a GPU fence.
+    // Mapping is deliberately outside DllMain/loader-lock arming.
+    if(statusMapping){
+        auto shared=static_cast<BeamRTEntryStatus*>(MapViewOfFile(statusMapping,FILE_MAP_WRITE,0,0,sizeof(info)));
+        if(shared){*shared=info;UnmapViewOfFile(shared);}
+    }
+    if(receipt)SetEvent(receipt);closeEntryHandles();
 }
 extern "C" HRESULT WINAPI BeamRT_EntryQuery(BeamRTEntryStatus* out,uint32_t bytes) {
     if(!out || bytes!=sizeof(*out))return E_INVALIDARG;EntryLock lock;*out=info;return S_OK;
