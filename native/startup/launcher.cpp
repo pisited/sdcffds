@@ -366,9 +366,9 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
                 if(ready.bytes!=sizeof(ready) || ready.abi!=1 || ready.processId!=process.dwProcessId || ready.initialThread!=process.dwThreadId || ready.callerThread!=process.dwThreadId
                     || FAILED(ready.result) || status.bytes!=sizeof(status) || status.abi!=1 || !status.enabled || !status.healthy || status.ownerThread!=process.dwThreadId
                     || status.attachedSlots<1 || status.attachedSlots>2 || status.targetReady || status.snapshotAvailable){std::wcerr<<L"Binding installation refused/incomplete; child retained.\n";return 9;}
-                const auto deadline=GetTickCount64()+uint64_t(options.bindingWait)*1000;HANDLE recordWaits[]={bindingRecord.value,process.hProcess};DWORD observed=WAIT_TIMEOUT;
-                do{const auto now=GetTickCount64();if(now>=deadline)break;const auto left=static_cast<DWORD>(deadline-now);observed=WaitForMultipleObjects(2,recordWaits,FALSE,left>10000?10000:left);
-                    if(observed==WAIT_TIMEOUT && GetTickCount64()<deadline)std::wcout<<L"Waiting for matching recorded draw; no GPU/resource/camera proof.\n"<<std::flush;
+                const auto bindingDeadline=GetTickCount64()+uint64_t(options.bindingWait)*1000;HANDLE recordWaits[]={bindingRecord.value,process.hProcess};DWORD observed=WAIT_TIMEOUT;
+                do{const auto now=GetTickCount64();if(now>=bindingDeadline)break;const auto left=static_cast<DWORD>(bindingDeadline-now);observed=WaitForMultipleObjects(2,recordWaits,FALSE,left>10000?10000:left);
+                    if(observed==WAIT_TIMEOUT && GetTickCount64()<bindingDeadline)std::wcout<<L"Waiting for matching recorded draw; no GPU/resource/camera proof.\n"<<std::flush;
                 }while(observed==WAIT_TIMEOUT);
                 if(observed!=WAIT_OBJECT_0){const auto& p=binding.progress;std::wcerr<<L"No matching recorded-draw receipt; child retained. Approximate diagnostics only: targetReady="<<p.targetReady
                     <<L", target HRESULT="<<p.targetResult<<L", target attempts="<<p.targetAttempts<<L", target thread="<<p.targetThread<<L", healthy="<<p.healthy
@@ -379,7 +379,7 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
                     || !state.enabled || !state.healthy || !state.targetReady || !state.snapshotAvailable || state.ownerThread!=process.dwThreadId || state.failureReason
                     || state.serial!=record.snapshot.serial || !beamrtBindingSnapshotValid(record.snapshot)){std::wcerr<<L"Recording receipt malformed/incomplete; child retained.\n";return 11;}
                 Handle artifact(CreateFileW(options.bindingOutput.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));win(artifact.value!=INVALID_HANDLE_VALUE,"create new binding artifact");
-                DWORD written=0;win(WriteFile(artifact.value,&record,sizeof(record),&written,nullptr),"save CPU binding receipt");demand(written==sizeof(record),"binding artifact incomplete");
+                DWORD bindingWritten=0;win(WriteFile(artifact.value,&record,sizeof(record),&bindingWritten,nullptr),"save CPU binding receipt");demand(bindingWritten==sizeof(record),"binding artifact incomplete");
                 std::wcout<<L"PASS: matching recorded draw; kind="<<record.snapshot.drawKind<<L", count="<<record.snapshot.count<<L", viewport="<<record.snapshot.viewports[0].Width<<L"x"<<record.snapshot.viewports[0].Height
                     <<L", outputs="<<record.snapshot.renderTargetCount<<L". CPU recording only: descriptors, CBV contents, camera, queue/GPU completion and GI remain unverified.\n";
             }
@@ -410,6 +410,7 @@ static void selfTest() {
     demand(!parse(baseline).entry,"native-entry rendezvous activated by default");
     demand(!parse(baseline).imports,"device-import observation activated by default");
     demand(!parse(baseline).pipeline,"pipeline audit activated by default");
+    demand(!parse(baseline).bindings,"binding observer activated by default");
     auto rejects=[&](std::vector<std::wstring> args){bool rejected=false;try{const auto invalid=parse(args);}catch(const std::exception&){rejected=true;}
         demand(rejected,"unsafe startup arguments accepted");++refused;};
     auto bad=baseline;bad.push_back(L"--launch-reviewed");rejects(bad);
@@ -448,6 +449,34 @@ static void selfTest() {
         if(field==4)invalid.initialThread=0;if(field==5)invalid.vertexBytes=0;if(field==6)invalid.pixelBytes=16*1024*1024+1;
         if(field==7)invalid.inputMapping=0;if(field==8)invalid.matchEvent=UINT64_MAX;if(field==9)invalid.reserved[1]=1;
         demand(!beamrtPipelinePayloadValid(&invalid,sizeof(invalid),123),"unsupported pipeline payload accepted");++refused;}
+    bad=baseline;bad.push_back(L"--observe-gi-bindings");rejects(bad);
+    bad=baseline;bad.insert(bad.end(),{L"--bindings-out",L"C:\\fixture\\record.bin"});rejects(bad);
+    bad=baseline;bad.insert(bad.end(),{L"--bindings-wait-seconds",L"301"});rejects(bad);
+    BeamRTBindingPayload binding{sizeof(binding),1,beamrtBindingMagic,123,456,64,72,80,{0,0}};
+    demand(beamrtBindingPayloadValid(&binding,sizeof(binding),123,456),"valid binding payload rejected");
+    for(int field=0;field<10;++field){auto invalid=binding;
+        if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.magic=0;if(field==3)++invalid.processId;if(field==4)++invalid.initialThread;
+        if(field==5)invalid.outputMapping=0;if(field==6)invalid.startEvent=UINT64_MAX;if(field==7)invalid.recordEvent=invalid.startEvent;
+        if(field==8)invalid.reserved[0]=1;if(field==9)invalid.reserved[1]=1;
+        demand(!beamrtBindingPayloadValid(&invalid,sizeof(invalid),123,456),"invalid binding payload accepted");++refused;}
+    BeamRTBindingSnapshot recording{};recording.bytes=sizeof(recording);recording.abi=1;recording.recordedDraw=1;recording.drawKind=1;
+    recording.commandId=recording.generation=recording.serial=1;recording.cbv=256;recording.count=3;recording.instances=1;
+    recording.viewportCount=recording.scissorCount=recording.renderTargetCount=1;recording.viewports[0]={0,0,1,1,0,1};recording.scissors[0]={0,0,1,1};recording.renderTargets[0]=5000;
+    recording.srvHeap={1,1000,2000,6,32,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};recording.samplerHeap={2,3000,4000,6,16,D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
+    recording.srvTable=2000;recording.samplerTable=4000;for(unsigned i=0;i<6;++i){recording.srvCpu[i]=1000+i*32;recording.samplerCpu[i]=3000+i*16;}
+    demand(beamrtBindingSnapshotValid(recording),"valid CPU recording shape rejected");
+    for(int field=0;field<37;++field){auto invalid=recording;
+        if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.recordedDraw=0;if(field==3)invalid.drawKind=3;if(field==4)invalid.commandId=0;
+        if(field==5)invalid.generation=0;if(field==6)invalid.serial=0;if(field==7)invalid.cbv=0;if(field==8)++invalid.cbv;if(field==9)invalid.count=0;
+        if(field==10)invalid.instances=0;if(field==11)invalid.viewportCount=0;if(field==12)invalid.viewportCount=17;if(field==13)invalid.scissorCount=0;
+        if(field==14)invalid.scissorCount=17;if(field==15)invalid.renderTargetCount=0;if(field==16)invalid.renderTargetCount=9;
+        if(field==17)invalid.descriptorProvenanceVerified=1;if(field==18)invalid.cbvContentsVerified=1;if(field==19)invalid.cameraVerified=1;
+        if(field==20)invalid.gpuOrderingVerified=1;if(field==21)invalid.lightingConsumed=1;if(field==22)invalid.srvHeap.count=5;if(field==23)invalid.samplerHeap.type=0;
+        if(field==24)invalid.srvHeap.flags=0;if(field==25)++invalid.samplerCpu[0];if(field==26)++invalid.srvTable;if(field==27)invalid.samplerHeap.cpu=UINT64_MAX;
+        if(field==28)invalid.viewports[0].Width=std::nanf("");if(field==29)invalid.scissors[0].right=0;if(field==30)invalid.renderTargets[0]=0;
+        if(field==31)invalid.srvHeap.identity=0;if(field==32)invalid.samplerHeap.identity=0;if(field==33)invalid.viewports[0].MaxDepth=2;
+        if(field==34)invalid.srvHeap.gpu=0;if(field==35)invalid.samplerHeap.stride=0;if(field==36)++invalid.srvCpu[5];
+        demand(!beamrtBindingSnapshotValid(invalid),"invalid CPU recording shape accepted");++refused;}
     std::cout<<"PASS: startup review defaults, exact Windows argument roundtrip, "<<refused<<" rejected option/payload cases. No child launched or DLL loaded.\n";
 }
 int wmain(int argc,wchar_t** argv) {
