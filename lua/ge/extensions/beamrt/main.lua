@@ -1,7 +1,9 @@
--- BeamRT v0.102: independent reflection noise and reconstruction controls.
+-- BeamRT v0.109: opt-in GPU visibility-buffer GI and actual underground GI geometry.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
+M.noiseSourcePolicy = require("ge/extensions/beamrt/noiseSourcePolicy")
+M.localLightAvailability = require("ge/extensions/beamrt/localLightAvailability")
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
@@ -12,7 +14,7 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.102"
+local VERSION = "0.109"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -59,7 +61,7 @@ local PROGRESSIVE = {
     atrousEffectName = "BeamRT_ReflectionAtrousFx",
     momentsCopyEffectName = "BeamRT_ReflectionMomentsHistoryCopyFx",
     momentsShaderEntry = "shaders/beamrt/beamrtReflectionMomentsP_v001.hlsl",
-    atrousShaderEntry = "shaders/beamrt/beamrtReflectionAtrousP_v001.hlsl",
+    atrousShaderEntry = "shaders/beamrt/beamrtReflectionAtrousP_v002.hlsl",
     enabled = false,
     strength = 0.65,
     scale = 1.0,
@@ -146,7 +148,7 @@ local PROGRESSIVE = {
     receiverEffectName = "BeamRT_ReceiverResponseFx",
     receiverTarget = "#BeamRT_ReceiverResponse",
     auxiliaryShaderName = "BeamRT_AuxiliaryPackShader",
-    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v001.hlsl",
+    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v002.hlsl",
     auxiliaryEffectName = "BeamRT_AuxiliaryPackFx",
     auxiliaryTarget = "#BeamRT_AuxiliaryInputs",
     stateName = "BeamRT_SixInputState",
@@ -319,14 +321,14 @@ local SURFEL_CACHE_CALLBACKS_NAME = SURFEL_CACHE_EFFECT_NAME .. "Callbacks"
 local REFLECTION_CALLBACKS_NAME = REFLECTION_EFFECT_NAME .. "Callbacks"
 
 local DEBUG_SHADER_ENTRY = "shaders/beamrt/beamrtDebugP_v011.hlsl"
-local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v081.hlsl"
+local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v082.hlsl"
 local TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtTemporalP_v071.hlsl"
 local COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtLightingComposeP_v079.hlsl"
 local COPY_SHADER_ENTRY = "shaders/beamrt/beamrtCopyP_v005.hlsl"
 local SURFEL_CACHE_SHADER_ENTRY = "shaders/beamrt/beamrtSurfelCacheP_v062.hlsl"
 local REFLECTION_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTraceP_v041.hlsl"
 local REFLECTION_TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTemporalP_v038.hlsl"
-local REFLECTION_COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionComposeP_v032.hlsl"
+local REFLECTION_COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionComposeP_v033.hlsl"
 local BUFFER_DIAGNOSTIC_SHADER_ENTRY = "shaders/beamrt/beamrtBufferDiagnosticP_v001.hlsl"
 
 local MODE_IDS = {
@@ -605,6 +607,13 @@ local surfelScanPosition = nil
 local surfelTraceDistance = 75.0
 local surfelBaseRadius = 1.75
 local giSourceMode = 0 -- 0 hybrid, 1 screen-space only, 2 world surfels only
+-- Opt-in world-surfel GI visibility through the same verified opaque mesh
+-- dataset as the experimental off-screen shadow geometry. Disabled by default.
+M.sceneGIVisibility = {enabled = false, revision = -1, lastEnabled = nil}
+-- Full-mesh geometry is an opt-in dataset, not a saved graphics preset or
+-- replacement for native shadows. Preserve the v082 shader when unavailable.
+M.sharedMeshGI = {enabled=false,effective=false,key='',reason='disabled',backend='inline',source='guardhouse',
+  shaderName='BeamRT_GISharedMeshShader',shaderEntry='shaders/beamrt/beamrtGITraceP_v083.hlsl'}
 local worldGIStrength = 1.15
 local worldLeakSuppression = 0.85
 local radianceCleanup = 1.0
@@ -1368,6 +1377,35 @@ local function uploadSurfelGeometry(effect)
   end
 end
 
+function M._uploadGISceneVisibility(effect,force)
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
+  if not effect then return end
+  local status=worldMeshCasters.getStatus()
+  local generation=status.generation or 0
+  if not force and M.sceneGIVisibility.revision==generation
+      and M.sceneGIVisibility.lastEnabled==M.sceneGIVisibility.enabled then
+    return
+  end
+  local triangles=M.sceneGIVisibility.enabled
+    and worldMeshCasters.getOpaqueTriangles() or {}
+  -- Partial map geometry is never presumed complete. The GI shader may
+  -- reject paths proven blocked, but lack of a hit cannot certify a path.
+  effect:setShaderConst("$sceneVisibilityEnabled",
+    M.sceneGIVisibility.enabled and #triangles>0 and 1 or 0)
+  effect:setShaderConst("$sceneVisibilityTriangleCount",#triangles)
+  for i=0,11 do
+    local tri=triangles[i+1]
+    local zero={0,0,0}
+    for _,part in ipairs({"A","B","C"}) do
+      local v=tri and tri[part:lower()] or zero
+      effect:setShaderConst("$sceneVisTri"..i..part,
+        string.format("%.6f %.6f %.6f 0",v[1],v[2],v[3]))
+    end
+  end
+  M.sceneGIVisibility.revision=generation
+  M.sceneGIVisibility.lastEnabled=M.sceneGIVisibility.enabled
+end
+
 local function applyGIShaderConsts(forceGeometryRebind)
   local traceEffect = findObject(GI_EFFECT_NAME)
   if not traceEffect then
@@ -1414,6 +1452,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   traceEffect:setShaderConst("$giEmissiveSeparation", PROGRESSIVE.emissiveSeparation)
   traceEffect:setShaderConst("$surfelVisibilityTolerance", surfelVisibilityTolerance)
   traceEffect:setShaderConst("$surfelCacheReset", surfelCacheResetFrames > 0 and 1 or 0)
+  M._uploadGISceneVisibility(traceEffect,forceGeometryRebind)
   if forceGeometryRebind or surfelGeometryDirtyGI then
     traceEffect:setShaderConst("$surfelCount", #surfels)
     traceEffect:setShaderConst("$surfelMaxDistance", surfelTraceDistance)
@@ -1461,6 +1500,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giTraceDebugMode", PROGRESSIVE.rayDebugMode)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giLightingDiagnostic", PROGRESSIVE.lightingDiagnostic.mode)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giLightingDiagnosticGain", PROGRESSIVE.lightingDiagnostic.gain)
+  M._applySharedMeshGI(traceEffect)
   return true
 end
 
@@ -1566,7 +1606,7 @@ local function applyReflectionShaderConsts()
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionCameraMotion", PROGRESSIVE.cameraMotion)
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionMaxRoughness", reflectionMaxRoughness)
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionMomentsMaxHistory", 32)
-  setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionVarianceStrength", PROGRESSIVE.reflectionVariance.strength)
+  setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionVarianceStrength", varianceActive and PROGRESSIVE.reflectionVariance.strength or 0)
   setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionVarianceScale", PROGRESSIVE.reflectionVariance.scale)
   setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionMaxRoughness", reflectionMaxRoughness)
   local colorFilter = PROGRESSIVE.reflectionColor.configured()
@@ -1932,6 +1972,9 @@ local function createShaders()
   createShader(GI_TRACE_SHADER_NAME, GI_TRACE_SHADER_ENTRY, {
     "prepassTex", "prepassDepthTex", "backBufferTex", "lightInfoTex", "auxiliaryTex", "materialSpecTex"
   })
+  createShader(M.sharedMeshGI.shaderName,M.sharedMeshGI.shaderEntry,{
+    "prepassTex","prepassDepthTex","backBufferTex","lightInfoTex","auxiliaryTex","meshDataTex"
+  })
   createShader(TEMPORAL_SHADER_NAME, TEMPORAL_SHADER_ENTRY, {
     "currentGITex", "prepassTex", "prepassDepthTex", "velocityTex", "historyTex", "historyMomentsTex"
   })
@@ -2244,10 +2287,10 @@ function PROGRESSIVE.inputPrep.createEffects()
   auxiliary:setField("texture", 0, "#BeamRT_HistoryGI")
   auxiliary:setField("texture", 1, "#BeamRT_HistoryMoments")
   auxiliary:setField("texture", 2, "#VelocityBuffer")
-  -- Match the shipped native RGB32 DDS layout; the loader rejects both DX10
-  -- and alpha-format headers. BGRX storage preserves the decoded R/G samples.
-  auxiliary:setField("texture", 3, "/shaders/beamrt/beamrtSTBN_128x128x64_rgb_atlas_linear_v094.dds")
-  auxiliary:setField("texture", 4, "/shaders/common/postFx/gtao/noiseBlue.png")
+  -- The v094 RGB-only DDS is still rejected. Its inactive bank is cleared by
+  -- v002; normal startup must not load that broken optional dependency.
+  auxiliary:setField("texture", 3, M.noiseSourcePolicy.atlasBinding())
+  auxiliary:setField("texture", 4, M.noiseSourcePolicy.nativeTexture)
   auxiliary:setField("texture", 5, "#BeamRT_SurfelRadianceCurrent")
   auxiliary:setField("target", 0, PROGRESSIVE.inputPrep.auxiliaryTarget)
   auxiliary:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
@@ -2470,13 +2513,14 @@ local function createReflectionEffect()
   PROGRESSIVE.reflectionColor.createEffects()
   PROGRESSIVE.reflectionHit.createInputs()
   local effect = findObject(REFLECTION_EFFECT_NAME)
-  if effect and not findObject(PROGRESSIVE.reflectionVariance.momentsEffectName) then
-    -- A prior extension reload can retain the old four-stage PostEffect tree.
-    -- Recreate the reflection tree when installing these new child passes.
+  if effect and (PROGRESSIVE.reflectionVariance.enabled ~= (findObject(PROGRESSIVE.reflectionVariance.momentsEffectName)~=nil)) then
+    -- OFF must use the original graph, not execute three unused experiment passes.
     for _, name in ipairs({PROGRESSIVE.reflectionHit.copyEffectName,
+        PROGRESSIVE.reflectionVariance.momentsCopyEffectName,PROGRESSIVE.reflectionVariance.atrousEffectName,
+        PROGRESSIVE.reflectionVariance.momentsEffectName,
         REFLECTION_COPY_EFFECT_NAME, REFLECTION_COMPOSE_EFFECT_NAME,
         REFLECTION_TEMPORAL_EFFECT_NAME, REFLECTION_EFFECT_NAME}) do
-      deleteObject(name)
+      local old=findObject(name);if old then old:delete() end
     end
     effect = nil
   end
@@ -2520,7 +2564,9 @@ local function createReflectionEffect()
   effect:setField("targetScale", 0, "1 1")
   effect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
 
-  local momentsEffect = createObject("PostEffect")
+  local momentsEffect
+  if PROGRESSIVE.reflectionVariance.enabled then
+  momentsEffect = createObject("PostEffect")
   momentsEffect:setField("shader", 0, PROGRESSIVE.reflectionVariance.momentsShaderName)
   momentsEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
   momentsEffect:setField("texture", 0, "#BeamRT_CurrentReflection")
@@ -2532,6 +2578,7 @@ local function createReflectionEffect()
   momentsEffect:setField("targetScale", 0, "1 1")
   momentsEffect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
   momentsEffect:registerObject(PROGRESSIVE.reflectionVariance.momentsEffectName)
+  end
 
   local temporalEffect = createObject("PostEffect")
   temporalEffect:setField("shader", 0, REFLECTION_TEMPORAL_SHADER_NAME)
@@ -2547,7 +2594,9 @@ local function createReflectionEffect()
   temporalEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
   temporalEffect:registerObject(REFLECTION_TEMPORAL_EFFECT_NAME)
 
-  local atrousEffect = createObject("PostEffect")
+  local atrousEffect
+  if PROGRESSIVE.reflectionVariance.enabled then
+  atrousEffect = createObject("PostEffect")
   atrousEffect:setField("shader", 0, PROGRESSIVE.reflectionVariance.atrousShaderName)
   atrousEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
   atrousEffect:setField("texture", 0, "#BeamRT_TemporalReflection")
@@ -2559,6 +2608,7 @@ local function createReflectionEffect()
   atrousEffect:setField("targetScale", 0, "1 1")
   atrousEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
   atrousEffect:registerObject(PROGRESSIVE.reflectionVariance.atrousEffectName)
+  end
 
   local composeEffect = createObject("PostEffect")
   composeEffect:setField("shader", 0, REFLECTION_COMPOSE_SHADER_NAME)
@@ -2582,6 +2632,7 @@ local function createReflectionEffect()
   copyEffect:registerObject(REFLECTION_COPY_EFFECT_NAME)
   PROGRESSIVE.reflectionHit.createCopy(copyEffect)
 
+  if PROGRESSIVE.reflectionVariance.enabled then
   local momentsCopyEffect = createObject("PostEffect")
   momentsCopyEffect:setField("shader", 0, COPY_SHADER_NAME)
   momentsCopyEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
@@ -2598,6 +2649,11 @@ local function createReflectionEffect()
   temporalEffect:add(atrousEffect)
   momentsEffect:add(temporalEffect)
   effect:add(momentsEffect)
+  else
+    composeEffect:add(copyEffect)
+    temporalEffect:add(composeEffect)
+    effect:add(temporalEffect)
+  end
   effect:registerObject(REFLECTION_EFFECT_NAME)
   beamrtLog("I", "created " .. REFLECTION_EFFECT_NAME .. " with premultiplied radiance, temporal reconstruction, conservative additive compose and history copy; native environment reflections retained")
   return effect
@@ -2791,6 +2847,11 @@ giCallbacks.onDisabled = function()
 end
 
 giCallbacks.preProcess = function()
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer']
+  if not M._visibilityPreparing and buffer and buffer.getStatus().active then
+    if buffer.consumePreparedFrame()then return end
+    buffer.invalidateFrame()
+  end
   -- Keep the off-screen lighting cache centered around the player without
   -- raycasting every frame. This makes the beauty mode usable while driving.
   surfelRefreshCheckFrames = surfelRefreshCheckFrames + 1
@@ -2817,6 +2878,13 @@ giCallbacks.preProcess = function()
   historyWarmupFrames = historyWarmupFrames + 1
   giFrameIndex = (giFrameIndex + 1) % 4096
   applyGIShaderConsts()
+end
+
+function M._prepareGIFrame()
+  M._visibilityPreparing=true
+  local ok,why=pcall(giCallbacks.preProcess)
+  M._visibilityPreparing=false
+  if not ok then error(why)end
 end
 
 giCallbacks.setShaderConsts = function()
@@ -2904,6 +2972,21 @@ local function syncEffectEnablement()
   setEffectEnabled(SURFEL_CACHE_EFFECT_NAME, useSurfelCache)
   setEffectEnabled(PROGRESSIVE.inputPrep.receiverEffectName, useGI)
   setEffectEnabled(GI_EFFECT_NAME, useGI)
+  if not useGI then
+    local pack=package.loaded['ge/extensions/beamrt/meshSceneInputs']
+    if pack then pack.disable() end
+    local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('GI is not rendering')end
+    if M.sharedMeshGI.bound then
+      local trace=findObject(GI_EFFECT_NAME)
+      if trace then
+        trace:setField('shader',0,GI_TRACE_SHADER_NAME)
+        trace:setField('texture',3,'#lightinfo[RT0]');trace:setField('texture',5,'#prepass[RT1]')
+      end
+      M.sharedMeshGI.bound=false
+    end
+    M.sharedMeshGI.bufferEffective=false
+    M.sharedMeshGI.effective=false;M.sharedMeshGI.key='';M.sharedMeshGI.reason='GI is not rendering'
+  end
   setEffectEnabled(REFLECTION_EFFECT_NAME, useReflections)
   PROGRESSIVE.reflectionHit.sync()
   setEffectEnabled(PROGRESSIVE.voxel.effectName, useVoxelDDA)
@@ -2917,6 +3000,8 @@ local function setNormalBeamRTEffectsEnabled(shouldEnableFromState)
     syncEffectEnablement()
     return
   end
+
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('BeamRT disabled')end
 
   setEffectEnabled(DEBUG_EFFECT_NAME, false)
   setEffectEnabled(SURFEL_CACHE_EFFECT_NAME, false)
@@ -5024,26 +5109,15 @@ function M.setBlueNoiseStrength(value)
 end
 
 function M.setBlueNoiseSource(value)
-  if type(value) ~= "string" then
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
+  local selected, reason = M.noiseSourcePolicy.resolve(value)
+  if not selected then
+    beamrtLog("W", reason)
     return false
   end
-  local token = string.lower(value):gsub("[%s_%-]", "")
-  if token == "stbn" or token == "beamrt" or token == "spatiotemporal" then
-    PROGRESSIVE.blueNoiseMode = 1
-    PROGRESSIVE.blueNoiseSource = "stbn"
-  elseif token == "beamng" or token == "gtao" or token == "native" then
-    PROGRESSIVE.blueNoiseMode = 0
-    PROGRESSIVE.blueNoiseSource = "beamng"
-  else
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
-    return false
-  end
+  PROGRESSIVE.blueNoiseMode = selected.mode
+  PROGRESSIVE.blueNoiseSource = selected.name
   resetTemporalHistory("blue-noise source changed", false)
   beamrtLog("I", "blue-noise source set to " .. PROGRESSIVE.blueNoiseSource)
-  if PROGRESSIVE.blueNoiseMode == 1 then
-    beamrtLog("W", "custom scalar atlas is experimental; directional STBN quality is not validated")
-  end
   return true
 end
 
@@ -5549,8 +5623,8 @@ end
 
 function M.setGIRenderScale(value)
   local numericValue = finiteNumber(value)
-  if not numericValue or numericValue < 0.5 or numericValue > 1.0 then
-    beamrtLog("E", "GI render scale must be a finite number from 0.5 through 1.0")
+  if not numericValue or numericValue < 0.05 or numericValue > 1.0 then
+    beamrtLog("E", "GI render scale must be a finite number from 0.05 through 1.0 (below 0.5 is experimental)")
     return false
   end
   giRenderScale = numericValue
@@ -6190,9 +6264,12 @@ end
 -- Opt-in, reversible variance-guided GGX filtering. Mirror, diagnostic,
 -- and convergence tests always stay on the original output path.
 function M.setReflectionVarianceEnabled(enabled)
-  PROGRESSIVE.reflectionVariance.enabled = not not enabled
+  if type(enabled)~='boolean' then return false end
+  PROGRESSIVE.reflectionVariance.enabled = enabled
+  createReflectionEffect()
+  syncEffectEnablement()
   resetReflectionHistory("reflection variance experiment changed", true)
-  return PROGRESSIVE.reflectionVariance.enabled
+  return true
 end
 
 function M.setReflectionVarianceStrength(value)
@@ -6555,6 +6632,45 @@ local function drawTuningWindow()
       "Playable GGX with Color filter ON: scales the depth-aware source-color footprint. 0 uses raw hit color, 1 is original, 2 is broader (still capped at 8 source pixels). Nearly polished surfaces keep source detail. No geometry, hit metadata or native reflection changes.")
     if im.Button("Reset reflection pattern controls") then M.resetReflectionTuning(); syncTuningPointers() end
     tuningTooltip("Resets only these four controls: noise cell 1 px, seed 0, filter radius 1x, color softness 1x. Keeps all other tuning and GI history.")
+    if im.Button(M.sharedMeshGI.enabled and "Full-mesh GI visibility ON" or "Full-mesh GI visibility OFF") then
+      local ok,why=M.setSharedMeshVisibilityEnabled(not M.sharedMeshGI.enabled)
+      if not ok then beamrtLog('E',tostring(why)) end
+    end
+    tuningTooltip("Uses the prepared world mesh to reject blocked WORLD-surfel bounce paths. Screen GI and native lighting are unchanged. Unknown, alpha-tested and blended materials fall back; alpha textures are not yet supported. Requires hybrid/world GI and nonzero world contribution.")
+    im.TextUnformatted("Mesh visibility: "..M.sharedMeshGI.reason)
+    if im.Button(M.sharedMeshGI.backend=='buffer' and 'Use inline GI visibility' or 'Use GPU visibility buffer')then
+      M.setSharedMeshVisibilityBackend(M.sharedMeshGI.backend=='buffer' and 'inline' or 'buffer')
+    end
+    tuningTooltip('Opt-in real-mesh GPU visibility target consumed by GI, not a darkening filter. First buffer workload is bounded; normal resolution can fall back to inline tracing. No native DLL is loaded.')
+    im.TextUnformatted('GI visibility backend: '..(M.sharedMeshGI.bufferEffective and 'buffer scheduled (GPU unverified)' or 'inline / inactive'))
+    if im.Button('Select nearby underground GI geometry')then
+      local ok,why=M.setSharedMeshVisibilitySource('underground');if not ok then beamrtLog('E',tostring(why))end
+    end
+    tuningTooltip('Selects one prepared underground instance within 30 m. Connects its actual mesh to GI only; does not activate the unsupported clustered/headlight hook.')
+    if im.Button(M.getMeshSunShadowStatus().enabled and "Real-mesh sun shadows ON" or "Real-mesh sun shadows OFF") then
+      local ok,why=M.setMeshSunShadowsEnabled(not M.getMeshSunShadowStatus().enabled)
+      if not ok then beamrtLog("E",tostring(why)) end
+    end
+    tuningTooltip("Opt-in full guardhouse mesh in native direct-sun shading. Native shadows/reflections/emissive remain intact; unknown/alpha materials retain fallback. Full receiver resolution; GPU cost not yet measured.")
+    if im.Button("Compare native / BeamRT sun shadows") then
+      local ok,why=M.setMeshSunShadowComparison('split');if not ok then beamrtLog('E',tostring(why)) end
+    end
+    im.SameLine()
+    if im.Button("Restore hybrid sun shadows") then M.setMeshSunShadowComparison('hybrid') end
+    tuningTooltip("Same-frame direct-sun comparison: LEFT native shadows, RIGHT BeamRT-only mesh shadows. Not two independent GI/reflection renders. Ambient, local-light shadows and cloud lighting remain unchanged. Disable restores native shading.")
+    if M.getMeshSunShadowStatus().error then im.TextUnformatted("Mesh sun: "..M.getMeshSunShadowStatus().error) end
+    local localLights=M.getMeshLocalLightStatus()
+    if localLights.enabled or localLights.canEnable then
+      if im.Button(localLights.enabled and "Underground local-light visibility ON" or "Underground local-light visibility OFF") then
+        local ok,why=M.setMeshLocalLightsEnabled(not localLights.enabled)
+        if not ok then beamrtLog('E',tostring(why)) end
+      end
+      tuningTooltip("Opt-in one imported sewer/underground section on the supported legacy point/spot path. Does not suppress ambient lighting or support alpha textures. Native worker output is not connected to BeamNG yet.")
+      if localLights.error then im.TextUnformatted('Mesh local: '..localLights.error) end
+    else
+      im.TextUnformatted("Underground local-light visibility: unavailable")
+      im.TextUnformatted(localLights.unavailableReason)
+    end
     im.PopItemWidth()
   end
 
@@ -6583,8 +6699,8 @@ local function drawTuningWindow()
     tuningSliderFloat("Blue-noise sampling", tuningPointers.blueNoiseStrength, 0.0, 1.0, "%.2f", M.setBlueNoiseStrength,
       "Zero restores legacy hash directions. One uses only the selected noise sequence. Intermediate values choose between complete strategies without interpolating ray coordinates.")
     im.TextUnformatted("Noise source: " .. PROGRESSIVE.blueNoiseSource)
-    if im.Button("EXPERIMENTAL ATLAS") then M.setBlueNoiseSource("stbn"); syncTuningPointers() end
-    tuningTooltip("Custom scalar RG atlas, not validated directional STBN. Its 64 slices now receive a fresh phase each cycle. Native noise remains the recommended baseline.")
+    im.TextUnformatted("Experimental atlas unavailable (DDS rejected)")
+    tuningTooltip(M.noiseSourcePolicy.atlasReason .. ". No change to native noise or reflection filtering.")
     im.SameLine()
     if im.Button("NATIVE NOISE") then M.setBlueNoiseSource("beamng"); syncTuningPointers() end
     tuningTooltip("Recommended: BeamNG's 2D blue-noise mask with integer Weyl phases over 4096 frames. Better transformed-direction metrics than the custom atlas; game appearance settings are unchanged.")
@@ -6841,6 +6957,8 @@ function M.start()
 end
 
 function M.disable()
+  M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
   enabledRequested = false
   syncEffectEnablement()
   beamrtLog("I", "disable requested")
@@ -6882,12 +7000,248 @@ function M.rebuildSceneDatabase(providerName, options)
   return ok, result
 end
 
+-- Conservative opt-in: secondary GI paths to cached world surfels are
+-- rejected ONLY when a manually verified opaque world triangle intersects.
+-- Legacy GI and screen-space paths are not otherwise reweighted.
+function M.setSceneVisibilityGIEnabled(enabled)
+  if type(enabled) ~= "boolean" then
+    return false,"enabled must be boolean"
+  end
+  M.sceneGIVisibility.enabled=enabled
+  M.sceneGIVisibility.revision=-1
+  applyGIShaderConsts(true)
+  resetTemporalHistory("opaque scene visibility changed", false)
+  beamrtLog("I", "GI opaque-triangle visibility " ..
+    (enabled and "enabled (experimental)" or "disabled"))
+  return true
+end
+
+function M.getSceneVisibilityGIStatus()
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
+  local provider=M.getSceneProvider("visibility")
+  local status=provider.getStats()
+  status.enabled=M.sceneGIVisibility.enabled
+  status.shader="beamrtGITraceP_v082.hlsl"
+  status.effectiveOpaqueTriangles=M.sceneGIVisibility.enabled
+    and #worldMeshCasters.getOpaqueTriangles() or 0
+  status.scope="cached world surfel bounce rays only"
+  return status
+end
+
+-- CPU inspection path for GI light-source visibility. This does not
+-- override native direct lighting: it reports available segment evidence,
+-- including uncertain alpha geometry and unimported scene limitations.
+function M.auditWorldSurfelLightPath(surfelIndex, lightIndex)
+  local i=tonumber(surfelIndex) or 1
+  local j=tonumber(lightIndex) or 1
+  if i%1~=0 or j%1~=0 or i<1 or j<1 then
+    return {status="invalid",error="indices must be positive integers"}
+  end
+  local surfel=surfels[i]
+  if not surfel then return {status="unavailable",error="world surfel not cached at index "..i} end
+  local lightProvider=sceneDatabase.getProvider("lights")
+  local light=(lightProvider.getRecords() or {})[j]
+  if not light or not light.position then
+    return {status="unavailable",error="light position not in provider cache at index "..j}
+  end
+  local provider=M.getSceneProvider("visibility")
+  local evidence=provider.traceSegment(surfel.position,light.position,
+                                        {includeApproximateBoxes=true})
+  evidence.surfelIndex=i
+  evidence.lightIndex=j
+  evidence.lightType=light.type
+  evidence.lightName=light.name
+  evidence.directLightingModified=false
+  return evidence
+end
+
+function M.querySceneVisibility(fromWorld,toWorld,opts)
+  local provider=M.getSceneProvider("visibility")
+  return provider.traceSegment(fromWorld,toWorld,opts)
+end
+
+-- Static mesh preprocessing input: export shape asset paths and instance
+-- metadata without assuming Lua can access the native graphics mesh buffer.
+function M.exportStaticSceneManifest(path, limit, useCached)
+  return require("ge/extensions/beamrt/sceneAssetManifest").write(
+    path or "/settings/beamrtSceneManifest.json",
+    {limit=limit, cached=useCached==true})
+end
+function M.getStaticSceneManifestStats(limit, useCached)
+  local manifest,err=require("ge/extensions/beamrt/sceneAssetManifest").capture(
+    {limit=limit, cached=useCached==true})
+  if not manifest then return false,err end
+  return manifest.stats
+end
+
 function M.getSceneDatabaseStats()
   return sceneDatabase.getStats()
 end
 
 function M.getSceneProvider(name)
-  return sceneDatabase.getProvider(name)
+  -- Required sceneDatabase modules can survive an extension reload. Resolve
+  -- the already-tested new visibility module if the cached registry predates it.
+  return sceneDatabase.getProvider(name) or (name=="visibility" and require("ge/extensions/beamrt/sceneVisibility") or nil)
+end
+
+function M._applySharedMeshGI(effect)
+  if not effect then return false end
+  local state=M.sharedMeshGI
+  local renderer=extensions and rawget(extensions,'beamrt_meshBVH')
+  local data,reason
+  if state.source=='underground' then
+    renderer=require('ge/extensions/beamrt/meshLocalScene')
+    if state.enabled then
+      state.policyFrame=((state.policyFrame or 0)+1)%30
+      data,reason=renderer.getBinding(state.policyFrame==0)
+    end
+  elseif state.enabled and renderer then data,reason=renderer.getSceneBinding() end
+  local effective=state.enabled and data and data.policy.opaque>0 and giSourceMode~=1 and worldGIStrength>0
+    and effectIsEnabled(GI_EFFECT_NAME)
+  local key=effective and (state.source..':'..tostring(data.objectId)..':'..data.policy.key..':'..data.gpuData.texture) or ''
+  if effective then
+    local ok,result=pcall(require('ge/extensions/beamrt/meshSceneInputs').enable)
+    if not ok or result==false then effective=false;key='';reason='native input packing unavailable' end
+  end
+  if effective then
+    local buffered=false
+    if state.backend=='buffer' and PROGRESSIVE.rayDebugMode<0.5 and PROGRESSIVE.lightingDiagnostic.mode<0.5 then
+      PROGRESSIVE.inputPrep.applyConsts()
+      local buffer=require('ge/extensions/beamrt/giVisibilityBuffer')
+      local ok,result,why=pcall(buffer.configure,{trace=effect,scene=data,applySceneConsts=renderer.applySceneConsts,
+        prepareFrame=M._prepareGIFrame,width=PROGRESSIVE.inputPrep.imageWidth,height=PROGRESSIVE.inputPrep.imageHeight,
+        bias=rayNormalBias,surfels=surfels,viewAvailable=getRenderView('main')~=nil})
+      buffered=ok and result==true
+      state.bufferReason=buffered and 'passes scheduled; GPU appearance unverified' or (ok and why or tostring(result))
+    elseif state.backend=='buffer' then
+      state.bufferReason='GI diagnostic selected; retain inline path'
+    end
+    effect:setField('shader',0,state.shaderName)
+    effect:setField('texture',3,'#BeamRT_GISourceChannels')
+    effect:setField('texture',5,data.gpuData.texture)
+    state.bound=true
+    renderer.applySceneConsts(effect,data,true)
+    state.reason='active for world-surfel bounce segments';state.opaqueMaterials=data.policy.opaque
+    if buffered then
+      local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer']
+      effect:setField('shader',0,buffer.shaderName);effect:setField('texture',5,buffer.target)
+      buffer.applyConsumer()
+      state.reason='GPU visibility-buffer world GI; appearance unverified'
+    else
+      local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable(state.bufferReason)end
+      if state.backend=='buffer' then state.reason='inline fallback: '..tostring(state.bufferReason)end
+    end
+    state.bufferEffective=buffered
+    key=key..':'..(buffered and 'buffer' or 'inline')
+    state.objectId=data.objectId;state.triangles=data.gpuData.triangleCount;state.nodes=data.gpuData.nodeCount
+  else
+    local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable(reason)end
+    state.bufferEffective=false
+    local pack=package.loaded['ge/extensions/beamrt/meshSceneInputs'];if pack then pack.disable() end
+    if state.bound then
+      effect:setField('shader',0,GI_TRACE_SHADER_NAME)
+      effect:setField('texture',3,'#lightinfo[RT0]');effect:setField('texture',5,'#prepass[RT1]')
+      state.bound=false
+    end
+    state.reason=not state.enabled and 'disabled' or reason or not data and 'scene not prepared'
+      or data.policy.opaque==0 and 'no live-declared opaque materials'
+      or giSourceMode==1 and 'screen-only GI; world-surfel guard inactive' or 'world GI strength is zero'
+  end
+  state.effective=not not effective
+  state.opaqueMaterials=data and data.policy.opaque or 0
+  if state.key~=key then
+    state.key=key
+    resetTemporalHistory('shared mesh visibility changed',false)
+  end
+  return state.effective
+end
+function M.setSharedMeshVisibilityEnabled(value)
+  if type(value)~='boolean' then return false,'enabled must be boolean' end
+  if value then
+    if M.sharedMeshGI.source=='underground' then
+      local data,why=require('ge/extensions/beamrt/meshLocalScene').prepare();if not data then return false,why end
+    else
+      if not extensions.beamrt_meshBVH then extensions.load('beamrt_meshBVH') end
+      local renderer=extensions.beamrt_meshBVH
+      if not renderer or type(renderer.prepareScene)~='function' then return false,'reload meshBVH to load the material-aware implementation' end
+      local ok,why=renderer.prepareScene();if not ok then return false,why end
+      -- Data acquisition is not another debugging display.
+      if extensions.beamrt_meshAlignment then extensions.beamrt_meshAlignment.setMode('off') end
+    end
+  end
+  M.sharedMeshGI.enabled=value
+  applyGIShaderConsts();resetTemporalHistory('shared mesh visibility selection changed',false)
+  return true,M.getSharedMeshVisibilityStatus()
+end
+function M.setSharedMeshVisibilityBackend(value)
+  if value~='inline' and value~='buffer' then return false,'backend must be inline or buffer' end
+  M.sharedMeshGI.backend=value;applyGIShaderConsts();resetTemporalHistory('mesh GI backend changed',false)
+  return true,M.getSharedMeshVisibilityStatus()
+end
+function M.setSharedMeshVisibilitySource(value)
+  if value~='guardhouse' and value~='underground' then return false,'source must be guardhouse or underground' end
+  if value=='underground' then
+    local data,why=require('ge/extensions/beamrt/meshLocalScene').prepare();if not data then return false,why end
+  end
+  local previous=M.sharedMeshGI.source
+  M.sharedMeshGI.source=value
+  if M.sharedMeshGI.enabled then
+    local ok,why=M.setSharedMeshVisibilityEnabled(true)
+    if not ok then M.sharedMeshGI.source=previous;applyGIShaderConsts()end
+    return ok,why
+  end
+  applyGIShaderConsts();resetTemporalHistory('mesh GI source changed',false);return true,M.getSharedMeshVisibilityStatus()
+end
+function M.getSharedMeshVisibilityStatus()
+  return {requested=M.sharedMeshGI.enabled,effective=M.sharedMeshGI.effective,reason=M.sharedMeshGI.reason,
+    opaqueMaterials=M.sharedMeshGI.opaqueMaterials or 0,scope='receiver to world-surfel bounce segments',
+    sourceChannelsPacked=M.sharedMeshGI.effective,alphaTexturesSampled=false,nativeShadowsReplaced=false,
+    backendRequested=M.sharedMeshGI.backend,backendActive=M.sharedMeshGI.bufferEffective and 'buffer' or 'inline',
+    geometrySource=M.sharedMeshGI.source,objectId=M.sharedMeshGI.objectId,triangles=M.sharedMeshGI.triangles,nodes=M.sharedMeshGI.nodes,
+    nativeWorkerAttached=false,gpuExecutionVerified=false,appearanceVerified=false}
+end
+
+function M.setMeshSunShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'enabled must be boolean' end
+  if not extensions then return not value,'extensions unavailable' end
+  if value and not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
+  local shadow=extensions.beamrt_meshSunShadow
+  if not shadow then return not value,'mesh sunlight integration unavailable' end
+  if value then return shadow.enable() end
+  return shadow.disable()
+end
+function M.getMeshSunShadowStatus()
+  local shadow=extensions and extensions.beamrt_meshSunShadow
+  return shadow and shadow.getStatus() or {enabled=false}
+end
+function M.setMeshSunShadowComparison(value)
+  if not extensions then return false,'extensions unavailable' end
+  if not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
+  local shadow=extensions.beamrt_meshSunShadow
+  if not shadow or type(shadow.setComparisonMode)~='function' then return false,'reload meshSunShadow for comparison controls' end
+  local ok,why=shadow.setComparisonMode(value);if not ok then return false,why end
+  if not shadow.getStatus().enabled then return shadow.enable() end
+  return true,shadow.getStatus()
+end
+function M.setMeshLocalLightsEnabled(value)
+  if type(value)~='boolean'then return false,'enabled must be boolean'end
+  if not extensions then return not value,'extensions unavailable'end
+  local status=M.getMeshLocalLightStatus()
+  if value and not status.enabled and not status.canEnable then return false,status.unavailableReason end
+  if value and not rawget(extensions,'beamrt_meshLocalLights') then extensions.load('beamrt_meshLocalLights')end
+  local lights=rawget(extensions,'beamrt_meshLocalLights')
+  if not lights then return not value,'local mesh-light integration unavailable'end
+  if value then return lights.enable()end
+  return lights.disable()
+end
+function M.getMeshLocalLightStatus()
+  -- Reading tuner availability must not trigger extensions.__index auto-load.
+  local lights=extensions and rawget(extensions,'beamrt_meshLocalLights')
+  local status=lights and lights.getStatus()or{enabled=false}
+  local availability=M.localLightAvailability.resolve(status,ClusteredShading~=nil)
+  status.canEnable=availability.canEnable; status.canDisable=availability.canDisable
+  status.unavailableReason=availability.reason
+  return status
 end
 
 function M.captureVehicleGeometry(vehicleId)
@@ -7057,6 +7411,9 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  M.setSharedMeshVisibilityEnabled(false)
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('mission changed')end
+  local underground=package.loaded['ge/extensions/beamrt/meshLocalScene'];if underground then underground.clear()end
   if extensions and extensions.beamrt_reflectionSourceProbe then extensions.beamrt_reflectionSourceProbe.cancel("mission changed") end
   if extensions and extensions.beamrt_reflectionConvergence then
     extensions.beamrt_reflectionConvergence.cancel("mission changed")
@@ -7085,6 +7442,10 @@ function M.onClientStartMission()
 end
 
 function M.onExtensionUnloaded()
+  if package.loaded['ge/extensions/beamrt/giVisibilityBuffer']then package.loaded['ge/extensions/beamrt/giVisibilityBuffer'].release()end
+  M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
+  if package.loaded['ge/extensions/beamrt/meshSceneInputs'] then package.loaded['ge/extensions/beamrt/meshSceneInputs'].release() end
   if extensions and extensions.beamrt_reflectionSourceProbe then extensions.beamrt_reflectionSourceProbe.cancel("BeamRT unloaded") end
   if extensions and extensions.beamrt_reflectionConvergence then
     extensions.beamrt_reflectionConvergence.cancel("BeamRT unloaded")

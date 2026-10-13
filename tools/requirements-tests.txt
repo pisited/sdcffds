@@ -1,0 +1,3 @@
+# Lua 5.1 and LuaJIT 2.1 for BeamRT's offline Lua/source regression tests.
+# Keep local validation and CI on the same verified package version.
+lupa==2.8

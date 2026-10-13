@@ -1,3 +1,97 @@
+# BeamRT v0.108 — native device bootstrap and honest feature availability
+
+The offline no-ReShade worker now supports exact-adapter device acquisition and
+resource-owner identity checks. These passed on the RTX 4070 and WARP; they do
+not establish a game attachment or expose game depth/lighting resources.
+The tuner now labels blocked underground local-light visibility unavailable,
+with no failing activation button. Existing rendering/fallback stays intact.
+See [NATIVE_DEVICE_BOOTSTRAP_V0108.md](NATIVE_DEVICE_BOOTSTRAP_V0108.md).
+
+## v0.107 — reliable native-noise baseline (retained)
+
+The rejected experimental DDS atlas is no longer a mandatory startup input.
+Custom STBN selection now reports unavailable; native BeamNG noise is preserved.
+No reflection/GI filter, sampling sequence, lighting strength or geometry tracing
+changed. This handles a failed optional resource; it does not fix STBN loading
+or promise less reflection noise. See [NOISE_SOURCE_V0107.md](NOISE_SOURCE_V0107.md).
+
+## Native worker progress / current reload (2026-10-11)
+
+A no-ReShade D3D12 GPU worker is now implemented and validated **offline** using
+the existing real guardhouse BVH. It is not attached to BeamNG and does not alter
+the running renderer. No native DLL, loader or injector has been installed.
+See [native/worker/README.md](native/worker/README.md) for exact results/limitations.
+That offline-worker batch left runtime v0.106 unchanged; the subsequent optional
+noise-resource handling update is retained in current runtime v0.108.
+
+For future Lua/HLSL updates, this full GE Lua reload preserves unsaved tuning,
+unloads BeamRT extensions before clearing their helper-module cache, and recreates
+the main effects. Experimental native-shadow hooks stay off; it never loads a DLL:
+
+```lua
+do local saved=beamrt_main and beamrt_main.getSettings(); local loaded=extensions.getLoadedExtensionsNames(); if beamrt_main then beamrt_main.disable() end; extensions.unload("beamrt_main"); for _,name in ipairs(loaded) do if name:match("^beamrt_") then extensions.unload(name) end end; for key in pairs(package.loaded) do if type(key)=="string" and key:match("^ge/extensions/beamrt/") then package.loaded[key]=nil end end; extensions.load("beamrt_main"); if saved then beamrt_main.applySettings(saved); beamrt_main.enable(); beamrt_main.openTuner() else beamrt_main.start() end end
+```
+
+---
+
+# BeamRT v0.103 — shared material-aware mesh visibility for GI
+
+Full imported guardhouse geometry now has an opt-in WORLD-surfel GI visibility
+path using live native opaque declarations, rather than only a debug preview.
+Screen GI and native lighting stay on their existing paths; unsupported opacity
+and unavailable data fall back. No final-scene darkening pretends to replace shadows.
+
+This batch also removes leftover magenta returns, restores existing reflection
+composition/filter code, makes variance OFF remove its three experiment passes,
+and fixes stale visibility-provider lookup. Local regressions and compilation pass;
+live GPU loading, appearance and frame cost are not yet verified.
+
+One normal-render activation and exact scope:
+[SHARED_MESH_GI_MILESTONE.md](SHARED_MESH_GI_MILESTONE.md).
+
+---
+
+# BeamRT v0.102 — one-building GPU BVH preview
+
+Full imported guardhouse geometry now has an isolated GPU BVH traversal path,
+not a 12-triangle truncation or box proxy. Live GPU correctness is still pending.
+In GE Lua, while parked near the current alignment capture:
+
+```lua
+extensions.load("beamrt_meshBVH"); beamrt_meshBVH.setQuality("cinematic"); beamrt_meshBVH.setTestLightEnabled(true); beamrt_meshBVH.enable()
+```
+
+Native scene is left; geometry intersections right. Orange = mesh blocks a ray
+to a fixed **synthetic test light**, green = no hit against this mesh, magenta =
+data failure. This is geometry proof, not finished lighting or alpha-aware shadows.
+No scene light/time change, GI/reflection toggle, or camera move occurs.
+Stop with `beamrt_meshBVH.disable()`. Details: [MESH_BVH_MILESTONE.md](MESH_BVH_MILESTONE.md).
+
+---
+
+# BeamRT v0.102 — real building alignment preview
+
+The next geometry milestone is implemented: a selected real West Coast guardhouse
+visual mesh, node-transform-aware extraction, material references, native instance
+placement and an isolated wireframe alignment check. No GI/shadow/reflection changes
+are activated. Actual in-game alignment and GPU mesh tracing remain unverified.
+
+In GE Lua while parked in West Coast USA:
+
+```lua
+extensions.load("beamrt_meshAlignment"); beamrt_meshAlignment.previewNearest(); dump(beamrt_meshAlignment.getStatus())
+```
+
+The nearest **prepared guardhouse** instance is selected; it may not be in the
+current view. Orange edges are real mesh triangles, not box shadows. Hide with
+`beamrt_meshAlignment.setMode("off")`, or clear with `beamrt_meshAlignment.clear()`.
+Optional `beamrt_meshAlignment.focusPreview()` takes only the free camera to it;
+`beamrt_meshAlignment.restoreCamera()` returns to the previous camera mode.
+Details, private package reproduction, evidence and limits:
+[MESH_ALIGNMENT_MILESTONE.md](MESH_ALIGNMENT_MILESTONE.md).
+
+---
+
 # BeamRT v0.101 — reflection source isolation
 
 No new denoiser or claimed noise fix. Tests original SSR input, native-only color,
@@ -1259,6 +1353,26 @@ Search for `BeamRT`, `v012`, `beamrtSurfelCache`, `beamrtGITrace`, `compile`, an
 4. Inspect `beamng.log` for BeamRT Lua errors or another mod failing earlier during initialization.
 
 ## Scope boundary
+
+### v0.104 real-mesh sunlight integration (opt-in)
+
+v0.106 prepares actual WCU underground meshes and stages a direct world-mesh query
+inside the legacy native point/spot light passes. This build also exposes clustered
+compute lighting, whose integration is still blocked by its binding interface;
+the legacy hook refuses activation there. **Not yet a verified headlight/sewer
+fix.** See [scope and required binding-interface lookup](UNDERGROUND_LOCAL_LIGHTS_V0106.md).
+
+v0.105 corrects vehicle-light acquisition across driving/walking and replaces the
+unsafe cached-shader filename swap with private shader objects/material rebinding.
+These are implementation fixes, **not verified headlight/sewer shadow fixes**.
+See [scope, evidence and next integration milestone](LIGHT_VISIBILITY_V0105.md).
+
+The guardhouse BVH now has an actual native direct-sun shading hook, not only a
+colored preview. Native shadows remain; unknown/alpha materials fall back. GI/SSR
+algorithms are preserved. Default OFF; GPU execution, off-screen appearance and
+cost remain unverified. See [implementation and one normal-render activation](MESH_SUN_SHADOW_MILESTONE.md).
+The native hook is generated privately from the local installation; its source
+is not included in Git and must be prepared when moving to another PC/game version.
 
 Phase 4 intentionally departs from v0.004's single-pass design because previous-frame data requires persistent intermediate targets. All added objects and targets are uniquely BeamRT-prefixed and are removed when the extension unloads. No base-game files are changed.
 

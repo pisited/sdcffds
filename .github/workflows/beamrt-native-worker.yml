@@ -1,0 +1,117 @@
+name: BeamRT offline native GPU worker
+on:
+  push:
+    paths:
+      - 'native/worker/**'
+      - 'native/gi/**'
+      - 'native/capture/**'
+      - 'native/startup/**'
+      - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_device_observer_contracts.py'
+      - 'tools/tests/test_native_entry_contracts.py'
+      - 'tools/tests/test_native_import_observer_contracts.py'
+      - 'tools/tests/test_native_pipeline_audit_contracts.py'
+      - 'tools/tests/test_native_pipeline_handoff_contracts.py'
+      - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_shader_cache_manifest.py'
+      - 'tools/beamrt_shader_cache.py'
+      - 'tools/tests/test_native_capture_contracts.py'
+      - 'tools/tests/test_native_gi_contracts.py'
+      - 'tools/tests/test_native_worker_contracts.py'
+      - 'shaders/beamrt/beamrtGITrace*'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v002.hlsl'
+      - 'shaders/beamrt/beamrtGIVisibilityProducer_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtGIVisibilityBufferP_v001.hlsl'
+      - 'shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtRadianceCleanup*'
+      - 'tools/beamrt_native_fixture.py'
+      - 'tools/beamrt_bvh_pack.py'
+      - 'tools/beamrt_scene_import.py'
+      - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_native_fixture.py'
+      - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
+      - '.github/workflows/beamrt-native-worker.yml'
+  pull_request:
+    paths:
+      - 'native/worker/**'
+      - 'native/gi/**'
+      - 'native/capture/**'
+      - 'native/startup/**'
+      - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_native_device_observer_contracts.py'
+      - 'tools/tests/test_native_entry_contracts.py'
+      - 'tools/tests/test_native_import_observer_contracts.py'
+      - 'tools/tests/test_native_pipeline_audit_contracts.py'
+      - 'tools/tests/test_native_pipeline_handoff_contracts.py'
+      - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_shader_cache_manifest.py'
+      - 'tools/beamrt_shader_cache.py'
+      - 'tools/tests/test_native_capture_contracts.py'
+      - 'tools/tests/test_native_gi_contracts.py'
+      - 'tools/tests/test_native_worker_contracts.py'
+      - 'shaders/beamrt/beamrtGITrace*'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v001.hlsl'
+      - 'shaders/beamrt/beamrtGIReceiverExportP_v002.hlsl'
+      - 'shaders/beamrt/beamrtGIVisibilityProducer_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtGIVisibilityBufferP_v001.hlsl'
+      - 'shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl'
+      - 'shaders/beamrt/beamrtRadianceCleanup*'
+      - 'tools/beamrt_native_fixture.py'
+      - 'tools/beamrt_bvh_pack.py'
+      - 'tools/beamrt_scene_import.py'
+      - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_native_fixture.py'
+      - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
+      - '.github/workflows/beamrt-native-worker.yml'
+permissions:
+  contents: read
+jobs:
+  native-worker:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Existing packed-scene fixture regressions
+        run: python -B tools/tests/test_native_fixture.py
+      - name: Native GI integration source contracts
+        run: python -B tools/tests/test_native_gi_contracts.py
+      - name: Capture input and context safety contracts
+        run: python -B tools/tests/test_native_capture_contracts.py
+      - name: Worker header and implementation ABI regression guard
+        run: python -B tools/tests/test_native_worker_contracts.py
+      - name: Startup review-only source contracts
+        run: python -B tools/tests/test_native_startup_contracts.py
+      - name: Device creation observer source contracts
+        run: python -B tools/tests/test_native_device_observer_contracts.py
+      - name: Native entry rendezvous source contracts
+        run: python -B tools/tests/test_native_entry_contracts.py
+      - name: Image-scoped import observer source contracts
+        run: python -B tools/tests/test_native_import_observer_contracts.py
+      - name: Shader cache and creation-only audit contracts
+        run: |
+          python -B tools/tests/test_shader_cache_manifest.py
+          python -B tools/tests/test_native_pipeline_audit_contracts.py
+          python -B tools/tests/test_native_pipeline_handoff_contracts.py
+      - name: Compile creation-only audit and run isolated WARP fixture
+        shell: pwsh
+        run: ./native/startup/build_pipeline_audit.ps1 -RunTest -Warp
+      - name: Recording-binding source contracts and isolated WARP fixture
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_native_binding_contracts.py
+          ./native/startup/build_bindings.ps1 -RunTest -Warp
+      - name: Build review startup host and run no-launch argument/payload tests
+        shell: pwsh
+        run: ./native/startup/build.ps1 -RunContractTests
+      - name: Compile DLL and compute shader; run isolated WARP validation
+        shell: pwsh
+        run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp
+      - name: Compile GPU-only GI adapter and exercise producer-consumer restoration
+        shell: pwsh
+        run: ./native/gi/build.ps1 -SyntheticFixture -RunTest -Warp
+      # Full GI/export compilation requires local BeamNG includes; CI uses the
+      # exact shared consumer predicate without redistributing engine headers.
+      # WARP tests correctness only, not BeamNG integration or GPU performance.

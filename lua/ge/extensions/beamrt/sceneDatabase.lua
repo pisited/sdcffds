@@ -8,6 +8,7 @@ local providers = {
   terrain = require("ge/extensions/beamrt/providers/terrainProvider"),
   lights = require("ge/extensions/beamrt/providers/lightProvider"),
   materials = require("ge/extensions/beamrt/providers/materialProvider"),
+  visibility = require("ge/extensions/beamrt/sceneVisibility"),
 }
 
 local pendingLevelBuilds = {}

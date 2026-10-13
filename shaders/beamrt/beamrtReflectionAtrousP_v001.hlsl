@@ -34,11 +34,6 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
 {
     float4 center = tex2D(inputReflectionTex, IN.uv0);
 
-    // TEMPORARY TEST: bypass filtering
-    //return center;
-    return float4(10.0, 0.0, 10.0, 1.0);
-    if (reflectionVarianceStrength <= 0.0001 || center.a <= 0.000001)
-        return center;
     if (reflectionVarianceStrength <= 0.0001 || center.a <= 0.000001)
         return center;
 
@@ -88,8 +83,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             float wNormal = pow(saturate(dot(surface.xyz, sampleSurface.xyz)), 24.0);
             float wRough = 1.0 - smoothstep(0.025, 0.16, abs(neighborRough - roughness));
             float wMaterial = 1.0 - smoothstep(0.04, 0.30, length(neighborF0 - F0));
-            float wLuma = 1.0;
-            //float wLuma = exp2(-abs(reflectionLuminance(neighbor.rgb) - centerL) / sigma);
+            float wLuma = exp2(-abs(reflectionLuminance(neighbor.rgb) - centerL) / sigma);
             float wKernel = (x == 0 || y == 0) ? 2.0 : 1.0;
             // Do not treat dark RGB as a miss. Also avoid borrowing radiance
             // from neighbors whose temporal lifetime is invalid.
