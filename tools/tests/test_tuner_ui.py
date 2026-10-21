@@ -202,6 +202,29 @@ class TunerUI(unittest.TestCase):
             self.assertEqual(lua.globals().lampWrites,2)
             self.assertFalse(renderer.getStatus().requested)
 
+    def test_shadow_priority_and_readonly_report_are_explicit_ui_actions(self):
+        for lua,renderer in self.runtimes():
+            lua.execute('''
+            priority=true;priorityWrites=0;reports=0
+            api.getNearbyLampShadowStatus=function()
+              return {requested=true,automatic=true,automaticPreference=true,reason='CPU state',
+                priorityAssist=priority,prioritizedLights={},processedLights=100,pendingJobs=5000}
+            end
+            api.setNearbyLampPriorityAssistEnabled=function(v)priority=v;priorityWrites=priorityWrites+1 end
+            api.logNearbyLampShadowInputs=function()reports=reports+1 end
+            tab='Lighting & GI';expanded=true;ui.draw(im,api,panels)
+            ''')
+            self.assertEqual(lua.globals().priorityWrites,0)
+            self.assertEqual(lua.globals().reports,0)
+            labels='\n'.join(lua.globals().labels.values())
+            self.assertIn('Discovery checks: 5000',labels)
+            self.assertNotIn('Pending: 5000',labels)
+            lua.execute("click='Nearby shadow priority ON##BeamRTLamps';ui.draw(im,api,panels)")
+            self.assertFalse(lua.globals().priority)
+            lua.execute("click='Log nearby light shadow inputs##BeamRTLamps';ui.draw(im,api,panels)")
+            self.assertEqual(lua.globals().reports,1)
+            self.assertFalse(renderer.getStatus().requested)
+
     def test_legacy_panels_remain_callable_but_closed_headers_do_not_mutate(self):
         for lua, renderer in self.runtimes():
             lua.execute('M=api;M._tunerPanels={};PROGRESSIVE={lastPresetId=nil};TUNING_FILE="test.json";function tuningTooltip()end;M.getPresets=function()return {}end')

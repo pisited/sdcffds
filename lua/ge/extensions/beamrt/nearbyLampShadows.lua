@@ -105,6 +105,8 @@ end
 local function locate(entry)
   local ok=pcall(function()
     local p=entry.object:getPosition()
+    assert(type(p.x)=='number' and type(p.y)=='number' and type(p.z)=='number','Position unavailable')
+    assert(p.x==p.x and p.y==p.y and p.z==p.z,'Invalid position')
     entry.position={x=p.x,y=p.y,z=p.z}
     entry.enabled=truth(entry.object:getField('isEnabled',0))==true
   end)
@@ -177,8 +179,10 @@ end
 local function updatePriority()
   local nextSet, candidates={},{}
   if priorityAssist and core_camera and type(core_camera.getPosition)=='function' then
-    local p=core_camera.getPosition()
-    if p and p.x and p.y and p.z then
+    local readable,p=pcall(core_camera.getPosition)
+    if not readable or not p or type(p.x)~='number' or type(p.y)~='number' or type(p.z)~='number'
+      or p.x~=p.x or p.y~=p.y or p.z~=p.z then return false end
+    if p then
       for id,entry in pairs(pool) do
         local q=entry.position
         if q and entry.enabled and not entry.blocked then

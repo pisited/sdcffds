@@ -1,4 +1,32 @@
-# BeamRT v0.121 — automatic native lamp shadows
+# BeamRT v0.121.1 — outdoor shadow-selection assistance
+
+The v0.121 automatic path raised every smaller lamp shadow map to 1024. This
+does not guarantee GPU selection and can add pressure to the installed renderer's
+finite 8192² clustered shadow atlas. Automatic mode now preserves native map
+sizes for distant lamps while still requesting `castShadows` level-wide.
+
+**Nearby shadow priority** (Lighting & GI → Automatic lamp shadows) defaults ON.
+Once per second, up to eight enabled lamps within 80 m of the camera receive a
+reversible `priority` boost (+4 from their captured baseline), when that native
+field is advertised and accepts the write. Nearby spot maps are raised to at
+least 1024, point maps to 512; existing larger maps are preserved. Moving away
+or turning the assist off restores owned map/priority values but leaves global
+shadow requests active. Object changes and other field owners are respected.
+
+This helps the native light manager choose camera-relevant lamps; it does not
+create more atlas capacity or repair non-casting materials. It is a hypothesis
+for missing outdoor shadows, not proof that the photographed box/barrier is
+fixed. No material flags, ambient light, intensity, color or global graphics
+quality are changed. The original factory result was user-confirmed; the new
+outdoor behavior still needs an in-game comparison.
+
+The repeated thousands counter is now labeled **Discovery checks**, not pending
+new lights/maps. Periodic rescans normally perform no new shadow-field writes.
+**Log nearby light shadow inputs** writes a bounded read-only report of up to
+12 nearby light objects and their advertised native shadow fields to the game
+log. These CPU fields do not prove GPU atlas allocation or material casting.
+
+## v0.121 — automatic native lamp shadows
 
 The previously tested native-lamp shadow request now starts automatically with
 GI, Coherent, or combined rendering. There is **no four-light or camera-radius
