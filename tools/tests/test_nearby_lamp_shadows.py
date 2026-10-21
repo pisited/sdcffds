@@ -24,7 +24,7 @@ function lamp(id,distance,cast,size,class)
  function o:getFields()return self.advertised end
  function o:getField(k,i)assert(i==0);if self.readFail then error('read failed')end;return self.fields[k] end
  function o:setField(k,i,v)
-  assert(i==0);assert(k=='castShadows' or k=='texSize');table.insert(writes,{id=self.id,key=k,value=v})
+  assert(i==0);assert(k=='castShadows' or k=='texSize' or k=='priority');table.insert(writes,{id=self.id,key=k,value=v})
   if self.restoreFail and v~='1' and v~='1024' then error('restore blocked')end
   if k=='texSize' and v=='1024' and self.clamp then self.fields[k]='512' else self.fields[k]=v end
   if self.throwAfter and v=='1' then self.throwAfter=false;error('throw after write')end
@@ -148,7 +148,7 @@ class NearbyLampShadows(unittest.TestCase):
             self.assertTrue(api.enableAutomatic())
             self.assertEqual(len(lua.globals().writes),0)
             self.assertTrue(api.update(.016))
-            self.assertEqual(len(lua.globals().writes),48) # 24 lamps * two fields
+            self.assertEqual(len(lua.globals().writes),24) # distant maps retain native resolution
             self.assertEqual(api.getStatus().pendingJobs,56)
             for _ in range(3):api.update(.016)
             self.assertEqual(api.getStatus().processedLights,80)
@@ -170,14 +170,14 @@ class NearbyLampShadows(unittest.TestCase):
     def test_automatic_discovers_new_and_recycled_lights_and_yields_conflicting_owner(self):
         for lua,api in self.runtimes():
             lua.execute('lamp(1,100)');api.enableAutomatic();api.update(.016)
-            lua.execute('lamp(2,200);objects[1].fields.texSize="4096"')
+            lua.execute('lamp(2,200);objects[1].fields.texSize="4096";objects[1].fields.castShadows="false"')
             api.update(.016)
             self.assertTrue(api.getStatus().requested)
-            self.assertEqual(lua.globals().objects[1].fields.castShadows,'0')
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'false')
             self.assertEqual(lua.globals().objects[1].fields.texSize,'4096')
             for _ in range(400):api.update(.016)
             self.assertEqual(lua.globals().objects[2].fields.castShadows,'1')
-            self.assertEqual(lua.globals().objects[1].fields.castShadows,'0')
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'false')
             lua.execute('lamp(2,300,"false","512")')
             for _ in range(400):api.update(.016)
             self.assertEqual(lua.globals().objects[2].fields.castShadows,'1')
@@ -216,6 +216,81 @@ class NearbyLampShadows(unittest.TestCase):
             lua.execute('M._automaticLampShadows=true')
             self.assertTrue(lua.globals().M._startAutomaticLampShadows()[0])
             self.assertTrue(api.getStatus().automatic)
+
+    def test_priority_is_bounded_camera_relevant_and_restores_when_moving_or_disabled(self):
+        for lua,api in self.runtimes():
+            lua.execute('''
+            for i=1,12 do local o=lamp(i,i);o.advertised.priority=true;o.fields.priority='1' end
+            lamp(99,200).fields.isEnabled='0'
+            ''')
+            api.enableAutomatic();api.update(.016)
+            self.assertEqual(len(api.getStatus().prioritizedLights),8)
+            for i in range(1,9):
+                self.assertEqual(lua.globals().objects[i].fields.priority,'5')
+                self.assertEqual(lua.globals().objects[i].fields.texSize,'1024')
+            self.assertEqual(lua.globals().objects[9].fields.priority,'1')
+            self.assertEqual(lua.globals().objects[9].fields.texSize,'256')
+            self.assertEqual(lua.globals().objects[99].fields.castShadows,'1')
+            self.assertEqual(lua.globals().objects[99].fields.isEnabled,'0')
+            lua.execute('camera.x=200')
+            for _ in range(65):api.update(.016)
+            self.assertEqual(len(api.getStatus().prioritizedLights),0)
+            for i in range(1,13):
+                self.assertEqual(lua.globals().objects[i].fields.priority,'1')
+                self.assertEqual(lua.globals().objects[i].fields.texSize,'256')
+                self.assertEqual(lua.globals().objects[i].fields.castShadows,'1')
+            lua.execute('camera.x=0')
+            for _ in range(65):api.update(.016)
+            self.assertTrue(api.setPriorityAssist(False))
+            api.update(.016)
+            self.assertEqual(len(api.getStatus().prioritizedLights),0)
+            for i in range(1,13):
+                self.assertEqual(lua.globals().objects[i].fields.priority,'1')
+                self.assertEqual(lua.globals().objects[i].fields.texSize,'256')
+            self.assertTrue(api.disable())
+
+    def test_point_map_pressure_is_bounded_and_larger_native_maps_are_preserved(self):
+        for lua,api in self.runtimes():
+            lua.execute('lamp(1,1,"0","256","PointLight");lamp(2,2,"0","2048")')
+            api.enableAutomatic();api.update(.016)
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'512')
+            self.assertEqual(lua.globals().objects[2].fields.texSize,'2048')
+            api.disable()
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'256')
+
+    def test_rejected_priority_is_rolled_back_without_disabling_native_shadows(self):
+        for lua,api in self.runtimes():
+            lua.execute('''
+            local o=lamp(1,1);o.advertised.priority=true;o.fields.priority='1'
+            local native=o.setField
+            function o:setField(k,i,v)
+              if k=='priority' and v=='5' then self.fields[k]='2';return false end
+              return native(self,k,i,v)
+            end
+            ''')
+            api.enableAutomatic();api.update(.016)
+            self.assertTrue(api.getStatus().requested)
+            self.assertEqual(api.getStatus().priorityRejected,1)
+            self.assertEqual(lua.globals().objects[1].fields.priority,'1')
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'1')
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'1024')
+            for _ in range(65):api.update(.016)
+            self.assertEqual(api.getStatus().priorityRejected,1)
+            self.assertTrue(api.disable())
+
+    def test_periodic_checks_are_distinguished_from_new_lights_and_report_is_read_only(self):
+        for lua,api in self.runtimes():
+            lua.execute('lamp(1,1)');api.enableAutomatic();api.update(.016)
+            self.assertEqual(api.getStatus().newLightsThisScan,1)
+            before=len(lua.globals().writes)
+            report=api.getNearbyReport()
+            self.assertEqual(len(report.lights),1)
+            self.assertEqual(report.lights[1].fields.castShadows,'1')
+            self.assertEqual(len(lua.globals().writes),before)
+            for _ in range(400):api.update(.016)
+            self.assertGreaterEqual(api.getStatus().scanCycles,2)
+            self.assertEqual(api.getStatus().newLightsThisScan,0)
+            self.assertIn('not new shadow maps',api.getStatus().reason)
 
 
 if __name__=='__main__':unittest.main()

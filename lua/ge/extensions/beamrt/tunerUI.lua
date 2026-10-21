@@ -163,12 +163,24 @@ function M.lampShadows(im, api)
     local ok,reason=api.setAutomaticLampShadowsEnabled(status.automaticPreference==false and not status.pendingRestore)
     if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
   end
-  tip(im,'Default ON when starting GI, Coherent or combined rendering. Incrementally requests shadows for all advertised scene PointLight/SpotLight objects, including currently disabled lights; rescans for new lights. Raises smaller maps to 1024. Disable restores original owned fields.')
+  tip(im,'Default ON when starting GI, Coherent or combined rendering. Requests shadows for all advertised scene PointLight/SpotLight objects, including currently disabled lights. Distant maps keep native size. Optional nearby assist helps important lamps compete for the finite shadow atlas. Disable restores owned fields.')
   im.TextWrapped(status.reason)
   im.TextWrapped('No camera-radius or four-light limit. Native GPU shadow budgets and caster materials still apply. No light color, intensity, range or global quality changes. Disable-all restores shadows; the next renderer start resumes automatic mode unless opted out this session.')
   if status.automatic then
-    im.TextUnformatted(string.format('Inspected: %d | Pending: %d | Owned fields: %d',
+    im.TextUnformatted(string.format('Inspected: %d | Discovery checks: %d | Owned fields: %d',
       status.processedLights or 0,status.pendingJobs or 0,status.changedFields or 0))
+    im.TextWrapped('Discovery checks repeat periodically; these are not thousands of newly allocated shadow maps.')
+    if api.setNearbyLampPriorityAssistEnabled then
+      if im.Button((status.priorityAssist and 'Nearby shadow priority ON' or 'Nearby shadow priority OFF')..'##BeamRTLamps') then
+        api.setNearbyLampPriorityAssistEnabled(not status.priorityAssist)
+      end
+      tip(im,'Reversible priority boost on up to eight enabled lamps within 80 m, refreshed once a second from cached positions. Nearby spot maps are at least 1024; point maps at least 512. Original larger maps remain. This can help native selection but cannot repair non-shadow-casting materials or create unlimited atlas capacity.')
+      im.TextUnformatted('Nearby priority candidates: '..tostring(#(status.prioritizedLights or {})))
+      if (status.priorityRejected or 0)>0 then im.TextWrapped('Native priority writes rejected: '..status.priorityRejected..'; baseline shadows retained.') end
+    end
+    if api.logNearbyLampShadowInputs and im.Button('Log nearby light shadow inputs##BeamRTLamps') then
+      api.logNearbyLampShadowInputs()
+    end
   end
 end
 

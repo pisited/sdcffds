@@ -1,4 +1,4 @@
--- BeamRT v0.121: automatic, incremental native point/spot lamp shadows.
+-- BeamRT v0.121.1: camera-relevant native shadow priority and atlas pressure.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -77,7 +77,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.121"
+local VERSION = "0.121.1"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -5161,6 +5161,16 @@ function M.getNearbyLampShadowStatus()
   local status=M._nearbyLampShadows.getStatus()
   status.automaticPreference=M._automaticLampShadows~=false
   return status
+end
+
+function M.setNearbyLampPriorityAssistEnabled(value)
+  return M._nearbyLampShadows.setPriorityAssist(value)
+end
+
+function M.logNearbyLampShadowInputs()
+  local report=M._nearbyLampShadows.getNearbyReport()
+  beamrtLog('I','Nearby native shadow inputs (CPU fields, NOT GPU atlas assignment): '..jsonEncode(report))
+  return report
 end
 
 function M._startAutomaticLampShadows()

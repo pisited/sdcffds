@@ -388,6 +388,38 @@ function M.setPriorityAssist(value)
   return true
 end
 
+function M.getNearbyReport()
+  local result={lights={},note='Read-only native fields; not proof of allocated GPU shadow views or caster materials.'}
+  local ok,why=pcall(function()
+    local p=core_camera.getPosition()
+    local entries={}
+    for _,entry in pairs(pool) do
+      local q=entry.position
+      if q then
+        local d=(p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2
+        if d==d and d<=80*80 then entries[#entries+1]={entry=entry,distance=math.sqrt(d)} end
+      end
+    end
+    table.sort(entries,function(a,b)return a.distance<b.distance end)
+    for i=1,math.min(12,#entries) do
+      local entry=entries[i].entry
+      local valid,light=pcall(function()
+        if not owner(entry) then return nil end
+        local light={id=entry.id,name=entry.name,class=entry.class,distance=entries[i].distance,
+          ownershipYielded=entry.blocked==true,prioritized=prioritized[entry.id]==true,fields={}}
+        local fields=entry.object:getFields()
+        for _,key in ipairs({'isEnabled','castShadows','texSize','priority','shadowType','sourceRadius'}) do
+          if fields[key]~=nil then light.fields[key]=read(entry,key) end
+        end
+        return light
+      end)
+      if valid and light then result.lights[#result.lights+1]=light end
+    end
+  end)
+  if not ok then result.error=tostring(why) end
+  return result
+end
+
 function M.isRequested() return M.requested end
 
 return M
