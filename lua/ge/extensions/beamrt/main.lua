@@ -1,4 +1,4 @@
--- BeamRT v0.118.1: keep reflection slider labels inside the tuner window.
+-- BeamRT v0.119: high-sample reflection cleanup and explicit accumulation state.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -57,7 +57,7 @@ do
   end
   M._planarCapture = require(key)
 end
-local VERSION = "0.118.1"
+local VERSION = "0.119"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"

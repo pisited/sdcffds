@@ -72,6 +72,38 @@ int wmain(int argc,wchar_t** argv) {
         check(legacyRepeats==576,"ordered-pattern A/B no longer demonstrates its eight-pixel repeat");
         check(newRepeats<6&&bounded,"non-tiled sample phase repeats every eight pixels or leaves unit square");
         const auto repeated=samplingImage();check(repeated==scrambled,"fixed pixel/frame sampling is not reproducible");
+        helper.scalar("uStochasticRayCount",16);helper.scalar("uDebugView",21);
+        auto strataImage=[&](){return readPixels(host,drawFixture(host,vertex,helper,16,64,{{0,source.Get()}}).Get());};
+        const auto strata=strataImage();bool allStrata=true;
+        for(UINT y=0;y<64;++y){unsigned occupied=0;
+            for(UINT x=0;x<16;++x){const auto& p=strata[y*16+x];
+                if(p[0]<0 || p[0]>=1 || p[1]<0 || p[1]>=1){allStrata=false;continue;}
+                occupied|=1u<<(unsigned(p[0]*4)+4*unsigned(p[1]*4));}
+            allStrata=allStrata&&occupied==65535u;}
+        check(allStrata,"16-ray sampling left gaps/duplicates in the 4x4 sample-domain strata");
+        check(strataImage()==strata,"16-ray sample batch was not reproducible");
+        helper.scalar("uFrame",3);const auto nextStrata=strataImage();
+        check(nextStrata!=strata,"16-ray sequence did not advance between frames");
+        helper.scalar("uStochasticTemporalRate",0);const auto frozenStrata=strataImage();
+        helper.scalar("uFrame",10);check(strataImage()==frozenStrata,"disabled temporal sampling did not freeze 16-ray samples");
+        helper.scalar("uStochasticTemporalRate",1);helper.scalar("uDebugView",22);
+        auto integralError=[&](float count){helper.scalar("uStochasticRayCount",count);
+            const auto values=readPixels(host,drawFixture(host,vertex,helper,128,64,{{0,source.Get()}}).Get());
+            double mse=0,mean=0;for(const auto& p:values){mean+=p[0];mse+=(p[0]-1)*(p[0]-1);}
+            return std::array<double,2>{mse/values.size(),mean/values.size()};};
+        const auto oneIntegral=integralError(1),fourIntegral=integralError(4),sixteenIntegral=integralError(16);
+        check(sixteenIntegral[0]<oneIntegral[0]*.03 && sixteenIntegral[0]<fourIntegral[0]*.25,
+            "heavy stratified sequence did not lower smooth sample-domain integration error");
+        check(std::abs(sixteenIntegral[1]-1)<.005,"16-ray sampling biased the known sample-domain mean");
+        std::cout<<"Sample-domain integral MSE (not scene noise): 1 ray="<<oneIntegral[0]
+            <<", 4="<<fourIntegral[0]<<", 16="<<sixteenIntegral[0]<<'\n';
+        helper.scalar("uStochasticRayCount",16);helper.scalar("uStochasticSSR",1);
+        check(uniform(run(23),Pixel{16,0,0,1}),"production trace budget still capped the requested 16 rays");
+        helper.scalar("uStochasticRayCount",32);
+        check(uniform(run(23),Pixel{16,0,0,1}),"trace budget allowed out-of-bounds ray storage");
+        helper.scalar("uStochasticSSR",0);
+        check(uniform(run(23),Pixel{1,0,0,1}),"non-stochastic mirror tracing repeated identical rays");
+        helper.scalar("uStochasticRayCount",1);
         helper.scalar("uReferenceTrace",0);helper.scalar("uTraceQuality",1);
         check(uniform(run(12),Pixel{128,0,0,1}),"normal trace work budget changed unexpectedly");
         helper.scalar("uReferenceTrace",1);check(uniform(run(12),Pixel{256,0,0,1}),"leaf reference work budget not applied");
@@ -204,6 +236,29 @@ int wmain(int argc,wchar_t** argv) {
         check(decoded(stableMiss.Get(),19)[0][0]>16,"absence of hit colors falsely invalidated mature history age");
         auto rejectedPlane=accumulate(wrongPlane.Get());
         check(uniform(decoded(rejectedPlane.Get(),8),Pixel{0,0,0,0}),"rough stability bypassed receiver-plane rejection");
+        helper.scalar("uTemporalStrength",.98f);helper.scalar("uIntensity",0);
+        check(uniform(run(24),Pixel{1,1,1,1}),"new history failed to start entirely fresh");
+        helper.scalar("uIntensity",7);
+        check(uniform(run(24),Pixel{.125f,.125f,.125f,1}),"immature history skipped its warmup average");
+        helper.scalar("uIntensity",31);
+        check(uniform(run(24),Pixel{.02f,.02f,.02f,1}),"packed age cap still overrides requested .98 retention");
+        helper.scalar("uTemporalStrength",.5f);
+        check(uniform(run(24),Pixel{.5f,.5f,.5f,1}),"mature history ignored a lower user retention setting");
+        helper.scalar("uDebugView",18);helper.scalar("uTraceQuality",31);helper.scalar("uIntensity",100);
+        helper.scalar("uFresnelStrength",1);helper.scalar("uRoughnessEnd",.5f);helper.scalar("uThicknessTexels",.375f);
+        auto currentColor=texture(8,4,std::vector<Pixel>(32,Pixel{.5f,.25f,.1f,.2f}));
+        auto previousColor=texture(8,4,std::vector<Pixel>(32,Pixel{.5f,.25f,.1f,.5f}));
+        currentMiss=drawFixture(host,vertex,helper,8,4,{{0,currentColor.Get()}});
+        auto maturePrevious=drawFixture(host,vertex,helper,8,4,{{0,previousColor.Get()}});
+        const float currentAlpha=decoded(currentMiss.Get(),8)[0][3],previousAlpha=decoded(maturePrevious.Get(),8)[0][3];
+        temporal.scalar("uTemporalStrength",.98f);
+        auto matureResult=accumulate(maturePrevious.Get());
+        const float matureAlpha=decoded(matureResult.Get(),8)[0][3];
+        check(std::abs(matureAlpha-(.98f*previousAlpha+.02f*currentAlpha))<1.1f/1023,
+            "production native temporal pass did not apply requested retention after age saturation");
+        auto matureRejected=accumulate(wrongPlane.Get());
+        check(std::abs(decoded(matureRejected.Get(),8)[0][3]-currentAlpha)<1.1f/1023,
+            "mature retention resurrected history across a receiver-plane rejection");
         helper.vector("uWaterDeepColor",std::array<float,4>{.015f,.045f,.05f,1});
         helper.scalar("uWaterColorStrength",0);helper.scalar("uWaterSSR",1);
         for(float angle:{0.f,.5f,1.f}){

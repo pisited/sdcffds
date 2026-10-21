@@ -7,6 +7,12 @@ local motion = require('ge/extensions/beamrt/coherentVehicleMotion')
 local requested = false
 local reason = 'Not enabled. Experimental; game appearance has not been verified.'
 local options = {}
+local noiseRestore
+local noiseSettings = {renderScale=1, traceQuality=1, stochasticRayCount=16,
+  stochasticSSR=true, samplingMode=1, stochasticTemporalRate=1,
+  temporalDenoising=true, temporalStrength=0.98, nativeTemporal=true,
+  traceSubpixelJitter=true, geometryReconstruction=true, virtualReprojection=true,
+  roughStability=true, stochasticReuse=0.5, filteredColor=true, adaptiveResolution=false}
 
 for id, parameter in pairs(pipeline.parameters) do options[id] = parameter.default end
 -- Preserve the contributed traversal constants, not obsolete pre-hierarchy defaults.
@@ -16,6 +22,7 @@ options.interleavedHistory = false -- complete native-resolution history first
 options.stochasticResolution = 1
 options.renderScale = 0.5
 options.traceQuality = 1
+options.stochasticRayCount = 4 -- fewer single-frame speckles; 16-ray cleanup is explicit
 options.skyReflection = false -- a miss is not proof of visible sky
 options.overhangFill = false -- screen-space enclosure estimate, not visibility
 options.puddleStrength = 0
@@ -42,9 +49,16 @@ end
 function M.getStatus()
   local ok, runtime = pcall(pipeline.getRuntimeStatus)
   runtime = ok and runtime or {}
+  local accumulationConfigured = options.temporalDenoising == true and options.temporalStrength > 0.0001
+  local accumulationScheduled = requested and accumulationConfigured and runtime.accumulationScheduled == true
   return {requested = requested, active = requested and runtime.passesEnabled == true,
     reason = reason, frame = runtime.frame or 0, historyWarmup = runtime.historyWarmup,
     cameraHistoryReady = runtime.cameraHistoryReady == true,
+    accumulationConfigured = accumulationConfigured, accumulationScheduled = accumulationScheduled,
+    accumulationReady = accumulationScheduled and runtime.cameraHistoryReady == true
+      and (runtime.historyWarmup or 2) <= 0,
+    freshSampling = accumulationConfigured and options.stochasticTemporalRate > 0,
+    noiseRestoreAvailable = noiseRestore ~= nil,
     waterMapAvailable = runtime.waterMapAvailable == true,
     waterMapReason = runtime.waterMapReason,
     nativeSettingsChanged = false, gameAppearanceVerified = false,
@@ -107,6 +121,31 @@ end
 function M.resetHistory()
   pipeline.resetHistory()
   motion.clear()
+end
+
+local function applyNoiseSettings(values)
+  for id, value in pairs(values) do
+    local ok, failure = M.setParameter(id, value)
+    if not ok then return false, failure end
+  end
+  return true
+end
+
+function M.applyNoiseQuality()
+  if not noiseRestore then
+    noiseRestore = {}
+    for id in pairs(noiseSettings) do noiseRestore[id] = options[id] end
+  end
+  -- An explicit, reversible sampling action, not an appearance/brightness preset.
+  -- Does not start rendering or change any native setting.
+  return applyNoiseSettings(noiseSettings)
+end
+
+function M.restoreNoiseQuality()
+  if not noiseRestore then return false, 'No cleanup settings to restore.' end
+  local ok, failure = applyNoiseSettings(noiseRestore)
+  if ok then noiseRestore = nil end
+  return ok, failure
 end
 
 function M.update(dt)

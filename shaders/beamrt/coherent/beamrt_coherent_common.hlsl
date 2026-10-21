@@ -11,7 +11,7 @@
 #define BEAMRT_COH_RAY_LOOP [unroll]
 #define uDebugView 0.0
 #else
-#define BEAMRT_COH_MAX_STOCHASTIC_RAYS 4
+#define BEAMRT_COH_MAX_STOCHASTIC_RAYS 16
 #define BEAMRT_COH_RAY_LOOP [loop]
 #endif
 
@@ -284,6 +284,12 @@ float3 BrtcClampFirefly(float3 c, float referenceLuma)
     return c * BrtcFireflyWeight(c, referenceLuma);
 }
 
+int BrtcStochasticRayBudget()
+{
+    return uStochasticSSR > 0.5
+        ? clamp((int)(uStochasticRayCount + 0.5), 1, BEAMRT_COH_MAX_STOCHASTIC_RAYS) : 1;
+}
+
 float2 BrtcStochasticSequence(float2 pixel, float sampleIndex, float rayCount)
 {
     float sequenceFrame = fmod(floor(uFrame * max(uStochasticTemporalRate, 0.0) + 0.5), 4096.0);
@@ -291,6 +297,20 @@ float2 BrtcStochasticSequence(float2 pixel, float sampleIndex, float rayCount)
     float2 phase = uSamplingMode > 0.5 ? BrtcPixelScramble(pixel) :
         float2(BlueNoise8x8(pixel), InterleavedGradientNoise(pixel.yx + 17.0));
     float2 xi = frac(phase + n * float2(0.7548776662, 0.5698402910));
+    // The heavy 16-ray mode covers every 4x4 sample-domain stratum each frame.
+    // Independently hashed in-cell offsets avoid locking a regular ray lattice
+    // onto the image. Preserve the existing 1..15-ray comparison sequence.
+    if (rayCount >= 15.5 && uSamplingMode > 0.5)
+    {
+        uint2 p = (uint2)max(floor(pixel), 0.0);
+        uint sample = (uint)sampleIndex & 15u;
+        uint h = BrtcSampleHash(p.x ^ BrtcSampleHash(p.y + 0x9e3779b9u) ^
+            BrtcSampleHash((uint)sequenceFrame + 0x68bc21ebu) ^ BrtcSampleHash(sample + 0x02e5be93u));
+        // Leave enough float32 headroom that adding cell 3 cannot round onto
+        // the next cell boundary (or 1.0), even at the largest hash.
+        float2 jitter = (float2(h >> 12, BrtcSampleHash(h) >> 12) + 0.5) / 1048576.0;
+        xi = (float2(sample & 3u, sample >> 2) + jitter) * 0.25;
+    }
     return xi;
 }
 

@@ -184,6 +184,57 @@ class CoherentRenderer(unittest.TestCase):
             renderer.update(1/60)
             self.assertFalse(renderer.getStatus().active)
 
+    def test_heavy_noise_cleanup_is_reversible_and_preserves_appearance(self):
+        for lua, renderer in self.runtimes():
+            for key, value in [('faceOnReflectance', .04), ('roughnessEnd', .5),
+                               ('intensity', .8), ('temporalDenoising', False), ('temporalStrength', 0)]:
+                self.assertTrue(renderer.setParameter(key, value))
+            before = dict(renderer.getOptions().items())
+            self.assertTrue(renderer.applyNoiseQuality())
+            self.assertFalse(renderer.getStatus().requested)
+            self.assertTrue(renderer.getStatus().noiseRestoreAvailable)
+            expected={'renderScale':1,'stochasticRayCount':16,'temporalStrength':.98,
+                      'temporalDenoising':True,'nativeTemporal':True,'adaptiveResolution':False}
+            for key, value in expected.items():
+                self.assertEqual(renderer.getOptions()[key], value, key)
+            for key in ('intensity','faceOnReflectance','roughnessEnd','surfaceDetail',
+                        'waterSSR','waterSSRStrength','waterColorStrength','waterWaveStrength',
+                        'skyReflection','overhangFill','puddleStrength'):
+                self.assertEqual(renderer.getOptions()[key], before[key], key)
+            self.assertTrue(renderer.enable())
+            lua.execute('for i=1,12 do renderer.update(1/60)end')
+            self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTracePass._const["$uStochasticRayCount"]'),16)
+            self.assertFalse(lua.eval('string.find(objects.BeamRTCoherentPostEffectTracePass:getField("shader",0),"OneRay")~=nil'))
+            self.assertTrue(renderer.getStatus().accumulationReady)
+            self.assertTrue(renderer.applyNoiseQuality()) # repeated click must not overwrite undo
+            self.assertTrue(renderer.restoreNoiseQuality())
+            self.assertEqual(dict(renderer.getOptions().items()), before)
+            self.assertFalse(renderer.getStatus().noiseRestoreAvailable)
+            for value in (0, 17, 4.5):
+                self.assertFalse(renderer.setParameter('stochasticRayCount',value)[0])
+
+    def test_accumulation_status_distinguishes_disabled_frozen_warming_and_scheduled(self):
+        for lua, renderer in self.runtimes():
+            self.assertFalse(renderer.getStatus().accumulationScheduled)
+            self.assertTrue(renderer.enable())
+            self.assertFalse(renderer.getStatus().accumulationReady)
+            lua.execute('for i=1,12 do renderer.update(1/60)end')
+            self.assertTrue(renderer.getStatus().accumulationReady)
+            self.assertFalse(renderer.getStatus().gpuExecutionVerified)
+            self.assertTrue(renderer.setParameter('temporalDenoising',False))
+            renderer.update(1/60)
+            self.assertFalse(renderer.getStatus().accumulationConfigured)
+            self.assertFalse(renderer.getStatus().accumulationScheduled)
+            self.assertTrue(renderer.setParameter('temporalDenoising',True))
+            self.assertTrue(renderer.setParameter('temporalStrength',0))
+            self.assertFalse(renderer.getStatus().accumulationConfigured)
+            self.assertTrue(renderer.setParameter('temporalStrength',.98))
+            self.assertTrue(renderer.setParameter('stochasticTemporalRate',0))
+            self.assertTrue(renderer.getStatus().accumulationConfigured)
+            self.assertFalse(renderer.getStatus().freshSampling)
+            renderer.disable()
+            self.assertFalse(renderer.getStatus().accumulationScheduled)
+
     def test_partial_startup_and_missing_required_pass_fail_closed(self):
         for lua, renderer in self.runtimes():
             lua.execute('objects.PFX_DefaultStateBlock=nil')

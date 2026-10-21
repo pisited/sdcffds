@@ -38,6 +38,22 @@ function M.reflections(im, api)
   if im.Button('Reset reflection history##BeamRTSSR') then api._coherentRenderer.resetHistory() end
   im.TextWrapped('Screen-space backend. Integrated BeamNG SSR must be off. Lighting & GI uses a separate, mutually exclusive renderer.')
   if not status.requested or not status.active then im.TextWrapped(status.reason) end
+  if not status.accumulationConfigured then
+    im.TextWrapped('Accumulation OFF: history retention has no effect. Rough reflections can remain noisy.')
+  elseif not status.freshSampling and options.stochasticSSR then
+    im.TextWrapped('Sampling is frozen: accumulation cannot collect new GGX ray directions.')
+  elseif status.active then
+    im.TextWrapped(status.accumulationReady and 'Accumulation: history reuse scheduled (CPU state, not GPU proof).'
+      or 'Accumulation: warming / waiting for valid camera history.')
+  end
+  if im.Button('Apply high-sample cleanup (slow)##BeamRTSSR') then
+    api._coherentRenderer.applyNoiseQuality()
+  end
+  tip(im,'Full-resolution 16-ray stratified sampling, accumulation and geometry-aware reuse. Leaves brightness, material reflectivity, water color and waves unchanged. Very costly; does not enable rendering.')
+  if status.noiseRestoreAvailable then
+    im.SameLine()
+    if im.Button('Undo cleanup settings##BeamRTSSR') then api._coherentRenderer.restoreNoiseQuality() end
+  end
 
   im.PushItemWidth(-1)
   if im.CollapsingHeader1('Look', im.TreeNodeFlags_DefaultOpen) then
@@ -52,13 +68,16 @@ function M.reflections(im, api)
     if im.Button('One ray##BeamRTSSR') then set(api,'stochasticRayCount',1) end
     im.SameLine()
     if im.Button('Four rays##BeamRTSSR') then set(api,'stochasticRayCount',4) end
+    im.SameLine()
+    if im.Button('Sixteen rays##BeamRTSSR') then set(api,'stochasticRayCount',16) end
     im.TextUnformatted('Rays per trace pixel: ' .. tostring(options.stochasticRayCount))
     toggle(im,api,options,'stochasticSSR','Rough GGX reflections')
     toggle(im,api,options,'filteredColor','Rough reflection color pyramid')
     toggle(im,api,options,'pixelRebuild','Glossy detail rebuild')
   end
   if im.CollapsingHeader1('Noise and temporal stability') then
-    toggle(im,api,options,'temporalDenoising','Temporal accumulation')
+    toggle(im,api,options,'temporalDenoising','Temporal accumulation',
+      'Must be ON with retention above zero to average fresh samples. More retention cleans still scenes but can retain trails; motion/disocclusion still rejects history.')
     toggle(im,api,options,'nativeTemporal','Full-resolution history')
     toggle(im,api,options,'traceSubpixelJitter','Subpixel sampling')
     toggle(im,api,options,'geometryReconstruction','Surface-aware reconstruction')

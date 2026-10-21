@@ -12,7 +12,7 @@ EffectModule.name = "BeamRT Coherent SSR"
 EffectModule.description = "Opt-in screen-space reflections for roads, vehicles and water. Sky and enclosure fill are separate heuristic experiments."
 EffectModule.category = "Post Processing/Lighting"
 
-EffectModule.version = "0.117.0"
+EffectModule.version = "0.119.0"
 EffectModule.shaderCodeVersion = EffectModule.version
 
 
@@ -157,7 +157,7 @@ EffectModule.parameters = {
         description = "Narrows ray sampling toward the mirror direction. Higher values are more stable but blur rough reflections less." },
     stochasticTemporalRate = { label = "Stochastic Animation", type = "number", default = 1.0, min = 0.0, max = 1.0, step = 0.01,
         description = "Advances the low-discrepancy ray sequence over time. Use temporal accumulation when above zero." },
-    stochasticRayCount = { label = "Stochastic Ray Count", type = "number", default = 1.0, min = 1.0, max = 4.0, step = 1.0,
+    stochasticRayCount = { label = "Stochastic Ray Count", type = "number", default = 1.0, min = 1.0, max = 16.0, step = 1.0,
         description = "Rays traced per pixel each frame with Stochastic GGX Rays on. Higher values reduce noise at nearly proportional cost." },
     filteredColor = { label = "Prefiltered Scene Color", type = "bool", default = true,
         description = "Blurs what rough surfaces reflect, using a small colour pyramid." },
@@ -3698,7 +3698,14 @@ function EffectModule.getRuntimeStatus()
         end)
         if not ok or not active then ready = false end
     end
+    local temporalScheduled = temporalScheduledFrame == frame and temporalScheduledTarget ~= nil
+    local temporalPass = temporalScheduledTarget == "A" and temporalPassA or temporalPassB
+    local okTemporal, temporalEnabled = pcall(function()
+        return temporalPass ~= nil and temporalPass:isEnabled() == true
+            and temporalPass:getField("skip", 0) ~= "1"
+    end)
     return {passesEnabled = ready, frame = frame, historyWarmup = temporalHistoryWarmup,
+        accumulationScheduled = ready and temporalScheduled and okTemporal and temporalEnabled == true,
         cameraHistoryReady = cameraHistoryReady, waterMapAvailable = riverState.available == true,
         waterMapReason = riverState.lastFailure, historyInterleaved = value(EffectModule, "interleavedHistory", true)}
 end

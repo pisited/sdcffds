@@ -99,5 +99,23 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         float4 value=sourceTexTex.Load(int3((int2)IN.hpos.xy,0));
         return float4(BrtcExtractHitCode(value.rgb),value.a,value.r*value.a,1);
     }
+    if (mode == 21)
+        return float4(BrtcStochasticSequence(float2(37,floor(IN.hpos.y)),
+            floor(IN.hpos.x),uStochasticRayCount),0,1);
+    if (mode == 22)
+    {
+        // Smooth sample-domain integral with known mean 1. Not an SSR image
+        // benchmark: this measures variance of the production sample sequence.
+        float estimate=0;
+        [loop] for (int i=0;i<16;++i)
+        {
+            if (i>=(int)uStochasticRayCount) break;
+            float2 xi=BrtcStochasticSequence(IN.hpos.xy,(float)i,uStochasticRayCount);
+            estimate+=xi.x+xi.y;
+        }
+        return float4((estimate/max(uStochasticRayCount,1.0)).xxx,1);
+    }
+    if (mode == 23) return float4((float)BrtcStochasticRayBudget(),0,0,1);
+    if (mode == 24) return float4(BrtcHistoryFreshWeight(uIntensity,uTemporalStrength).xxx,1);
     return 0;
 }

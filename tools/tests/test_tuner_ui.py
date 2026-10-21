@@ -115,6 +115,24 @@ class TunerUI(unittest.TestCase):
             self.assertEqual(renderer.getOptions().debugView, 0)
             self.assertFalse(renderer.getStatus().requested)
 
+    def test_noise_cleanup_and_undo_are_explicit_not_tab_side_effects(self):
+        for lua, renderer in self.runtimes():
+            before=dict(renderer.getOptions().items())
+            lua.execute("click='Apply high-sample cleanup (slow)##BeamRTSSR';ui.draw(im,api,panels)")
+            self.assertEqual(renderer.getOptions().stochasticRayCount,16)
+            self.assertTrue(renderer.getOptions().temporalDenoising)
+            self.assertFalse(renderer.getStatus().requested)
+            lua.execute("click='Undo cleanup settings##BeamRTSSR';ui.draw(im,api,panels)")
+            self.assertEqual(dict(renderer.getOptions().items()),before)
+            self.assertFalse(renderer.getStatus().requested)
+
+    def test_disabled_accumulation_warning_is_visible_even_with_high_retention(self):
+        for lua, renderer in self.runtimes():
+            renderer.setParameter('temporalDenoising',False)
+            renderer.setParameter('temporalStrength',.98)
+            lua.execute('ui.draw(im,api,panels)')
+            self.assertIn('Accumulation OFF', '\n'.join(lua.globals().labels.values()))
+
     def test_legacy_panels_remain_callable_but_closed_headers_do_not_mutate(self):
         for lua, renderer in self.runtimes():
             lua.execute('M=api;M._tunerPanels={};PROGRESSIVE={lastPresetId=nil};TUNING_FILE="test.json";function tuningTooltip()end;M.getPresets=function()return {}end')

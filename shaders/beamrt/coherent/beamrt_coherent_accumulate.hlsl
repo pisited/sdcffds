@@ -1,6 +1,16 @@
 #ifndef BEAMRT_COH_SSR_ACCUMULATE_HLSL
 #define BEAMRT_COH_SSR_ACCUMULATE_HLSL
 
+float BrtcHistoryFreshWeight(float age, float retention)
+{
+    float requested = 1.0 - clamp(retention, 0.0, 0.98);
+    // Five packed age bits describe warmup, not a permanent 32-frame limit.
+    // Once mature, honor the requested EMA retention. Geometry rejection,
+    // color clipping and motion can still increase fresh weight below.
+    float warmup = age >= 30.5 ? 0.0 : 1.0 / (max(age, 0.0) + 1.0);
+    return max(requested, warmup);
+}
+
 float BrtcCoverageClampRadius(float baseRadius, float historyAlpha, float sampleCount, float rough, float water)
 {
     float a = saturate(historyAlpha);
@@ -224,7 +234,7 @@ float4 BrtcAccumulateNative(PFXVertToPix IN, float2 uv)
                         history = lerp(history,clipped,confidence);
                         age = max(1.0,age*(1.0-clipDistance*confidence));
                     }
-                    float fresh = max(1.0-min(uTemporalStrength,0.98),1.0/(age+1.0));
+                    float fresh = BrtcHistoryFreshWeight(age,uTemporalStrength);
                     fresh = max(fresh,1.0-accepted);
                     float2 infUV; float infDepth;
                     if (BrtcSolvePreviousUV(cam,IN.wsEyeRay,infUV,infDepth))

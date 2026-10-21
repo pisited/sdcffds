@@ -504,9 +504,7 @@ float4 BrtcTraceReceiver(PFXVertToPix IN, float2 uv, float4 projectionParams)
     float NoV = saturate(dot(normalWS, V));
     float2 pixelCoord = uv * uResolution;
 
-    int rayCount = 1;
-    if (uStochasticSSR > 0.5)
-        rayCount = clamp((int)(uStochasticRayCount + 0.5), 1, BEAMRT_COH_MAX_STOCHASTIC_RAYS);
+    int rayCount = BrtcStochasticRayBudget();
 
     float3 sampleColor[BEAMRT_COH_MAX_STOCHASTIC_RAYS];
     float  sampleAlpha[BEAMRT_COH_MAX_STOCHASTIC_RAYS];
