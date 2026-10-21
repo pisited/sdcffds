@@ -4,15 +4,37 @@ on:
     paths:
       - 'native/worker/**'
       - 'native/gi/**'
+      - 'native/shadows/**'
+      - 'native/lighting/**'
       - 'native/capture/**'
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_startup_owned_contracts.py'
+      - 'tools/tests/test_protected_inputs.py'
+      - 'tools/tests/test_protected_runner.py'
+      - 'tools/tests/test_outer_child_owner.py'
+      - 'tools/tests/test_outer_child_session_contracts.py'
+      - 'tools/tests/test_outer_child_fixture.py'
+      - 'tools/tests/test_installed_input_coverage.py'
+      - 'tools/tests/test_input_coverage_lease.py'
       - 'tools/tests/test_native_device_observer_contracts.py'
       - 'tools/tests/test_native_entry_contracts.py'
       - 'tools/tests/test_native_import_observer_contracts.py'
       - 'tools/tests/test_native_pipeline_audit_contracts.py'
       - 'tools/tests/test_native_pipeline_handoff_contracts.py'
       - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_native_binding_handoff_contracts.py'
+      - 'tools/tests/test_native_loader_evidence_contracts.py'
+      - 'tools/tests/test_native_binding_thread_contracts.py'
+      - 'tools/tests/test_thread_handoff_fixture_contracts.py'
+      - 'tools/tests/test_resource_tracker_contracts.py'
+      - 'tools/tests/test_resource_copy_topology_contracts.py'
+      - 'tools/tests/test_descriptor_view_store_contracts.py'
+      - 'tools/tests/test_descriptor_location_store_contracts.py'
+      - 'tools/tests/test_resource_handoff_contracts.py'
+      - 'tools/tests/test_resource_first_failure_contracts.py'
+      - 'tools/tests/test_native_private_type_contracts.py'
+      - 'tools/tests/test_resource_admission_contracts.py'
       - 'tools/tests/test_shader_cache_manifest.py'
       - 'tools/beamrt_shader_cache.py'
       - 'tools/tests/test_native_capture_contracts.py'
@@ -29,6 +51,18 @@ on:
       - 'tools/beamrt_bvh_pack.py'
       - 'tools/beamrt_scene_import.py'
       - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_bvh_shader_safety.py'
+      - 'tools/tests/test_postfx_shader_contracts.py'
+      - 'tools/tests/test_sun_shader_safety.py'
+      - 'tools/tests/test_render_history_safety.py'
+      - 'shaders/beamrt/beamrtTemporalP_v061.hlsl'
+      - 'shaders/beamrt/beamrtReflectionTemporalP_v025.hlsl'
+      - 'tools/tests/validate_sun_light_shaders.py'
+      - 'shaders/beamrt/beamrtMeshSunHook.h.hlsl'
+      - 'shaders/beamrt/beamrtMeshSunVisibilityP_v001.hlsl'
+      - 'tools/tests/validate_postfx_shaders.py'
+      - 'shaders/beamrt/beamrtMomentsP_v001.hlsl'
+      - 'lua/ge/extensions/beamrt/main.lua'
       - 'tools/tests/test_native_fixture.py'
       - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
       - '.github/workflows/beamrt-native-worker.yml'
@@ -36,15 +70,37 @@ on:
     paths:
       - 'native/worker/**'
       - 'native/gi/**'
+      - 'native/shadows/**'
+      - 'native/lighting/**'
       - 'native/capture/**'
       - 'native/startup/**'
       - 'tools/tests/test_native_startup_contracts.py'
+      - 'tools/tests/test_startup_owned_contracts.py'
+      - 'tools/tests/test_protected_inputs.py'
+      - 'tools/tests/test_protected_runner.py'
+      - 'tools/tests/test_outer_child_owner.py'
+      - 'tools/tests/test_outer_child_session_contracts.py'
+      - 'tools/tests/test_outer_child_fixture.py'
+      - 'tools/tests/test_installed_input_coverage.py'
+      - 'tools/tests/test_input_coverage_lease.py'
       - 'tools/tests/test_native_device_observer_contracts.py'
       - 'tools/tests/test_native_entry_contracts.py'
       - 'tools/tests/test_native_import_observer_contracts.py'
       - 'tools/tests/test_native_pipeline_audit_contracts.py'
       - 'tools/tests/test_native_pipeline_handoff_contracts.py'
       - 'tools/tests/test_native_binding_contracts.py'
+      - 'tools/tests/test_native_binding_handoff_contracts.py'
+      - 'tools/tests/test_native_loader_evidence_contracts.py'
+      - 'tools/tests/test_native_binding_thread_contracts.py'
+      - 'tools/tests/test_thread_handoff_fixture_contracts.py'
+      - 'tools/tests/test_resource_tracker_contracts.py'
+      - 'tools/tests/test_resource_copy_topology_contracts.py'
+      - 'tools/tests/test_descriptor_view_store_contracts.py'
+      - 'tools/tests/test_descriptor_location_store_contracts.py'
+      - 'tools/tests/test_resource_handoff_contracts.py'
+      - 'tools/tests/test_resource_first_failure_contracts.py'
+      - 'tools/tests/test_native_private_type_contracts.py'
+      - 'tools/tests/test_resource_admission_contracts.py'
       - 'tools/tests/test_shader_cache_manifest.py'
       - 'tools/beamrt_shader_cache.py'
       - 'tools/tests/test_native_capture_contracts.py'
@@ -61,6 +117,18 @@ on:
       - 'tools/beamrt_bvh_pack.py'
       - 'tools/beamrt_scene_import.py'
       - 'tools/tests/test_bvh_pack.py'
+      - 'tools/tests/test_bvh_shader_safety.py'
+      - 'tools/tests/test_postfx_shader_contracts.py'
+      - 'tools/tests/test_sun_shader_safety.py'
+      - 'tools/tests/test_render_history_safety.py'
+      - 'shaders/beamrt/beamrtTemporalP_v061.hlsl'
+      - 'shaders/beamrt/beamrtReflectionTemporalP_v025.hlsl'
+      - 'tools/tests/validate_sun_light_shaders.py'
+      - 'shaders/beamrt/beamrtMeshSunHook.h.hlsl'
+      - 'shaders/beamrt/beamrtMeshSunVisibilityP_v001.hlsl'
+      - 'tools/tests/validate_postfx_shaders.py'
+      - 'shaders/beamrt/beamrtMomentsP_v001.hlsl'
+      - 'lua/ge/extensions/beamrt/main.lua'
       - 'tools/tests/test_native_fixture.py'
       - 'shaders/beamrt/beamrtMeshBVHCommon.h.hlsl'
       - '.github/workflows/beamrt-native-worker.yml'
@@ -76,6 +144,14 @@ jobs:
           python-version: '3.11'
       - name: Existing packed-scene fixture regressions
         run: python -B tools/tests/test_native_fixture.py
+      - name: Shared BVH fail-closed regression contracts
+        run: python -B tools/tests/test_bvh_shader_safety.py
+      - name: PostFX shader entry and moments regression contracts
+        run: python -B tools/tests/test_postfx_shader_contracts.py
+      - name: Sunlight shader producer and receiver safety contracts
+        run: python -B tools/tests/test_sun_shader_safety.py
+      - name: HDR moments and rejected GI/reflection history contracts
+        run: python -B tools/tests/test_render_history_safety.py
       - name: Native GI integration source contracts
         run: python -B tools/tests/test_native_gi_contracts.py
       - name: Capture input and context safety contracts
@@ -84,8 +160,57 @@ jobs:
         run: python -B tools/tests/test_native_worker_contracts.py
       - name: Startup review-only source contracts
         run: python -B tools/tests/test_native_startup_contracts.py
+      - name: Exact-owned startup source contracts
+        run: python -B tools/tests/test_startup_owned_contracts.py
+      - name: Physical input locks and protected fixture runner contracts (no native process)
+        run: |
+          python -B tools/tests/test_protected_inputs.py
+          python -B tools/tests/test_protected_runner.py
+      - name: Independent exact-child owner and fixture-only handoff contracts
+        run: |
+          python -B tools/tests/test_outer_child_owner.py
+          python -B tools/tests/test_outer_child_session_contracts.py
+          python -B tools/tests/test_outer_child_fixture.py
+      - name: Installed source inventory and bounded multi-batch file leases
+        run: |
+          python -B tools/tests/test_installed_input_coverage.py
+          python -B tools/tests/test_input_coverage_lease.py
+      - name: Preparation-only isolated BeamRT profile contracts (no game process)
+        run: python -B tools/tests/test_isolated_profile.py
+      - name: Disposable loader evidence source contracts
+        run: python -B tools/tests/test_native_loader_evidence_contracts.py
+      - name: Bounded binding thread evidence source contracts
+        run: python -B tools/tests/test_native_binding_thread_contracts.py
+      - name: CPU-only callback interval model and controlled overlap fixture
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_thread_handoff_fixture_contracts.py
+          ./native/startup/build_thread_handoff_fixture.ps1 -RunTest
+      - name: Exact-owned shutdown watchdog in disposable hidden processes
+        shell: pwsh
+        run: ./native/startup/unattended/build_owned_watchdog.ps1 -RunTests
+      - name: Owned startup file publication and physical directory checks
+        shell: pwsh
+        run: ./native/startup/unattended/build_startup_stop_channel.ps1 -RunTests
       - name: Device creation observer source contracts
         run: python -B tools/tests/test_native_device_observer_contracts.py
+      - name: Isolated resource provenance and recording join on WARP
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_resource_tracker_contracts.py
+          python -B tools/tests/test_resource_copy_topology_contracts.py
+          python -B tools/tests/test_resource_first_failure_contracts.py
+          ./native/startup/build_resource_tracker.ps1 -RunTest -RunCompactTests -RunInternedTests -Warp
+      - name: CPU-only lossless descriptor storage experiment
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_descriptor_view_store_contracts.py
+          ./native/startup/build_descriptor_view_store.ps1 -RunTest
+      - name: CPU-only full-width heap-interned location experiment
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_descriptor_location_store_contracts.py
+          ./native/startup/build_descriptor_location_store.ps1 -RunTest
       - name: Native entry rendezvous source contracts
         run: python -B tools/tests/test_native_entry_contracts.py
       - name: Image-scoped import observer source contracts
@@ -102,10 +227,18 @@ jobs:
         shell: pwsh
         run: |
           python -B tools/tests/test_native_binding_contracts.py
+          python -B tools/tests/test_native_binding_handoff_contracts.py
           ./native/startup/build_bindings.ps1 -RunTest -Warp
       - name: Build review startup host and run no-launch argument/payload tests
         shell: pwsh
         run: ./native/startup/build.ps1 -RunContractTests
+      - name: Default-off startup resource receipts in disposable WARP fixtures
+        shell: pwsh
+        run: |
+          python -B tools/tests/test_resource_handoff_contracts.py
+          python -B tools/tests/test_native_private_type_contracts.py
+          python -B tools/tests/test_resource_admission_contracts.py
+          ./native/startup/build.ps1 -RunContractTests -RunResourceStartupTests -FreshArtifacts -WarpResourceStartupOnly
       - name: Compile DLL and compute shader; run isolated WARP validation
         shell: pwsh
         run: ./native/worker/build.ps1 -SyntheticFixture -RunTest -Warp

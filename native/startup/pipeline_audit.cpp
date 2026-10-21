@@ -15,6 +15,9 @@
 #endif
 using Microsoft::WRL::ComPtr;
 extern "C" PVOID* beamrtPipelineSDKSlot(void*,void*,unsigned);
+// In particular Slot must not share a linker-visible type identity with the
+// differently laid-out resource/binding Slot types in an embedded startup DLL.
+namespace {
 using RootCall=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,UINT,const void*,SIZE_T,REFIID,void**);
 using GraphicsCall=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
 using StreamCall=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device2*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
@@ -136,6 +139,7 @@ static HRESULT exchange(Slot& slot,PVOID expected,PVOID replacement,bool& change
     DWORD ignored=0;const BOOL restored=VirtualProtect(slot.address,sizeof(PVOID),old,&ignored);
     if(!restored)return HRESULT_FROM_WIN32(GetLastError());return changed?S_OK:HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
 }
+} // namespace: audit implementation types, not exported ABI
 extern "C" HRESULT WINAPI BeamRT_PipelineAuditStart(ID3D12Device* device,const BeamRTPipelineAuditConfig* config){
     if(!device || !config || config->bytes!=sizeof(*config) || config->abi!=1 || config->reserved[0] || config->reserved[1]
         || !config->vertex || !config->pixel || !config->vertexBytes || !config->pixelBytes

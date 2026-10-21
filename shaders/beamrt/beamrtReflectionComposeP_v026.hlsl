@@ -4,6 +4,9 @@
 // A future lobe-replacement path needs a matched same-frame native spec buffer.
 #define BEAMRT_MATERIAL_FRESNEL 1
 #include "beamrtReflectionCompose.h.hlsl"
+#ifdef BEAMRT_REFLECTION_LOCAL_RESOLVE
+#include "beamrtReflectionLocalResolve.h.hlsl"
+#endif
 
 #ifdef SHADER_STAGE_VS
     #define mainV main
@@ -29,6 +32,9 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     float4 baseEncoded = tex2D(backBufferTex, IN.uv0);
 #endif
     float4 reflection = tex2D(temporalReflectionTex, IN.uv1);
+#ifdef BEAMRT_REFLECTION_LOCAL_RESOLVE
+    reflection = beamrtReflectionLocalResolve(IN, reflection);
+#endif
     if (reflectionStrength <= 0.0 || abs(reflection.a) <= 0.000001)
     {
 #ifdef BEAMRT_REFLECTION_DIAGNOSTICS
@@ -72,6 +78,13 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     response = saturate(
         gloss * fresnel * clamp(reflectionStrength, 0.0, 2.0));
     }
+
+// Lab gain belongs after material response, never in ray validity or history.
+#ifdef BEAMRT_REFLECTION_LAB
+    float labGain = (asuint(reflectionLabGain) & 0x7f800000u) != 0x7f800000u
+        ? clamp(reflectionLabGain, 1.0, 8.0) : 1.0;
+    response *= labGain;
+#endif
 
 #ifdef BEAMRT_REFLECTION_DIAGNOSTICS
     if (diagnosticContribution)

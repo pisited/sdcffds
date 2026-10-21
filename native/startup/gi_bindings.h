@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d12.h>
 #include <cstdint>
+#include "binding_thread_diagnostics.h"
 inline constexpr uint32_t beamrtBindingABI=1,beamrtBindingCommandLimit=64;
 struct BeamRTBindingHeap {
     uint64_t identity,cpu,gpu;uint32_t count,stride,type,flags;
@@ -40,5 +41,8 @@ BEAMRT_BINDING_API HRESULT WINAPI BeamRT_BindingsStatus(BeamRTBindingStatus*,uin
 // Copies the last accepted recording observation, NOT a fresh frame/resource
 // lease or GPU-completion receipt. Outputs are cleared on unavailable/error.
 BEAMRT_BINDING_API HRESULT WINAPI BeamRT_BindingsRead(BeamRTBindingSnapshot*,uint32_t);
+// Bounded CPU rejection ledger. Not call-overlap, frame or GPU evidence.
+// Available after OFF for diagnostics; no resource pointers/leases are added.
+BEAMRT_BINDING_API HRESULT WINAPI BeamRT_BindingsThreadDiagnostics(BeamRTBindingThreadDiagnostics*,uint32_t);
 BEAMRT_BINDING_API HRESULT WINAPI BeamRT_BindingsDisable();
 }

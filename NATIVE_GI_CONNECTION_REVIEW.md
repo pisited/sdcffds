@@ -1,10 +1,70 @@
 # Native-to-GI connection: loading and interception review
 
-Status: deployment review plus isolated capture implementation, updated 2026-10-12.
+Update 2026-10-19: [GI frame validity repair](native/gi/GI_FRAME_VALIDITY.md) makes
+receiver preparation require explicit valid-frame success and rejects invalid
+viewport mappings in the actual shared visibility consumer. No new automation,
+game loading or native resource bridge was added; in-game consumption remains
+the separate unverified milestone.
+
+Update 2026-10-13: [GI/reflection history safety audit](native/lighting/README.md)
+repairs GPU-reproduced HDR-statistics clipping and invalid history/filter samples
+in the installed Lua/HLSL renderer. This is independent of native resource
+access; no DLL loading, GI adapter contract or game-activation claim changed.
+
+Update 2026-10-13: [sunlight producer/consumer GPU audit](native/shadows/README.md)
+reproduced and repaired invalid receiver/visibility classification in the actual
+HLSL. Offline RTX/WARP proof does not establish native sunlight consumption in
+BeamNG or resolve the independent startup/resource-access gap.
+
+Status: deployment review plus isolated capture implementation, updated 2026-10-13.
 This document does not authorize BeamNG DLL loading/injection, hook installation,
 game-file changes or tests. A separately approved passive startup test is recorded
 below; native graphics/GI activation remains unverified. No standalone tracer
 expansion. Current working Lua/HLSL renderer stays intact.
+
+Update 2026-10-13: [startup loader evidence](native/startup/LOADER_EVIDENCE.md)
+preserves exact fixture binaries, commands, hashes and host logs. The fresh
+37-case matrix and 197/197 source/Lua tests pass, including a known unresolved
+test dependency. The historical intermittent failure remains unexplained and
+deployment remains held. No game launch or native GI result was added.
+
+Subsequent separately approved 2026-10-13 diagnostic: [live GI recording](native/startup/STARTUP_BINDING_HANDOFF.md#separately-authorized-live-diagnostic--2026-10-13)
+captured an actual four-vertex GI draw with CBV/table/viewport/output handles in
+the game. Host and normally closed game exited 0. This confirms CPU observation,
+not resource contents, camera semantics, queue/fence ordering or native GI
+lighting. The first receipt reports substantial thread-guard rejections; attribute
+and fixture-test that limitation before expanding capture. The historical loader
+cause and general deployment hold remain separate open questions.
+
+Subsequent offline [snapshot-isolation correction](native/startup/THREAD_REJECTION_ISOLATION.md)
+prevents rejected unrelated-list calls from erasing the accepted GI receipt.
+The source-list guard, thread policy, ABI/proof flags and GPU retirement remain
+unchanged. RTX/WARP regression and startup fixtures pass; the high live rejection
+traffic remains unexplained. No new live run or native lighting was added.
+
+The next [bounded thread-attribution slice](native/startup/BINDING_THREAD_DIAGNOSTICS.md)
+is implemented with checked per-method counters, first-conflict samples, and
+no-draw timeout evidence. The recording guard stays intact; no resource or GPU
+proof is added. Project tests pass 201/201 and the normal-host startup rerun
+passes 11 cases. A pre-attach loader failure recurred on the first run; exact
+inputs/logs are now preserved, but its cause is still unknown. Deployment stays
+held and the successful live build remains untouched.
+
+Offline renderer audit while the user was away: [two shared traversal safety
+defects](native/gi/BVH_SAFETY_AUDIT.md) were reproduced on GPU and repaired.
+Overflowing triangle indices and malformed preorder links no longer produce
+certified hit/miss results. Compute and game-pixel producer fixtures verify -1
+unknown masks and exact-consumer baseline fallback on RTX/WARP. Project tests
+pass 205/205, and game-header GI/local-light compile checks pass. This is not a
+new game or lighting result; loader/resource/clustered-light boundaries remain.
+
+Further offline [collapsed-face audit](native/gi/DEGENERATE_GEOMETRY_AUDIT.md)
+confirms the existing packer can lose a thin face's area. Shared traversal now
+returns unknown for nonfinite/zero-area decoded faces while valid parallel rays
+remain misses. RTX/WARP compute and game-pixel fixture consumers preserve baseline
+lighting on invalid geometry; current project suite is 208/208. The startup log
+review did not identify the missing dependency. No game test or deployment-hold
+change occurred.
 
 Update v0.109: an opt-in engine-managed PostFX producer/consumer route is now
 registered through game-side Lua, with underground mesh GI selection. See
@@ -168,10 +228,13 @@ of the old capture module or relaxation of GPU retirement is authorized.
 The [standalone recording observer](native/startup/GI_BINDING_OBSERVER.md) now
 SDK-decodes the actual root (b0 CBV, t0–t5 and s0–s5 tables) and fixture-validates
 draw-time address/handle metadata on hardware/WARP. All descriptor-provenance,
-CBV-content, camera, GPU-ordering and lighting flags remain false. It is not
-connected to the production bootstrap's audit session; that routing/control/
-receipt bridge must be designed and tested before a separately approved live
-binding probe. These CPU recording observations cannot become BeamRTGIInputs.
+CBV-content, camera, GPU-ordering and lighting flags remain false. The standalone
+version did not share the production bootstrap's audit session. The subsequent
+[default-off startup bridge](native/startup/STARTUP_BINDING_HANDOFF.md) now co-links
+that actual session and passes seven isolated receipt/control cases. It has no
+new live result and deployment is on hold for an unresolved pre-start loader
+anomaly in the legacy import fixture. These CPU observations cannot become
+BeamRTGIInputs or replace resource/fence/camera verification.
 
 The installed BeamNG raw-LiDAR example documents external ffi.load as requiring
 a disabled Lua security sandbox (that particular sensor also requires .tech).

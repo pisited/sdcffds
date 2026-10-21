@@ -1,9 +1,19 @@
-# GI recording-binding observer (standalone prototype)
+# GI recording-binding observer
+
+Subsequent offline candidate: [descriptor/resource provenance tracker](RESOURCE_PROVENANCE_TRACKER.md)
+resolves fixture recording addresses to observed SRV/RTV resource metadata and a
+root-CBV buffer candidate, with copy/lifetime/pressure refusal checks on RTX/WARP.
+That standalone slice was originally built separately. The later
+[default-off startup resource connection](STARTUP_RESOURCE_OBSERVATION.md)
+now co-links it behind its own payload and writes a matched CPU-only sidecar.
+Existing binding ABI, proof flags and thread policy remain unchanged.
 
 Implemented directly in the installed unpacked BeamRT folder. No new BeamNG
 launch, shader/Lua edit, sandbox change, old capture activation or GI deployment.
-The production startup host/bootstrap remain unchanged: they do **not** link or
-start this component. The previous live creation match remains a different,
+The subsequent [startup connection](STARTUP_BINDING_HANDOFF.md) now co-links this
+component into the bootstrap behind a separate default-off payload/flag. Its
+fixture results and unresolved loader/deployment caveat are recorded separately.
+The previous live creation match remains a different,
 explicitly scoped result, not validation of these new interception methods.
 
 ## Actual game root, SDK-decoded
@@ -28,7 +38,9 @@ The inspector creates no device, queue, command list or GPU work.
 ## Narrow observation contract
 
 - Start is explicit, same-process and outside DLL attach. Its control thread
-  owns target setup and OFF. No auto-start, thread injection or game API call.
+  owns public target setup and OFF. The separately opted-in startup bridge can
+  invoke internal target setup on the verified creation callback's thread after
+  audit-lock release. No injected thread or parent remote function invocation.
 - TargetFromAudit calls the existing creation audit's ReadMatch, obtaining the
   actual matched PSO/root and copied observed blob. It validates SDK layout and
   canonical device ownership. There is no arbitrary-pointer/guessed-target API.
@@ -72,6 +84,18 @@ without Reset are rejected, even if legal for the application; simultaneous
 recording on one list is not supported. Different tracked lists can be recorded
 by different threads. Start/target setup require a future verified control gate.
 
+Update 2026-10-13: [snapshot isolation](THREAD_REJECTION_ISOLATION.md) fixes an
+unrelated-list thread rejection erasing the accepted GI receipt. A rejection
+still invalidates its own epoch; availability clears only if it is the receipt's
+source. Same-list rejection tests still refuse immediately. The thread guard and
+Reset caller ownership remain unchanged; the high live rejection count is not
+diagnosed or reduced by this correction.
+
+[Bounded rejection diagnostics](BINDING_THREAD_DIAGNOSTICS.md) now expose method
+counts, first/repeat epoch counts, phase information and at most 16 first-conflict
+samples. Recording policy remains unchanged. A separate API and version-2 startup
+reply carry CPU diagnostics, not GPU proof; the old status/snapshot ABI is intact.
+
 ## What a snapshot is NOT
 
 Read copies the last accepted **recording observation**, not necessarily this
@@ -102,6 +126,12 @@ Negative recordings are not submitted. Debug layer was unavailable: no claim of
 debug-layer-clean proof, whole-scene unchanged pixels or game compatibility.
 Full Python/Lua suite: 188/188.
 
+The later isolation regression reproduced the old defect, then passed on RTX
+4070 and WARP after the repair, with the same pixel 23 and refusal/OFF checks.
+Current source/Lua suite: 198/198. The startup connection's seven fixtures also
+pass; the new candidate is not game-tested and the successful live copies are
+preserved unchanged.
+
 CI uses an explicitly fixture-owned SDK-generated equivalent layout and WARP;
 it does not require ignored PC artifacts or represent live root capture. The
 `--fixture-root-out` path uses CREATE_NEW and never replaces an existing file.
@@ -115,17 +145,26 @@ it does not require ignored PC artifacts or represent live root capture. The
 
 ## Next gate
 
-Review a separately opted-in startup connection before deployment. It must seed
-observation early enough, provide owner-thread target setup **outside the creation
-audit lock**, preserve default-off behavior and publish bounded CPU recording
-receipts without authorizing GI. Only after isolated startup fixtures and a fresh
-user-approved game probe can we claim live draw/binding observation. Resource
-provenance and camera/CBV-content discovery are subsequent separate contracts.
+The separately opted-in startup connection now seeds observation early, sets the
+verified target **outside the creation audit lock**, preserves default-off behavior
+and publishes bounded CPU recording receipts. Its seven isolated cases pass;
+deployment is still on hold for the loader anomaly described in that document.
+At implementation time, a fresh user-approved probe was required before live
+recording claims. Resource provenance and camera/CBV contents remain subsequent
+contracts; the later bounded diagnostic is recorded below.
+
+Update 2026-10-13: that separately approved bounded diagnostic captured an actual
+GI DrawInstanced recording in BeamNG (4 vertices, 1280 x 676 viewport, one RTV
+handle). Both host and normally closed game exited 0. The startup handoff document
+records the frozen evidence. This is CPU metadata, with all resource/camera/GPU/GI
+proof flags still 0, not descriptor contents or a lighting consumer. The receipt
+also exposes 3,187,134 thread-guard rejections across tracking; reliable full-frame
+coverage and general multithread compatibility are not proved. Investigate those
+rejections before expansion, and retain the general loader/deployment hold.
 The standalone DLL links the standalone creation-audit DLL. Its session storage
 is **not** the audit compiled inside the production bootstrap. A production bridge
-must explicitly route to/co-link the actual existing audit session, not load a
-duplicate audit and assume those globals or receipts are shared. That routing,
-owner-thread scheduling and startup transport are not implemented by this slice.
+must not load a duplicate audit and assume globals are shared. The new embedded
+route explicitly co-links the actual session; it does not use the standalone DLL.
 
 Primary contracts: [SDK root deserialization](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12createversionedrootsignaturedeserializer),
 [root/argument invalidation and bundle semantics](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-a-root-signature),

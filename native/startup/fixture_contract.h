@@ -4,6 +4,8 @@
 #include "entry_contract.h"
 #include "import_observer.h"
 #include "pipeline_audit.h"
+#include "gi_bindings.h"
+#include "resource_handoff.h"
 // Reports written by the disposable fixture AFTER loader initialization.
 struct BeamRTStartupFixtureReport {
     uint32_t bytes,magic,queryOK,initialThread,cwdMatches,argsMatch,processId,reserved;
@@ -35,3 +37,17 @@ struct BeamRTPipelineFixtureReport {
     uint32_t ownerMatches,rootBytes,matched,reserved;
     uint8_t rootDigest[32];
 };
+struct BeamRTBindingFixtureReport {
+    BeamRTStartupFixtureReport startup;BeamRTBindingStatus status;BeamRTBindingSnapshot snapshot;
+    uint32_t captured,targetWorkerThread,disabled,pixelOK;
+    BeamRTBindingThreadDiagnostics diagnostics;
+};
+struct BeamRTResourceFixtureReport {
+    uint32_t bytes,abi,enabled,disabled,mode,reserved,pixelAfterOff,reserved2;
+    uint32_t profile,reservedProfile;
+    BeamRTResourceStatus before,after;BeamRTResourceRecordReceipt receipt;
+    uint64_t inputIdentities[6],outputIdentity,bufferIdentity;
+    BeamRTResourceStorageSnapshot storageBefore,storageAfter;
+    BeamRTResourceStorageFailure storageFailureAfter;
+};
+static_assert(sizeof(BeamRTResourceFixtureReport)==33280,"fixture resource report ABI3 with explicit storage profile and ABI7 receipt");

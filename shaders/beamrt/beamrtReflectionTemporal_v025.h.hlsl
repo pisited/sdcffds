@@ -30,9 +30,15 @@ cbuffer perDraw : register(b0)
 #ifdef BEAMRT_REFLECTION_GGX_PLAYABLE_RECONSTRUCTION
     uniform float reflectionReconstructionMode;
     uniform float reflectionFrameDelta;
+#ifdef BEAMRT_REFLECTION_LAB
+    uniform float reflectionLabCurrentWeight;
+#endif
 #endif
 #ifdef BEAMRT_REFLECTION_HIT_AWARE
     uniform float reflectionHitAwareEnabled;
+#endif
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+    uniform float reflectionReceiverHistoryEnabled;
 #endif
     uniform float2 oneOverTargetSize;
     uniform float2 targetSize;

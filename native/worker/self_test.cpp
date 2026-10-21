@@ -144,6 +144,59 @@ int wmain(int argc, wchar_t** argv) {
         success(BeamRT_WorkerUpload(worker,&scene,badPixels.data(),badPixels.size()));
         success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
         for (const auto& hit:actual) require(hit.category==-1,"corrupt node certified a hit/miss");
+        // A binary preorder internal node cannot escape directly to its own
+        // first child; both child subtrees must lie inside its range.
+        if(pixels[(2+5)*4]==0){
+            badPixels=pixels;badPixels[(2+5)*4+1]=1;badPixels[(2+5)*4+2]=badPixels[(2+5)*4+3]=0;
+            success(BeamRT_WorkerUpload(worker,&scene,badPixels.data(),badPixels.size()));
+            success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
+            for(const auto& hit:actual)require(hit.category==-1,"invalid internal subtree certified a hit/miss");
+        }
+        // Keep valid headers and escape links, but make every leaf's start
+        // UINT32_MAX. Adding its positive count used to wrap past the check.
+        badPixels=pixels;
+        for(uint32_t node=0;node<scene.counts[0];++node){const size_t offset=size_t(2+node*6)*4;
+            if(badPixels[offset+5*4])for(unsigned byte=0;byte<4;++byte)badPixels[offset+4*4+byte]=255;}
+        success(BeamRT_WorkerUpload(worker,&scene,badPixels.data(),badPixels.size()));
+        success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
+        for(size_t i=0;i<actual.size();++i)if(expected[i]==2 && actual[i].category!=-1){
+            std::cerr<<"corrupt leaf ray "<<i<<" returned "<<actual[i].category<<'\n';
+            throw std::runtime_error("overflowed leaf range certified a hit/miss");}
+        // Leaves own no child subtrees: they must advance by exactly one node.
+        badPixels=pixels;
+        for(uint32_t node=0;node<scene.counts[0];++node){const size_t at=size_t(2+node*6+5)*4;
+            if(badPixels[at]){const uint32_t escape=node+2;
+                badPixels[at+1]=static_cast<uint8_t>(escape);badPixels[at+2]=static_cast<uint8_t>(escape>>8);badPixels[at+3]=static_cast<uint8_t>(escape>>16);}}
+        success(BeamRT_WorkerUpload(worker,&scene,badPixels.data(),badPixels.size()));
+        success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
+        for(size_t i=0;i<actual.size();++i)if(expected[i]==2)require(actual[i].category==-1,"invalid leaf escape certified a hit/miss");
+        // A valid atlas/layout does not prove usable geometry. Collapse each
+        // packed triangle to its first vertex, retaining its original BVH box.
+        badPixels=pixels;
+        for(uint32_t triangle=0;triangle<scene.counts[1];++triangle){const size_t at=size_t(scene.counts[2]+triangle*7)*4;
+            std::copy_n(badPixels.data()+at,8,badPixels.data()+at+8);
+            std::copy_n(badPixels.data()+at,8,badPixels.data()+at+16);}
+        success(BeamRT_WorkerUpload(worker,&scene,badPixels.data(),badPixels.size()));
+        success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));
+        for(size_t i=0;i<actual.size();++i)if(expected[i]==2)require(actual[i].category==-1,"collapsed geometry certified as a clean miss/hit");
+        // Exact-coordinate one-face control: a real parallel/coplanar ray is
+        // still a miss, not invalid geometry. This is test data, not a new mesh
+        // pipeline or a change to the imported scene format.
+        BeamRTScene plane{};plane.inverseX[0]=plane.inverseY[1]=plane.inverseZ[2]=1;
+        plane.quantExtent[0]=plane.quantExtent[1]=plane.quantExtent[2]=1;
+        plane.counts[0]=plane.counts[1]=1;plane.counts[2]=8;plane.atlas[0]=256;plane.atlas[1]=1;
+        for(auto& material:plane.materials)material=1;
+        std::vector<uint8_t> planePixels(256*4);std::copy_n(pixels.data(),8,planePixels.data());
+        auto point=[&](uint32_t index,uint16_t x,uint16_t y,uint16_t z){auto p=planePixels.data()+index*4;
+            p[0]=static_cast<uint8_t>(x);p[1]=static_cast<uint8_t>(x>>8);p[2]=static_cast<uint8_t>(y);p[3]=static_cast<uint8_t>(y>>8);
+            p[4]=static_cast<uint8_t>(z);p[5]=static_cast<uint8_t>(z>>8);p[7]=255;};
+        point(2,0,0,0);point(4,65535,65535,65535);planePixels[7*4]=planePixels[7*4+1]=1;
+        point(8,0,0,0);point(10,65535,0,0);point(12,0,65535,0);planePixels[14*4]=1;planePixels[14*4+3]=255;
+        BeamRTRay planeRays[2]{};for(auto& ray:planeRays){ray.origin[0]=ray.origin[1]=.25f;ray.reach=2;ray.startBias=.05f;}
+        planeRays[0].origin[2]=1;planeRays[0].direction[2]=-1;planeRays[1].direction[0]=1;
+        BeamRTHit planeHits[2]{};success(BeamRT_WorkerUpload(worker,&plane,planePixels.data(),planePixels.size()));
+        success(BeamRT_WorkerTrace(worker,planeRays,2,planeHits));
+        require(planeHits[0].category==2 && planeHits[1].category==0,"valid parallel face was confused with unusable geometry");
         // Explicit identity upload verifies recovery after all failed replacements.
         success(BeamRT_WorkerUpload(worker,&scene,pixels.data(),pixels.size()));
         success(BeamRT_WorkerTrace(worker,rays.data(),static_cast<uint32_t>(rays.size()),actual.data()));

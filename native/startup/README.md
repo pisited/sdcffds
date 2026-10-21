@@ -1,5 +1,11 @@
 # Opt-in native startup host: passive startup, not GI integration
 
+Latest offline source update: [explicit heap-interned descriptor profile2](DESCRIPTOR_INTERNED_PROFILE.md)
+targets the real compact location-capacity refusal while preserving legacy
+defaults. RTX/WARP and startup-connected fixtures passed; the new ABI7 candidate
+has not been game-tested or approved for a game launch. Earlier dated evidence
+below retains its original scope.
+
 Implemented 2026-10-12 directly in the unpacked BeamRT source. Disposable fixtures
 and **separately authorized passive and import-observation BeamNG startups** passed.
 The second observed a real device-creation output; native capture/GI deployment
@@ -8,7 +14,7 @@ Steam launch options, registry settings, Lua sandbox settings or normal startup
 were changed. No ReShade, proxy system DLL, installer or persistent background
 process is included.
 
-This is a launcher and minimal startup bootstrap, **not a game GI observer yet**.
+This is a launcher and minimal startup bootstrap, **not a native GI renderer**.
 The current build does not link or call the capture or GI adapter. Building this
 slice does not establish graphics-device access, safe game-thread interception,
 actual GI pass identity or any lighting improvement.
@@ -57,8 +63,22 @@ draw, descriptor/resource access, camera data or native GI consumption. Those
 remaining boundaries are unchanged; see the handoff's dated live v2 evidence.
 Next slice: [GI recording-binding observer](GI_BINDING_OBSERVER.md) SDK-inspects
 the captured root and fixture-tests actual draw CBV/table/viewport/output metadata.
-It is separate/default-off and not linked into the production startup build;
-no new live binding capture, native GI or lighting result is claimed.
+It now has a [separate default-off startup connection](STARTUP_BINDING_HANDOFF.md)
+to the same audit session, with isolated startup receipts. No new live binding
+capture, native GI or lighting result is claimed. Deployment is held while the
+documented legacy-fixture loader anomaly is reconciled.
+
+[Loader evidence preservation](LOADER_EVIDENCE.md) now archives exact fixture
+inputs and host logs before tests. A fresh 37-case startup matrix and 197/197
+source/Lua tests pass, including a deliberately unresolved dependency control.
+The earlier intermittent failure remains unexplained; no new game probe was run.
+
+Subsequent separately approved diagnostic: [the live recording result](STARTUP_BINDING_HANDOFF.md#separately-authorized-live-diagnostic--2026-10-13)
+captured the actual GI four-vertex draw's CPU bindings and viewport, followed by
+normal host/game exits 0. No resource contents, camera semantics, GPU ordering,
+native GI consumption or lighting result is established. High thread-guard
+rejection traffic is now a live coverage limitation to investigate offline;
+the historical loader failure remains open, not retroactively fixed.
 
 ## Files and default behavior
 

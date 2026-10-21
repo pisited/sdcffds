@@ -59,6 +59,17 @@ class NativeGIContracts(unittest.TestCase):
         self.assertIn("GPU frame still in flight; retained", adapter)
         self.assertIn("unmarked recorded work retained", adapter)
 
+    def test_consumer_validates_viewport_before_resolving_receiver_pixel(self):
+        consumer = self.source("shaders/beamrt/beamrtNativeGIVisibility_v001.h.hlsl")
+        for guard in ("all(isfinite(rtParams0))", "all(rtParams0.xy>=0)",
+                      "all(rtParams0.zw>0)", "all(rtParams0.xy+rtParams0.zw<=1.000001)",
+                      "all(isfinite(sceneUv))", "all(sceneUv>=0)", "all(sceneUv<1)"):
+            self.assertIn(guard, consumer)
+        self.assertLess(consumer.index("all(isfinite(rtParams0))"), consumer.index("float2 viewportUv="))
+        fixture = self.source("native/gi/self_test.cpp")
+        self.assertIn("invalidViewports[][4]", fixture)
+        self.assertIn("invalid GI viewport metadata preserves baseline contribution", fixture)
+
     def test_offline_capture_to_gi_handoff_uses_explicit_sidecar_and_final_fence(self):
         fixture = self.source("native/gi/self_test.cpp")
         handoff = self.source("native/gi/test_support.h")

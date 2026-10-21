@@ -1,11 +1,32 @@
 # Native GPU visibility to owned GI: first adapter slice
 
+Update 2026-10-19: [GI frame validity repair](GI_FRAME_VALIDITY.md) fixes normal
+camera-preparation failure being mistaken for success and invalid normalized
+viewport metadata selecting a visibility texel. These are renderer correctness
+repairs, not native game resource access or a newly passed lighting milestone.
+
+Update 2026-10-13: the [offline sunlight shader audit](../shadows/README.md)
+shares the fixture-owned GPU host without changing GI adapter or retirement
+rules. Sunlight invalid-data fallback was repaired separately; no game activation.
+
 Status 2026-10-11: implemented, offline-validated resource adapter and matched
 shader consumer. **Native C++ adapter not attached to BeamNG.** No loader,
 launcher, graphics hooks, resource discovery, ReShade dependency or DLL install.
 v0.109 separately registers an opt-in engine-managed pixel-pass backend using
 the same producer query and consumer format; see [game-side activation](../../GI_VISIBILITY_BUFFER_V0109.md).
 The existing worker remains ABI v2; this separate adapter has its own ABI v1.
+
+Update 2026-10-13: [shared BVH safety audit](BVH_SAFETY_AUDIT.md) repairs unsigned
+leaf-range wrap and invalid preorder escapes. GPU regressions verify unknown
+texels and baseline GI fallback on RTX/WARP, including the game pixel producer
+on fixture resources. Project tests pass 205/205. No additional game run, native
+lighting activation or retirement-rule change was made.
+
+Further offline [collapsed-geometry protection](DEGENERATE_GEOMETRY_AUDIT.md)
+distinguishes unusable packed faces from real parallel-ray misses. A valid thin
+source face can collapse under 16-bit packing; the shader now returns unknown
+rather than a certified miss. RTX/WARP producer/consumer controls and 208/208
+project tests pass. The precision limit and live-integration boundaries remain.
 
 ## What this implements
 

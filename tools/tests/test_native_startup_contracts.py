@@ -32,6 +32,15 @@ class NativeStartupContracts(unittest.TestCase):
                           "ShellExecute", "system(", "FreeLibrary", "BeamRT_CaptureStart", "BeamRT_GIRecord"):
             self.assertNotIn(forbidden, host)
 
+    def test_descriptor_admission_stays_review_only_and_explicitly_selected(self):
+        host = self.source("launcher.cpp")
+        for guard in ("resourceMode=beamrtResourceAllAllocations", '--resource-descriptors-only',
+                      "out.resources || out.resourceMode==beamrtResourceAllAllocations",
+                      "out.resourceMode!=beamrtResourceDescriptorTextures || !out.resourceProbeBytes",
+                      "descriptor-only resource mode activated by default", "explicit descriptor-only resource mode refused"):
+            self.assertIn(guard, host)
+        self.assertLess(host.index("if(!options.launch)return 0"), host.index("return launchReviewed(options"))
+
     def test_bootstrap_only_reports_presence_without_renderer_or_unload_work(self):
         bootstrap = self.source("bootstrap.cpp")
         for guard in ("reason!=DLL_PROCESS_ATTACH", "beamrtStartupPayloadValid", "DetourRestoreAfterWith",

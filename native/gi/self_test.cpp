@@ -58,6 +58,19 @@ int wmain(int argc,wchar_t** argv) {
         c.enabled=std::numeric_limits<float>::quiet_NaN();draw(host,frame,vs,ps,c,false);c.enabled=1;
         for(int i=0;i<3;++i) { c.key[i]+=1;draw(host,frame,vs,ps,c,false);c.key[i]-=1; }
         c.size[0]=3;draw(host,frame,vs,ps,c,false);c.size[0]=2;c.index=32;draw(host,frame,vs,ps,c,false);c.index=31;
+        const float invalidViewports[][4]={
+            {0,0,-1,1},{0,0,1,-1},{0,0,0,1},{0,0,1,0},
+            {-.25f,0,1,1},{0,-.25f,1,1},{0,0,1.25f,1},{0,0,1,1.25f},
+            {.75f,0,.5f,1},{0,.75f,1,.5f},
+            {std::numeric_limits<float>::quiet_NaN(),0,1,1},
+            {0,0,std::numeric_limits<float>::infinity(),1}
+        };
+        for(unsigned viewportCase=0;viewportCase<12;++viewportCase){
+            std::memcpy(c.viewport,invalidViewports[viewportCase],sizeof(c.viewport));
+            try{draw(host,frame,vs,ps,c,false);}
+            catch(const std::exception& error){throw std::runtime_error("invalid GI viewport case "+std::to_string(viewportCase)+": "+error.what());}
+        }
+        std::cout<<"PASS: invalid GI viewport metadata preserves baseline contribution (12 cases).\n";
         c.viewport[0]=c.viewport[1]=.25f;c.viewport[2]=c.viewport[3]=.5f;draw(host,frame,vs,ps,c,true);
         c.index=-1;draw(host,frame,vs,ps,c,false);c.index=31;c.key[0]=std::numeric_limits<float>::quiet_NaN();draw(host,frame,vs,ps,c,false);c.key[0]=inputs.key[0];
         require(BeamRT_GIDestroyFrame(&frame)!=0 && frame,"compute completion incorrectly retired a consumer-live frame");
@@ -66,14 +79,39 @@ int wmain(int argc,wchar_t** argv) {
         float expectedBase[3];for(int i=0;i<3;++i)expectedBase[i]=receivers[0][i]+static_cast<float>(pixels[i])/255.0f;
         testCaptureToGIHandoff(device.Get(),cs,inputs,handoffVS,handoffPS,vs,ps,expectedBase);
         UINT64 completion=1;
-        auto fallback=[&]() {
+        auto fallback=[&](bool inspectUnknown=false) {
             success(create(inputs));host.begin();success(BeamRT_GIRecord(frame,host.list.Get()));success(BeamRT_GIMarkSubmitted(frame,lifetime.Get(),++completion));host.execute();host.wait();
+            if(inspectUnknown){expectInvalidVisibility(host,frame);
+                if(!pixelShader.empty()){
+                    auto invalidPixel=pixelProducer(host,inputs,vs,pixelShader);
+                    expectInvalidVisibilityTexture(host,invalidPixel.resource.Get());
+                    draw(host,frame,vs,ps,c,false,invalidPixel.copySource->GetCPUDescriptorHandleForHeapStart().ptr);
+                }
+            }
             draw(host,frame,vs,ps,c,false);hr(host.queue->Signal(lifetime.Get(),completion));host.wait();success(BeamRT_GIDestroyFrame(&frame));
         };
         for(uint32_t mode:{0u,2u,3u}) { for(auto& policy:inputs.scene.materials) policy=mode;fallback(); }
         for(auto& mode:inputs.scene.materials) mode=1;
         receivers[0][3]=0;host.begin();auto invalidReceiver=host.texture(2,1,DXGI_FORMAT_R32G32B32A32_FLOAT,receivers,16);host.execute();host.wait();inputs.receivers=invalidReceiver.Get();fallback();inputs.receivers=receiver.Get();
         auto invalidPixels=pixels;invalidPixels[0]=0;host.begin();auto invalidMesh=host.texture(inputs.scene.atlas[0],inputs.scene.atlas[1],DXGI_FORMAT_R8G8B8A8_UNORM,invalidPixels.data(),4);host.execute();host.wait();inputs.mesh=invalidMesh.Get();fallback();inputs.mesh=mesh.Get();
+        // Inspect real GPU texels AND the original-GI fallback for the shared
+        // traversal's index-overflow and preorder-link regressions.
+        for(unsigned corruption=0;corruption<4;++corruption){
+            if(corruption==1 && pixels[(2+5)*4]!=0)continue; // Single-leaf synthetic assets have no internal root.
+            invalidPixels=pixels;
+            for(uint32_t node=0;node<inputs.scene.counts[0];++node){const size_t base=size_t(2+node*6)*4;
+                if(corruption==0 && invalidPixels[base+5*4])for(unsigned byte=0;byte<4;++byte)invalidPixels[base+4*4+byte]=255;
+                if(corruption==2 && invalidPixels[base+5*4]){const uint32_t escape=node+2;invalidPixels[base+5*4+1]=static_cast<uint8_t>(escape);
+                    invalidPixels[base+5*4+2]=static_cast<uint8_t>(escape>>8);invalidPixels[base+5*4+3]=static_cast<uint8_t>(escape>>16);}
+            }
+            if(corruption==1){invalidPixels[(2+5)*4+1]=1;invalidPixels[(2+5)*4+2]=invalidPixels[(2+5)*4+3]=0;}
+            if(corruption==3)for(uint32_t triangle=0;triangle<inputs.scene.counts[1];++triangle){const size_t at=size_t(inputs.scene.counts[2]+triangle*7)*4;
+                std::memcpy(invalidPixels.data()+at+8,invalidPixels.data()+at,8);
+                std::memcpy(invalidPixels.data()+at+16,invalidPixels.data()+at,8);}
+            host.begin();invalidMesh=host.texture(inputs.scene.atlas[0],inputs.scene.atlas[1],DXGI_FORMAT_R8G8B8A8_UNORM,invalidPixels.data(),4);
+            host.execute();host.wait();inputs.mesh=invalidMesh.Get();fallback(true);inputs.mesh=mesh.Get();
+        }
+        std::cout<<"PASS: malformed BVH GPU mask remains unknown; exact GI consumer preserves baseline lighting.\n";
         success(create(inputs));host.begin();success(BeamRT_GIRecord(frame,host.list.Get()));hr(host.list->Close());host.begin();hr(host.list->Close());
         require(BeamRT_GIDiscardRecorded(frame,0)!=0,"unconfirmed discard accepted");success(BeamRT_GIDiscardRecorded(frame,1));success(BeamRT_GIDestroyFrame(&frame));
         ComPtr<ID3D12InfoQueue> messages;if(SUCCEEDED(device.As(&messages))) for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) { SIZE_T bytes=0;hr(messages->GetMessage(i,nullptr,&bytes));std::vector<uint8_t> storage(bytes);auto message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());hr(messages->GetMessage(i,message,&bytes));require(message->Severity>D3D12_MESSAGE_SEVERITY_ERROR,message->pDescription); }

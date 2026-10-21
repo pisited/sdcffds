@@ -23,11 +23,14 @@ cbuffer perDraw:register(b0)
 float4 mainP(PFXVertToPix IN):SV_Target0
 {
     float4 receiver=decodeGBuffer(TEX_SAMPLER(prepassDepthTex),TEX_SAMPLER(prepassTex),IN.uv0,projParams);
-    if(receiver.w>=.9999||meshVisibilityEnabled<.5)return float4(0,0,0,0);
+    // Invalid depth/normals/toggles cannot certify either clear or blocked sun.
+    if(!all(isfinite(receiver)) || receiver.w<=0 || receiver.w>=.9999
+        || !isfinite(meshVisibilityEnabled) || meshVisibilityEnabled<.5)return float4(0,0,0,0);
     float3 world=eyePosWorld+IN.wsEyeRay*receiver.w;
+    if(!all(isfinite(world)))return float4(0,0,0,0);
     float3 towardSun=sunDirection*meshSunSign;
     float magnitude=dot(towardSun,towardSun);
-    if(magnitude<1e-8)return float4(world,0);
+    if(!all(isfinite(towardSun)) || !isfinite(magnitude) || magnitude<1e-8)return float4(world,0);
     towardSun*=rsqrt(magnitude);
     if(dot(receiver.xyz,towardSun)<=.001)return float4(world,1);
     uint visits;

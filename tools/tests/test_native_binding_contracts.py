@@ -11,7 +11,7 @@ class BindingContracts(unittest.TestCase):
     def test_target_only_from_actual_creation_audit_and_sdk_layout(self):
         code = self.source("gi_bindings.cpp")
         self.assertIn("BeamRT_PipelineAuditReadMatch", code)
-        self.assertIn("beamrtDecodeGIRoot(bytes,size,layout)", code)
+        self.assertIn("beamrtDecodeGIRoot(bytes,size,layout,c->decoder)", code)
         self.assertIn("child(*c,rootObject.Get())", code)
         layout = self.source("gi_root_layout.h")
         for guard in ("D3D12CreateVersionedRootSignatureDeserializer", "root.NumParameters!=3", "root.NumStaticSamplers",
@@ -40,7 +40,7 @@ class BindingContracts(unittest.TestCase):
 
     def test_invalidations_and_handles_never_certify_resources(self):
         code = self.source("gi_bindings.cpp")
-        for guard in ("s.generation+1", "s.thread!=tid", "s.kinds[i]==2", "if(!identical(s.root.Get(),p))", "unsupported(l)", "c.status.snapshotAvailable=0"):
+        for guard in ("s.generation+1", "s.thread!=tid", "s.kinds[i]==2", "if(!identical(s.root.Get(),p))", "unsupported(l,", "c.status.snapshotAvailable=0"):
             self.assertIn(guard, code)
         header = self.source("gi_bindings.h")
         for flag in ("descriptorProvenanceVerified", "cbvContentsVerified", "cameraVerified", "gpuOrderingVerified", "lightingConsumed"):
@@ -59,8 +59,24 @@ class BindingContracts(unittest.TestCase):
         for guard in ("/W4 /WX", "beamrt_gi_bindings.dll", "--fixture-root-out", "beamrt_binding_fixture.exe"):
             self.assertIn(guard, build)
         startup = self.source("build.ps1")
-        self.assertNotIn("gi_bindings.cpp", startup)
+        self.assertIn("gi_bindings.cpp", startup)
+        self.assertIn("/DBEAMRT_BINDING_EMBEDDED", startup)
         self.assertNotIn("BindingsStart", self.source("bootstrap.cpp"))
+
+    def test_thread_rejection_isolated_to_snapshot_source_and_guard_remains(self):
+        code = self.source("gi_bindings.cpp")
+        branch = code[code.index("if(s.thread && s.thread!=tid)"):code.index("template<class F>static F original")]
+        self.assertIn("s.complete=false", branch)
+        self.assertIn("if(c->latest.commandId==s.id)c->status.snapshotAvailable=0", branch)
+        self.assertIn("rejectedThread(*c,s,tid,method)", branch)
+        self.assertIn("return;", branch)
+        self.assertIn("s.pipeline=p;s.thread=GetCurrentThreadId()", code)
+        fixture = self.source("binding_fixture.cpp")
+        for guard in ("unrelatedThread.join()", "after.threadRejected==before.threadRejected+1",
+                      "std::memcmp(&retained,&snapshot,sizeof(snapshot))==0",
+                      "unrelated thread rejection erased accepted GI snapshot",
+                      "unavailable();render.list->DrawInstanced", "foreign.join()"):
+            self.assertIn(guard, fixture)
 
 
 if __name__ == "__main__":

@@ -156,10 +156,11 @@ draw/descriptor/CBV/output observations before another separately approved probe
 
 Follow-up: [the standalone recording-binding observer](GI_BINDING_OBSERVER.md)
 now SDK-decodes this actual root and passes isolated hardware/WARP recording,
-invalidation/restoration and unchanged-output fixtures. It is **not linked into
-this startup host/bootstrap**, has no new live game result and cannot yet recover
-resource provenance or camera/CBV contents. A separate reviewed startup routing/
-control/receipt bridge remains required before another authorized game probe.
+invalidation/restoration and unchanged-output fixtures. A subsequent
+[default-off startup bridge](STARTUP_BINDING_HANDOFF.md) now co-links that observer
+with the actual audit session. It has no new live result and cannot yet recover
+resource provenance or camera/CBV contents. Deployment remains held for the
+documented pre-start loader anomaly before another authorized game probe.
 
 ## Before another bounded game probe
 

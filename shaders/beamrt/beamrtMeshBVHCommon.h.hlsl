@@ -68,13 +68,23 @@ int beamrtMeshTrace(float3 worldOrigin,float3 worldDirection,float reach,float r
         if(node>=(uint)meshNodeCount)break;
         visits++;uint offset=2+node*6,info=beamrtMeshWord(offset+5,srgb),count=info&255u,escape=info>>8;
         if(escape<=node||escape>(uint)meshNodeCount||count>8)return -1;
+        // Preorder leaves advance by one; internal nodes contain two child
+        // subtrees. Never use a malformed escape to certify hit/miss coverage.
+        if((count>0 && escape!=node+1) || (count==0 && escape<=node+2))return -1;
         if(!beamrtMeshBox(o,d,beamrtMeshPoint(offset,srgb),beamrtMeshPoint(offset+2,srgb),reach,rayStartBias)){node=escape;continue;}
         if(count==0){node++;continue;}
-        uint start=beamrtMeshWord(offset+4,srgb);if(start+count>(uint)meshTriangleCount)return -1;
+        uint start=beamrtMeshWord(offset+4,srgb);
+        // Checked subtraction avoids UINT32 addition wrapping to a valid range.
+        if(start>(uint)meshTriangleCount || count>(uint)meshTriangleCount-start)return -1;
         [loop]for(uint i=0;i<8;++i)
         {
             if(i>=count)break;uint p=(uint)meshTriangleOffset+(start+i)*7;
-            if(beamrtMeshTriangle(o,d,beamrtMeshPoint(p,srgb),beamrtMeshPoint(p+2,srgb),beamrtMeshPoint(p+4,srgb),reach,rayStartBias))
+            float3 a=beamrtMeshPoint(p,srgb),b=beamrtMeshPoint(p+2,srgb),c=beamrtMeshPoint(p+4,srgb);
+            float3 area=cross(b-a,c-a);
+            // Packing/invalid data can collapse a face. Distinguish that from
+            // a valid face parallel to this ray: unusable geometry is unknown.
+            if(!all(isfinite(a)) || !all(isfinite(b)) || !all(isfinite(c)) || !all(isfinite(area)) || all(area==0.0))return -1;
+            if(beamrtMeshTriangle(o,d,a,b,c,reach,rayStartBias))
             {
                 uint mode=beamrtMeshMaterial(beamrtMeshBytes(p+6,srgb));
                 if(mode==1)return 2;possible=true;

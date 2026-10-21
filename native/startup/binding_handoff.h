@@ -5,13 +5,16 @@
 #include <cmath>
 inline constexpr GUID beamrtBindingGuid={0x1d86baa8,0x5734,0x4233,{0x97,0x4e,0x34,0x77,0x31,0xc9,0x2a,0xed}};
 inline constexpr uint64_t beamrtBindingMagic=0x42525442494e4447ull;
+// Reply layout v2 adds bounded thread evidence. Old payloads fail closed;
+// the public status/snapshot APIs and 1144-byte recording artifact stay v1.
+inline constexpr uint32_t beamrtBindingHandoffABI=2;
 struct BeamRTBindingPayload {
     uint32_t bytes,abi;uint64_t magic;uint32_t processId,initialThread;
     uint64_t outputMapping,startEvent,recordEvent;uint32_t reserved[2];
 };
 static_assert(sizeof(BeamRTBindingPayload)==56,"binding payload ABI v1 layout");
 inline bool beamrtBindingPayloadValid(const BeamRTBindingPayload* p,DWORD size,DWORD pid,DWORD thread){
-    return p && size==sizeof(*p) && p->bytes==sizeof(*p) && p->abi==1 && p->magic==beamrtBindingMagic
+    return p && size==sizeof(*p) && p->bytes==sizeof(*p) && p->abi==beamrtBindingHandoffABI && p->magic==beamrtBindingMagic
         && pid && p->processId==pid && thread && p->initialThread==thread && !p->reserved[0] && !p->reserved[1]
         && p->outputMapping && p->outputMapping!=UINT64_MAX && p->startEvent && p->startEvent!=UINT64_MAX && p->recordEvent && p->recordEvent!=UINT64_MAX
         && p->outputMapping!=p->startEvent && p->outputMapping!=p->recordEvent && p->startEvent!=p->recordEvent;
@@ -22,7 +25,18 @@ struct BeamRTBindingProgress {
     volatile LONG enabled,healthy,targetReady,failureReason,failureResult,liveCommands,targetResult,targetThread;
     volatile LONG64 creations,tagged,pressureSkipped,untracked,matchedDraws,rejectedDraws,unsupported,threadRejected,serial,targetAttempts;
 };
-struct BeamRTBindingReply {BeamRTBindingStartReceipt start;BeamRTBindingRecordReceipt record;BeamRTBindingProgress progress;};
+struct BeamRTBindingThreadReceipt {
+    uint32_t bytes,abi,processId,recordThread;uint64_t snapshotSerial;BeamRTBindingThreadDiagnostics diagnostics;
+};
+struct BeamRTBindingThreadPrefix {
+    uint32_t bytes,abi,processId;volatile LONG count;
+    BeamRTBindingThreadSample samples[beamrtBindingThreadSampleLimit];
+};
+static_assert(sizeof(BeamRTBindingRecordReceipt)==1144,"unchanged recording artifact v1");
+static_assert(sizeof(BeamRTBindingThreadReceipt)==1184,"coherent first-record thread evidence");
+static_assert(sizeof(BeamRTBindingThreadPrefix)==912,"immutable first-conflict prefix");
+struct BeamRTBindingReply {BeamRTBindingStartReceipt start;BeamRTBindingRecordReceipt record;BeamRTBindingProgress progress;
+    BeamRTBindingThreadReceipt threads;BeamRTBindingThreadPrefix threadSamples;};
 // Strict transport shape checks, NOT verification of pointed-to descriptors,
 // camera values, resource states, GPU completion or a fresh frame.
 inline bool beamrtBindingSnapshotValid(const BeamRTBindingSnapshot& s){
@@ -43,5 +57,7 @@ inline bool beamrtBindingSnapshotValid(const BeamRTBindingSnapshot& s){
 HRESULT BeamRT_BindingStartFromPayload(ID3D12Device*);
 void BeamRT_BindingBridgeAuditMatch();
 HRESULT BeamRT_BindingsVerifiedAuditMatch();
-void BeamRT_BindingPublishRecord(const BeamRTBindingStatus&,const BeamRTBindingSnapshot&,DWORD);
+struct BeamRTResourceDrawObservation;
+void BeamRT_BindingPublishRecord(const BeamRTBindingStatus&,const BeamRTBindingSnapshot&,DWORD,const BeamRTBindingThreadDiagnostics&,const BeamRTResourceDrawObservation* =nullptr);
+void BeamRT_BindingPublishThreadSample(const BeamRTBindingThreadSample&);
 void BeamRT_BindingPublishProgress(const BeamRTBindingStatus&);

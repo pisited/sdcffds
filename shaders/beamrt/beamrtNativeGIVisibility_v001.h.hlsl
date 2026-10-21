@@ -13,6 +13,13 @@ bool beamrtNativeGIBlocked(float2 sceneUv,int surfelIndex)
         || any(nativeGIVisibilityKey!=floor(nativeGIVisibilityKey)) || nativeGIVisibilityKey.w!=1) return false;
     float4 header=nativeGIVisibilityTexTex.Load(int3(0,0,0));
     if(!all(header==nativeGIVisibilityKey)) return false;
+    // rtParams maps the normalized prepass viewport into its render target.
+    // An inverted/outside viewport can still round-trip to a plausible pixel;
+    // never certify a blocker using such metadata. Allow only rounding noise
+    // at the upper extent, not a clamped/repaired mapping or another receiver.
+    if(!all(isfinite(rtParams0)) || !all(rtParams0.xy>=0) || !all(rtParams0.zw>0)
+        || !all(rtParams0.xy+rtParams0.zw<=1.000001)) return false;
+    if(!all(isfinite(sceneUv)) || !all(sceneUv>=0) || !all(sceneUv<1)) return false;
     float2 viewportUv=(sceneUv-rtParams0.xy)/rtParams0.zw;
     if(!all(viewportUv>=0) || !all(viewportUv<1)) return false;
     int2 pixel=(int2)floor(viewportUv*nativeGIVisibilitySize);pixel.y+=1;

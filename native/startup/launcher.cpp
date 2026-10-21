@@ -3,6 +3,10 @@
 #include "import_observer.h"
 #include "pipeline_handoff.h"
 #include "binding_handoff.h"
+#include "resource_handoff.h"
+#include "unattended/startup_owned_session.h"
+#include "unattended/outer_child_session.h"
+#include "unattended/startup_stop_channel.h"
 #include <detours.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -15,6 +19,31 @@
 #include <cstring>
 #include <cwctype>
 #include <memory>
+#include <sstream>
+#ifdef BEAMRT_STARTUP_TEST_FAULTS
+#include <psapi.h>
+static void inspectOwnedImports(HANDLE process,const std::wstring& target){
+    const auto name=std::filesystem::path(target).filename().wstring();
+    if(name!=L"beamrt_import_fixture.exe")return;
+    uintptr_t address=0;MEMORY_BASIC_INFORMATION memory{};
+    while(VirtualQueryEx(process,reinterpret_cast<void*>(address),&memory,sizeof(memory))){
+        const auto next=reinterpret_cast<uintptr_t>(memory.BaseAddress)+memory.RegionSize;if(next<=address)break;address=next;
+        if(memory.Type!=MEM_IMAGE || memory.AllocationBase!=memory.BaseAddress)continue;
+        wchar_t path[32768]{};const auto count=GetMappedFileNameW(process,memory.AllocationBase,path,32768);
+        if(!count || std::filesystem::path(path).filename().wstring()!=name)continue;
+        const auto base=reinterpret_cast<uintptr_t>(memory.AllocationBase);SIZE_T read=0;IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS64 nt{};
+        if(!ReadProcessMemory(process,reinterpret_cast<void*>(base),&dos,sizeof(dos),&read) || read!=sizeof(dos) || dos.e_magic!=IMAGE_DOS_SIGNATURE || dos.e_lfanew<=0 || dos.e_lfanew>1024*1024)return;
+        if(!ReadProcessMemory(process,reinterpret_cast<void*>(base+dos.e_lfanew),&nt,sizeof(nt),&read) || read!=sizeof(nt) || nt.Signature!=IMAGE_NT_SIGNATURE)return;
+        const auto directory=nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        for(unsigned i=0;i<32;++i){IMAGE_IMPORT_DESCRIPTOR imported{};
+            if(!ReadProcessMemory(process,reinterpret_cast<void*>(base+directory.VirtualAddress+i*sizeof(imported)),&imported,sizeof(imported),&read) || read!=sizeof(imported) || !imported.Name)break;
+            char text[512]{};ReadProcessMemory(process,reinterpret_cast<void*>(base+imported.Name),text,sizeof(text)-1,&read);
+            std::cout<<"Owned suspended fixture import["<<i<<"]="<<text<<"; name RVA="<<std::hex<<imported.Name<<std::dec<<'\n';
+        }
+        return;
+    }
+}
+#endif
 
 static void demand(bool ok,const char* reason){if(!ok)throw std::runtime_error(reason);}
 static void win(BOOL ok,const char* reason){if(!ok)throw std::runtime_error(std::string(reason)+" Win32="+std::to_string(GetLastError()));}
@@ -127,10 +156,14 @@ static std::wstring printable(const std::wstring& text) {
 }
 struct Options {
     bool launch=false;
+    bool owned=false;DWORD ownedOverall=0,ownedGrace=0,ownedReceiptWait=0;
+    std::wstring ownedDirectory,ownedToken,ownedAck;
+    uint64_t outerChannel=0;std::wstring outerDigest;
     bool entry=false;
     bool imports=false;
     bool pipeline=false;
     bool bindings=false;DWORD bindingWait=30;std::wstring bindingOutput;
+    bool resources=false;uint32_t resourceProbeBytes=0,resourceMode=beamrtResourceAllAllocations,resourceProfile=beamrtResourceStorageLegacy;
     DWORD pipelineWait=30;
     std::wstring target,dll,workdir,targetHash,dllHash,ack;
     std::wstring vertex,pixel,vertexHash,pixelHash,rootOutput;
@@ -151,6 +184,10 @@ static Options parse(const std::vector<std::wstring>& args) {
         if(flag==L"--observe-device-import"){out.imports=true;continue;}
         if(flag==L"--observe-gi-creation"){out.pipeline=true;continue;}
         if(flag==L"--observe-gi-bindings"){out.bindings=true;continue;}
+        if(flag==L"--observe-gi-resources"){out.resources=true;continue;}
+        if(flag==L"--resource-descriptors-only"){out.resourceMode=beamrtResourceDescriptorTextures;continue;}
+        if(flag==L"--resource-compact-storage"){out.resourceProfile=beamrtResourceStorageCompact;continue;}
+        if(flag==L"--resource-interned-storage"){out.resourceProfile=beamrtResourceStorageInterned;continue;}
         if(flag==L"--review")continue;
         demand(i+1<args.size(),"startup option missing value");const auto value=args[++i];
         if(flag==L"--target")out.target=localPath(value);
@@ -159,12 +196,32 @@ static Options parse(const std::vector<std::wstring>& args) {
         else if(flag==L"--expected-target-sha256")out.targetHash=digest(value);
         else if(flag==L"--expected-dll-sha256")out.dllHash=digest(value);
         else if(flag==L"--acknowledge-native-insertion")out.ack=value;
+        else if(flag==L"--owned-run-directory")out.ownedDirectory=localPath(value);
+        else if(flag==L"--owned-run-token")out.ownedToken=value;
+        else if(flag==L"--acknowledge-owned-force-close")out.ownedAck=value;
+        else if(flag==L"--outer-config-sha256")out.outerDigest=digest(value);
+        else if(flag==L"--outer-owned-channel"){
+            demand(!value.empty() && value.size()<=20 && value.find_first_not_of(L"0123456789")==std::wstring::npos,"invalid inherited outer channel");
+            out.outerChannel=std::stoull(value);
+            demand(out.outerChannel>0 && out.outerChannel<UINT64_MAX-1,"invalid inherited outer channel value");
+        }
+        else if(flag==L"--owned-overall-seconds" || flag==L"--owned-normal-grace-seconds" || flag==L"--owned-receipt-wait-seconds"){
+            demand(!value.empty() && value.size()<=3 && value.find_first_not_of(L"0123456789")==std::wstring::npos,"invalid owned-session duration");
+            const DWORD seconds=static_cast<DWORD>(std::stoul(value));
+            demand(seconds>=1 && seconds<=(flag==L"--owned-overall-seconds"?480u:30u),"owned-session duration outside bounded contract");
+            if(flag==L"--owned-overall-seconds")out.ownedOverall=seconds;
+            else if(flag==L"--owned-normal-grace-seconds")out.ownedGrace=seconds;
+            else out.ownedReceiptWait=seconds;
+        }
         else if(flag==L"--gi-vertex")out.vertex=localPath(value);
         else if(flag==L"--gi-pixel")out.pixel=localPath(value);
         else if(flag==L"--expected-gi-vertex-sha256")out.vertexHash=digest(value);
         else if(flag==L"--expected-gi-pixel-sha256")out.pixelHash=digest(value);
         else if(flag==L"--pipeline-root-out")out.rootOutput=localPath(value);
         else if(flag==L"--bindings-out")out.bindingOutput=localPath(value);
+        else if(flag==L"--resource-cbv-probe-bytes"){
+            demand(!value.empty() && value.size()<=5 && value.find_first_not_of(L"0123456789")==std::wstring::npos,"invalid resource CBV probe");
+            out.resourceProbeBytes=static_cast<uint32_t>(std::stoul(value));demand(out.resourceProbeBytes>=1 && out.resourceProbeBytes<=65536,"resource CBV probe must be 1-65536 bytes");}
         else if(flag==L"--bindings-wait-seconds"){
             demand(!value.empty() && value.size()<=3 && value.find_first_not_of(L"0123456789")==std::wstring::npos,"invalid binding wait");
             out.bindingWait=static_cast<DWORD>(std::stoul(value));demand(out.bindingWait>=1 && out.bindingWait<=300,"binding wait must be 1-300 seconds");}
@@ -175,6 +232,14 @@ static Options parse(const std::vector<std::wstring>& args) {
     }
     demand(!out.target.empty() && !out.dll.empty(),"explicit target EXE and bootstrap DLL required");
     demand(!(seen[L"--review"] && out.launch),"review and launch modes are mutually exclusive");
+    const wchar_t* ownedFlags[]={L"--owned-run-directory",L"--owned-run-token",L"--owned-overall-seconds",L"--owned-normal-grace-seconds",L"--acknowledge-owned-force-close"};
+    unsigned ownedFields=0;for(const auto flag:ownedFlags)if(seen[flag])++ownedFields;
+    out.owned=ownedFields!=0;
+    if(out.owned){
+        demand(ownedFields==5,"owned session requires all five explicit options");
+        demand(out.ownedToken.size()==32 && out.ownedToken.find_first_not_of(L"0123456789abcdef")==std::wstring::npos,"owned session requires a lowercase 32-hex token");
+        demand(out.ownedAck==L"exact-created-child-after-normal-quit","owned session requires explicit exact-child force acknowledgement");
+    }
     demand(!out.imports || out.entry,"import observation requires explicit entry rendezvous");
     demand(!out.pipeline || (out.entry && out.imports && !out.vertex.empty() && !out.pixel.empty()
         && !out.vertexHash.empty() && !out.pixelHash.empty() && !out.rootOutput.empty()),"GI creation audit requires entry/import, two shader files/hashes and a new root-output path");
@@ -183,6 +248,35 @@ static Options parse(const std::vector<std::wstring>& args) {
     demand(!out.bindings || (out.pipeline && !out.bindingOutput.empty()),"binding observation requires explicit creation audit and a new output path");
     demand(out.bindings || (out.bindingOutput.empty() && !seen[L"--bindings-wait-seconds"]),"binding options require explicit observation");
     demand(!out.bindings || _wcsicmp(out.bindingOutput.c_str(),out.rootOutput.c_str())!=0,"binding and root output paths must differ");
+    demand(!out.resources || out.bindings,"resource observation requires explicit binding observation");
+    demand(out.resources || !seen[L"--resource-cbv-probe-bytes"],"resource probe requires explicit resource observation");
+    demand(out.resources || out.resourceMode==beamrtResourceAllAllocations,"resource descriptors-only mode requires explicit resource observation");
+    demand(out.resourceMode!=beamrtResourceDescriptorTextures || !out.resourceProbeBytes,"descriptor-only resource observation does not support a CBV probe");
+    demand(out.resourceProfile!=beamrtResourceStorageCompact || (out.resources && out.resourceMode==beamrtResourceDescriptorTextures && !out.resourceProbeBytes),
+        "compact resource storage requires explicit descriptor-only resource observation without CBV probing");
+    demand(!(seen[L"--resource-compact-storage"] && seen[L"--resource-interned-storage"]),"compact and interned resource storage options are mutually exclusive");
+    demand(out.resourceProfile!=beamrtResourceStorageInterned || (out.resources && out.resourceMode==beamrtResourceDescriptorTextures && !out.resourceProbeBytes),
+        "interned resource storage requires explicit descriptor-only resource observation without CBV probing");
+    if(out.ownedReceiptWait){
+        demand(out.owned && out.resources && out.resourceMode==beamrtResourceDescriptorTextures &&
+            out.resourceProfile==beamrtResourceStorageInterned && !out.resourceProbeBytes,
+            "receipt wait requires exact-owned interned descriptor observation without CBV probing");
+        const auto expected=(std::filesystem::path(out.ownedDirectory)/L"recorded-draw.bin").wstring();
+        demand(_wcsicmp(expected.c_str(),out.bindingOutput.c_str())==0,
+            "receipt wait requires recorded-draw.bin inside the owned directory");
+    }
+    demand((out.outerChannel!=0)==!out.outerDigest.empty(),"outer mode requires inherited channel and explicit configuration digest together");
+    if(out.outerChannel){
+        demand(out.owned && !out.ownedReceiptWait,"outer mode requires all five ownership options without host-owned receipt wait");
+        const auto leaf=std::filesystem::path(out.target).filename().wstring();
+        demand(leaf==L"beamrt_startup_fixture.exe" || leaf==L"beamrt_binding_startup_fixture.exe",
+            "outer-created mode is limited to named disposable fixtures; game execution is unavailable");
+        if(out.resources && out.resourceMode==beamrtResourceDescriptorTextures && out.resourceProfile==beamrtResourceStorageInterned){
+            const auto expected=(std::filesystem::path(out.ownedDirectory)/L"recorded-draw.bin").wstring();
+            demand(_wcsicmp(expected.c_str(),out.bindingOutput.c_str())==0,
+                "outer receipt readiness requires recorded-draw.bin inside the owned directory");
+        }
+    }
     if(out.launch)demand(!out.targetHash.empty() && !out.dllHash.empty()
         && out.ack==L"startup-observation-only","launch requires both reviewed hashes and explicit native-insertion acknowledgement");
     return out;
@@ -208,16 +302,48 @@ struct Attributes {
 static void fixtureFault(const Options& options,const std::wstring& target,const wchar_t* stage) {
 #ifdef BEAMRT_STARTUP_TEST_FAULTS
     // Compiled ONLY in the named disposable-fixture host, never production.
-    demand(std::filesystem::path(target).filename()==L"beamrt_startup_fixture.exe","fault host accepts only the disposable fixture");
+    demand(std::filesystem::path(target).filename()==L"beamrt_startup_fixture.exe" || std::filesystem::path(target).filename()==L"beamrt_import_fixture.exe","fault host accepts only the disposable fixtures");
     if(options.arguments.size()>=2 && options.arguments[0]==L"--fixture-host-fault" && options.arguments[1]==stage)
         throw std::runtime_error("fixture-injected startup failure");
+    if(options.arguments.size()>=2 && options.arguments[0]==L"--fixture-host-fault"){
+        const auto& fault=options.arguments[1];
+        // Unclean exits bypass stack unwinding. Bounded hangs let the independent
+        // outer owner demonstrate child cleanup while this host is still alive.
+        // Both exist only in the fault build and only for named disposable EXEs.
+        if(fault==std::wstring(L"crash-")+stage)ExitProcess(77);
+        if(fault==std::wstring(L"hang-")+stage)Sleep(6000);
+    }
 #else
     (void)options;(void)target;(void)stage;
 #endif
 }
-static int launchReviewed(const Options& options,const LockedFile& exe,const LockedFile& dll,const std::wstring& workdir,
-    const std::vector<uint8_t>& vertex,const std::vector<uint8_t>& pixel) {
+static void saveThreadEvidence(const std::wstring& path,const void* data,DWORD bytes){
+    Handle file(CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    win(file.value!=INVALID_HANDLE_VALUE,"new thread evidence artifact");DWORD written=0;
+    win(WriteFile(file.value,data,bytes,&written,nullptr),"save thread evidence");demand(written==bytes,"incomplete thread evidence retained");
+}
+static void saveThreadPrefix(const std::wstring& path,const BeamRTBindingThreadPrefix& source,DWORD pid){
+    const LONG count=source.count;MemoryBarrier();
+    demand(source.bytes==sizeof(source) && source.abi==beamrtBindingThreadABI && source.processId==pid
+        && count>=0 && count<=static_cast<LONG>(beamrtBindingThreadSampleLimit),"malformed thread sample prefix");
+    BeamRTBindingThreadPrefix copy{};copy.bytes=sizeof(copy);copy.abi=beamrtBindingThreadABI;copy.processId=pid;copy.count=count;
+    for(LONG i=0;i<count;++i){copy.samples[i]=source.samples[i];demand(beamrtBindingThreadSampleValid(copy.samples[i]),"invalid thread conflict sample");
+        for(LONG j=0;j<i;++j)demand(copy.samples[i].commandId!=copy.samples[j].commandId || copy.samples[i].generation!=copy.samples[j].generation,"duplicate thread conflict epoch");}
+    saveThreadEvidence(path,&copy,sizeof(copy));
+    std::cout<<"Saved "<<count<<" first thread-conflict samples. CPU metadata only, not concurrent-call or GPU evidence.\n";
+    for(LONG i=0;i<count;++i){const auto& s=copy.samples[i];std::cout<<"  conflict: list="<<s.commandId<<", generation="<<s.generation
+        <<", method="<<beamrtBindingMethodName(s.method)<<", expected thread="<<s.expectedThread<<", caller="<<s.callerThread
+        <<", Reset thread="<<s.resetThread<<", first accepted observed thread="<<s.firstRecordingThread
+        <<", target ready="<<s.targetReady<<", prior observed target PSO="<<s.previouslyObservedTargetPipeline
+        <<", metadata complete before rejection="<<s.metadataWasComplete<<", was available snapshot source="<<s.sourceWasSnapshot<<'\n';}
+}
+static int launchReviewedCore(const Options& options,const LockedFile& exe,const LockedFile& dll,const std::wstring& workdir,
+    const std::vector<uint8_t>& vertex,const std::vector<uint8_t>& pixel,
+    beamrt::unattended::StartupOwnedSession* ownedSession=nullptr,
+    beamrt::unattended::StartupStopChannel* stopChannel=nullptr,
+    beamrt::unattended::OuterChildSession* outerSession=nullptr) {
     // Called only by the explicit reviewed-launch branch, never by review/self-test.
+    if(ownedSession)std::wcout<<L"Exact-owned shutdown ACTIVE: legacy core 'retained' diagnostics do not disable the concurrent owner watcher. Its final owned-exit.json, not an insertion message, records child exit/force status.\n";
     SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};Handle event(CreateEventW(&security,TRUE,FALSE,nullptr));
     win(event.value!=nullptr,"startup receipt event");Handle entryEvent(options.entry?CreateEventW(&security,TRUE,FALSE,nullptr):nullptr);
     if(options.entry)win(entryEvent.value!=nullptr,"entry receipt event");
@@ -247,54 +373,70 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
     Handle bindingStart(options.bindings?CreateEventW(&security,TRUE,FALSE,nullptr):nullptr),bindingRecord(options.bindings?CreateEventW(&security,TRUE,FALSE,nullptr):nullptr);MappingView bindingView;
     if(options.bindings){win(bindingOutput.value && bindingStart.value && bindingRecord.value,"binding handoff handles");
         bindingView.value=MapViewOfFile(bindingOutput.value,FILE_MAP_READ,0,0,sizeof(BeamRTBindingReply));win(bindingView.value!=nullptr,"binding receipt mapping");}
+    Handle resourceOutput(options.resources?CreateFileMappingW(INVALID_HANDLE_VALUE,&security,PAGE_READWRITE,0,sizeof(BeamRTResourceReply),nullptr):nullptr);
+    Handle resourceStart(options.resources?CreateEventW(&security,TRUE,FALSE,nullptr):nullptr);MappingView resourceView;
+    if(options.resources){win(resourceOutput.value && resourceStart.value,"resource handoff handles");
+        resourceView.value=MapViewOfFile(resourceOutput.value,FILE_MAP_READ,0,0,sizeof(BeamRTResourceReply));win(resourceView.value!=nullptr,"read resource receipt mapping");}
     HANDLE events[]={event.value,entryEvent.value,mapping.value,importEvent.value,importMapping.value,
-        pipelineInput.value,pipelineOutput.value,pipelineStart.value,pipelineMatch.value,bindingOutput.value,bindingStart.value,bindingRecord.value};
-    Attributes attributes(events,options.bindings?12:options.pipeline?9:options.imports?5:options.entry?3:1);
+        pipelineInput.value,pipelineOutput.value,pipelineStart.value,pipelineMatch.value,bindingOutput.value,bindingStart.value,bindingRecord.value,resourceOutput.value,resourceStart.value};
+    Attributes attributes(events,options.resources?14:options.bindings?12:options.pipeline?9:options.imports?5:options.entry?3:1);
     STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(startup);startup.lpAttributeList=attributes.list;
     auto command=commandLine(options,exe.path);std::vector<wchar_t> mutableCommand(command.begin(),command.end());mutableCommand.push_back(0);
     PROCESS_INFORMATION process{};
-    win(CreateProcessW(exe.path.c_str(),mutableCommand.data(),nullptr,nullptr,TRUE,
+    if(outerSession)process=outerSession->Setup();
+    else if(ownedSession)process=ownedSession->Create(exe.path,mutableCommand,workdir,startup,TRUE,CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT);
+    else win(CreateProcessW(exe.path.c_str(),mutableCommand.data(),nullptr,nullptr,TRUE,
         CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT,nullptr,workdir.c_str(),&startup.StartupInfo,&process),"create new suspended reviewed child");
     Handle processHandle(process.hProcess),threadHandle(process.hThread);bool resumeAttempted=false;
-    std::wcout<<L"Created reviewed child PID "<<process.dwProcessId<<L"; no existing process is attached.\n";
+    std::wcout<<(outerSession?L"Using outer-created suspended fixture PID ":L"Created reviewed child PID ")<<process.dwProcessId<<L"; no PID lookup or existing-process attachment.\n";
     try {
+        if(stopChannel)demand(stopChannel->PublishContext(process.dwProcessId),"owned process context publication refused before resume");
+        if(outerSession)outerSession->RelayIPC(events,options.resources?14:options.bindings?12:options.pipeline?9:options.imports?5:options.entry?3:1);
+        const auto childHandle=[&](HANDLE local)->uint64_t{return outerSession?outerSession->ChildValue(local):static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(local));};
         fixtureFault(options,exe.path,L"before-insert");
         const auto dllName=asciiDll(dll.path);const char* insert=dllName.c_str();
         // x64 only: no Detours automatic rundll32/helper fallback.
         win(DetourUpdateProcessWithDll(process.hProcess,&insert,1),"insert startup bootstrap into owned suspended child");
+#ifdef BEAMRT_STARTUP_TEST_FAULTS
+        inspectOwnedImports(process.hProcess,exe.path);
+#endif
         fixtureFault(options,exe.path,L"before-payload");
         BeamRTStartupPayload payload{sizeof(payload),1,beamrtStartupMagic,process.dwProcessId,beamrtStartupObservationOnly,
-            static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(event.value)),{0,0}};
+            childHandle(event.value),{0,0}};
         win(DetourCopyPayloadToProcess(process.hProcess,beamrtStartupGuid,&payload,sizeof(payload)),"copy startup receipt payload");
         if(options.entry){
             BeamRTEntryPayload entry{sizeof(entry),1,beamrtEntryMagic,process.dwProcessId,process.dwThreadId,
-                static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(entryEvent.value)),static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(mapping.value)),exe.nativeEntryRva(),0};
+                childHandle(entryEvent.value),childHandle(mapping.value),exe.nativeEntryRva(),0};
             win(DetourCopyPayloadToProcess(process.hProcess,beamrtEntryGuid,&entry,sizeof(entry)),"copy entry rendezvous payload");
         }
         if(options.imports){
             BeamRTImportPayload imports{sizeof(imports),1,beamrtImportMagic,process.dwProcessId,process.dwThreadId,
-                static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(importEvent.value)),static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(importMapping.value)),{0,0}};
+                childHandle(importEvent.value),childHandle(importMapping.value),{0,0}};
             win(DetourCopyPayloadToProcess(process.hProcess,beamrtImportGuid,&imports,sizeof(imports)),"copy separate import-observation payload");
         }
         if(options.pipeline){
             BeamRTPipelinePayload request{sizeof(request),beamrtPipelineHandoffABI,beamrtPipelineMagic,process.dwProcessId,process.dwThreadId,
-                static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(pipelineInput.value)),static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(pipelineOutput.value)),
-                static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(pipelineStart.value)),static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(pipelineMatch.value)),
+                childHandle(pipelineInput.value),childHandle(pipelineOutput.value),
+                childHandle(pipelineStart.value),childHandle(pipelineMatch.value),
                 static_cast<uint32_t>(vertex.size()),static_cast<uint32_t>(pixel.size()),{0,0}};
             win(DetourCopyPayloadToProcess(process.hProcess,beamrtPipelineGuid,&request,sizeof(request)),"copy separate pipeline audit payload");
         }
-        if(options.bindings){BeamRTBindingPayload request{sizeof(request),1,beamrtBindingMagic,process.dwProcessId,process.dwThreadId,
-            static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(bindingOutput.value)),static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(bindingStart.value)),
-            static_cast<uint64_t>(reinterpret_cast<ULONG_PTR>(bindingRecord.value)),{0,0}};
+        if(options.bindings){BeamRTBindingPayload request{sizeof(request),beamrtBindingHandoffABI,beamrtBindingMagic,process.dwProcessId,process.dwThreadId,
+            childHandle(bindingOutput.value),childHandle(bindingStart.value),
+            childHandle(bindingRecord.value),{0,0}};
             win(DetourCopyPayloadToProcess(process.hProcess,beamrtBindingGuid,&request,sizeof(request)),"copy separate binding-observation payload");}
+        if(options.resources){BeamRTResourcePayload request{sizeof(request),beamrtResourceHandoffABI,beamrtResourceMagic,process.dwProcessId,process.dwThreadId,
+            childHandle(resourceOutput.value),childHandle(resourceStart.value),options.resourceProbeBytes,options.resourceMode,options.resourceProfile,0};
+            win(DetourCopyPayloadToProcess(process.hProcess,beamrtResourceGuid,&request,sizeof(request)),"copy separate resource-observation payload");}
         fixtureFault(options,exe.path,L"before-resume");
-        const DWORD previous=ResumeThread(process.hThread);
+        const DWORD previous=outerSession?outerSession->Resume():ownedSession?ownedSession->Resume():ResumeThread(process.hThread);
         if(previous!=DWORD(-1))resumeAttempted=true;
         demand(previous==1,"unexpected initial suspension count; child retained after resume attempt");
         fixtureFault(options,exe.path,L"after-resume");
         HANDLE waits[]={event.value,process.hProcess};const DWORD result=WaitForMultipleObjects(2,waits,FALSE,15000);
         if(result!=WAIT_OBJECT_0){std::wcerr<<L"No startup receipt (wait="<<result<<L"). Child PID "<<process.dwProcessId
-            <<L" is NOT terminated after resume. No renderer activation attempted.\n";return 2;}
+            <<((ownedSession || outerSession)?L" remains managed by its exact owner after resume. No renderer activation attempted.\n":L" is NOT terminated after resume. No renderer activation attempted.\n");
+            DWORD code=STILL_ACTIVE;if(GetExitCodeProcess(process.hProcess,&code))std::wcerr<<L"Observed child exit/status: 0x"<<std::hex<<code<<std::dec<<L".\n";return 2;}
         std::wcout<<L"Startup bootstrap receipt received. BeamRT capture=OFF; BeamRT GPU work=OFF; lighting=UNCHANGED.\n"
             <<L"This proves DLL attach only, not game pass/resource access or stable rendering.\n";
         if(options.entry){
@@ -366,11 +508,24 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
                 if(ready.bytes!=sizeof(ready) || ready.abi!=1 || ready.processId!=process.dwProcessId || ready.initialThread!=process.dwThreadId || ready.callerThread!=process.dwThreadId
                     || FAILED(ready.result) || status.bytes!=sizeof(status) || status.abi!=1 || !status.enabled || !status.healthy || status.ownerThread!=process.dwThreadId
                     || status.attachedSlots<1 || status.attachedSlots>2 || status.targetReady || status.snapshotAvailable){std::wcerr<<L"Binding installation refused/incomplete; child retained.\n";return 9;}
+                if(options.resources){
+                    HANDLE resourceWaits[]={resourceStart.value,process.hProcess};
+                    if(WaitForMultipleObjects(2,resourceWaits,FALSE,15000)!=WAIT_OBJECT_0){std::wcerr<<L"No resource start receipt; child retained.\n";return 13;}
+                    const auto& resourceReady=static_cast<const BeamRTResourceReply*>(resourceView.value)->start;
+                    if(!beamrtResourceStartReceiptValid(resourceReady,process.dwProcessId,process.dwThreadId,options.resourceMode,options.resourceProfile)){
+                        std::wcerr<<L"Resource startup metadata malformed; child retained.\n";return 13;}
+                    // Preserve coherent first-failure evidence even if startup
+                    // became unhealthy before this parent's event read.
+                    saveThreadEvidence(options.bindingOutput+L".resources-start.bin",&resourceReady,sizeof(resourceReady));
+                    if(FAILED(resourceReady.result) || !resourceReady.status.enabled || !resourceReady.status.healthy || resourceReady.status.attachedSlots!=10){
+                        std::wcerr<<L"Resource startup refused; metadata saved, child retained.\n";return 13;}
+                }
                 const auto bindingDeadline=GetTickCount64()+uint64_t(options.bindingWait)*1000;HANDLE recordWaits[]={bindingRecord.value,process.hProcess};DWORD observed=WAIT_TIMEOUT;
                 do{const auto now=GetTickCount64();if(now>=bindingDeadline)break;const auto left=static_cast<DWORD>(bindingDeadline-now);observed=WaitForMultipleObjects(2,recordWaits,FALSE,left>10000?10000:left);
                     if(observed==WAIT_TIMEOUT && GetTickCount64()<bindingDeadline)std::wcout<<L"Waiting for matching recorded draw; no GPU/resource/camera proof.\n"<<std::flush;
                 }while(observed==WAIT_TIMEOUT);
-                if(observed!=WAIT_OBJECT_0){const auto& p=binding.progress;std::wcerr<<L"No matching recorded-draw receipt; child retained. Approximate diagnostics only: targetReady="<<p.targetReady
+                if(observed!=WAIT_OBJECT_0){saveThreadPrefix(options.bindingOutput+L".thread-samples.bin",binding.threadSamples,process.dwProcessId);
+                    const auto& p=binding.progress;std::wcerr<<L"No matching recorded-draw receipt; child retained. Approximate diagnostics only: targetReady="<<p.targetReady
                     <<L", target HRESULT="<<p.targetResult<<L", target attempts="<<p.targetAttempts<<L", target thread="<<p.targetThread<<L", healthy="<<p.healthy
                     <<L", failure="<<p.failureReason<<L", HRESULT="<<p.failureResult<<L", creations="<<p.creations<<L", tagged="<<p.tagged<<L", untracked="<<p.untracked
                     <<L", matched="<<p.matchedDraws<<L", rejected="<<p.rejectedDraws<<L", unsupported="<<p.unsupported<<L", thread rejects="<<p.threadRejected<<L", pressure skipped="<<p.pressureSkipped<<L".\n";return 10;}
@@ -378,6 +533,52 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
                 if(record.bytes!=sizeof(record) || record.abi!=1 || record.processId!=process.dwProcessId || !record.recordThread || state.bytes!=sizeof(state) || state.abi!=1
                     || !state.enabled || !state.healthy || !state.targetReady || !state.snapshotAvailable || state.ownerThread!=process.dwThreadId || state.failureReason
                     || state.serial!=record.snapshot.serial || !beamrtBindingSnapshotValid(record.snapshot)){std::wcerr<<L"Recording receipt malformed/incomplete; child retained.\n";return 11;}
+                const auto& threads=binding.threads;
+                if(threads.bytes!=sizeof(threads) || threads.abi!=beamrtBindingThreadABI || threads.processId!=process.dwProcessId || threads.recordThread!=record.recordThread
+                    || threads.snapshotSerial!=record.snapshot.serial || !threads.diagnostics.enabled || !beamrtBindingThreadDiagnosticsValid(threads.diagnostics)
+                    || threads.diagnostics.threadRejected!=state.threadRejected){std::wcerr<<L"Thread diagnostic receipt malformed/incomplete; child retained.\n";return 12;}
+                saveThreadEvidence(options.bindingOutput+L".threads.bin",&threads,sizeof(threads));
+                saveThreadPrefix(options.bindingOutput+L".thread-samples.bin",binding.threadSamples,process.dwProcessId);
+                if(options.resources){
+                    const auto& resources=*static_cast<const BeamRTResourceReply*>(resourceView.value);
+                    const auto& receipt=resources.record;const auto& observation=receipt.observation;
+                    if(receipt.bytes!=sizeof(receipt) || receipt.abi!=beamrtResourceHandoffABI || receipt.processId!=process.dwProcessId || receipt.recordThread!=record.recordThread
+                        || receipt.snapshotSerial!=record.snapshot.serial || receipt.mode!=options.resourceMode || receipt.reserved
+                        || receipt.profile!=options.resourceProfile || receipt.reserved2
+                        || observation.cbvProbeBytes!=options.resourceProbeBytes || observation.status.ownerThread!=state.ownerThread
+                        || !beamrtResourceObservationValid(observation,record.snapshot,record.recordThread,options.resourceProfile)
+                        || !beamrtResourceCopyFailureValid(receipt.copyFailure,observation.firstFailure,observation.status,receipt.mode,options.resourceProfile)
+                        || (beamrtResourceCopyFailureExpected(observation.firstFailure)
+                            && std::memcmp(&receipt.copyFailure.storageFailure,&observation.storageFailure,sizeof(observation.storageFailure)))){
+                        std::wcerr<<L"Resource receipt malformed/mismatched; child retained.\n";return 13;}
+                    saveThreadEvidence(options.bindingOutput+L".resources.bin",&receipt,sizeof(receipt));
+                    unsigned inputs=0,outputs=0;for(unsigned i=0;i<6;++i)if(observation.srvResults[i]==S_OK)++inputs;
+                    for(unsigned i=0;i<observation.rtvCount;++i)if(observation.rtvResults[i]==S_OK)++outputs;
+                    std::cout<<"CPU resource observation: mode="<<receipt.mode<<", storage profile="<<receipt.profile<<", interval="<<observation.intervalAccepted<<", HRESULT="<<observation.result
+                        <<", SRVs="<<inputs<<"/6, outputs="<<outputs<<"/"<<observation.rtvCount<<", CBV candidate HRESULT="<<observation.cbvResult
+                        <<", healthy="<<observation.status.healthy<<", pressure="<<observation.status.pressure<<", overlaps="<<observation.status.overlaps
+                        <<". Partial/refused observations are not resource/camera/GPU proof.\n";
+                    const auto& storage=observation.storage;
+                    std::cout<<"Descriptor storage: locations="<<storage.locations<<'/'<<storage.locationLimit<<", payloads="<<storage.payloads<<'/'<<storage.payloadLimit
+                        <<", bytes="<<storage.usedBytes<<'/'<<storage.byteLimit<<", failure cause="<<observation.storageFailure.cause
+                        <<", directory bytes="<<storage.directoryBytes<<", location bytes="<<storage.locationBytes<<", heap slots="<<storage.heaps<<'/'<<storage.heapLimit
+                        <<". Exact numeric view sharing only; no resource lease or lighting proof.\n";
+                    const auto& failure=observation.firstFailure;
+                    std::cout<<"First tracker invalidation: kind="<<failure.kind<<", method="<<failure.method<<", thread="<<failure.callerThread
+                        <<", callback="<<failure.callbackOrdinal<<", observed callbacks="<<failure.observedCallbacks
+                        <<", active callbacks="<<failure.activeCallbacks<<", limit="<<failure.capacityLimit<<", attempted="<<failure.attemptedCount
+                        <<", heaps="<<failure.liveHeaps<<", resources="<<failure.liveResources<<", occupied views="<<failure.views<<", draw tokens="<<failure.drawTokens
+                        <<". First recorded under metadata lock; not absolute API-entry/GPU chronology.\n";
+                    const auto& copy=receipt.copyFailure;
+                    std::cout<<"First copy-capacity companion: present="<<copy.present<<", lanes="<<copy.laneCount
+                        <<", failed lane="<<copy.failedLane<<", applied="<<copy.appliedLanes<<", views at entry="<<copy.entryViews
+                        <<", after clear="<<copy.afterClearViews<<". Bounded CPU associations only; no independent failure/GPU proof.\n";
+                }
+                std::cout<<"Thread guard: total="<<threads.diagnostics.threadRejected<<", first epochs="<<threads.diagnostics.firstEpochConflicts
+                    <<", repeat calls="<<threads.diagnostics.repeatedCalls<<", before target="<<threads.diagnostics.beforeTarget
+                    <<", after target="<<threads.diagnostics.afterTarget<<", Reset-pinned/no accepted command="<<threads.diagnostics.resetOwnerOnlyConflicts<<".\n";
+                for(unsigned i=0;i<beamrtBindingMethodCount;++i)if(threads.diagnostics.byMethod[i])
+                    std::cout<<"  "<<beamrtBindingMethodName(i)<<": "<<threads.diagnostics.byMethod[i]<<'\n';
                 Handle artifact(CreateFileW(options.bindingOutput.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));win(artifact.value!=INVALID_HANDLE_VALUE,"create new binding artifact");
                 DWORD bindingWritten=0;win(WriteFile(artifact.value,&record,sizeof(record),&bindingWritten,nullptr),"save CPU binding receipt");demand(bindingWritten==sizeof(record),"binding artifact incomplete");
                 std::wcout<<L"PASS: matching recorded draw; kind="<<record.snapshot.drawKind<<L", count="<<record.snapshot.count<<L", viewport="<<record.snapshot.viewports[0].Width<<L"x"<<record.snapshot.viewports[0].Height
@@ -388,13 +589,91 @@ static int launchReviewed(const Options& options,const LockedFile& exe,const Loc
         return 0;
     }catch(...){
         // Only the new child, still suspended and never allowed to execute user work.
-        if(!resumeAttempted){
+        if(outerSession){outerSession->Fail(ERROR_GEN_FAILURE);std::wcerr<<L"Outer process retains exact child cleanup; setup handles cannot terminate or resume it.\n";}
+        else if(ownedSession){std::wcerr<<L"Owned session will finish exact-child shutdown and verify exit; setup handles cannot terminate.\n";}
+        else if(!resumeAttempted){
             if(!TerminateProcess(process.hProcess,1))std::wcerr<<L"Cleanup failed for owned suspended child PID "<<process.dwProcessId<<L" (Win32="<<GetLastError()<<L").\n";
             else if(WaitForSingleObject(process.hProcess,5000)!=WAIT_OBJECT_0)std::wcerr<<L"Termination not yet confirmed for owned suspended child PID "<<process.dwProcessId<<L".\n";
         }
         else std::wcerr<<L"Child PID "<<process.dwProcessId<<L" retained after resume attempt; no forced live-game termination.\n";
         throw;
     }
+}
+static void saveOwnedExit(const Options& options,int coreResult,
+    const beamrt::unattended::OwnedProcessReport& report,bool beforeResumeTimedOut,
+    const beamrt::unattended::StartupStopChannelReport& channel) {
+    std::string token;for(const wchar_t value:options.ownedToken)token+=static_cast<char>(value);
+    std::ostringstream json;json<<std::boolalpha;
+    json<<"{\"token\":\""<<token<<"\",\"expectedPid\":"<<report.processId
+        <<",\"coreResult\":"<<coreResult<<",\"processExitVerified\":"<<report.processExitVerified
+        <<",\"exitCode\":"<<report.exitCode<<",\"resumeAttempted\":"<<report.resumeAttempted<<",\"resumed\":"<<report.resumed
+        <<",\"normalRequested\":"<<report.normalRequested<<",\"normalCallReturned\":"<<report.normalCallReturned
+        <<",\"normalCallSucceeded\":"<<report.normalCallSucceeded<<",\"normalCallThrew\":"<<report.normalCallThrew
+        <<",\"forceAttempted\":"<<report.forceAttempted<<",\"forceCallSucceeded\":"<<report.forceCallSucceeded
+        <<",\"forceError\":"<<report.forceError<<",\"neverExecutedCleanupAttempted\":"<<report.neverExecutedCleanupAttempted
+        <<",\"neverExecutedCleanupCallSucceeded\":"<<report.neverExecutedCleanupCallSucceeded
+        <<",\"neverExecutedCleanupError\":"<<report.neverExecutedCleanupError<<",\"observationError\":"<<report.observationError
+        <<",\"elapsedMilliseconds\":"<<report.elapsedMilliseconds<<",\"normalRequestMilliseconds\":"<<report.normalRequestMilliseconds
+        <<",\"forceAttemptMilliseconds\":"<<report.forceAttemptMilliseconds<<",\"beforeResumeTimedOut\":"<<beforeResumeTimedOut
+        <<",\"stopQueued\":"<<channel.requestAccepted<<",\"stopCompleted\":"<<channel.publicationCompleted
+        <<",\"stopSucceeded\":"<<channel.publicationSucceeded<<",\"stopError\":"<<channel.publicationError
+        <<",\"stopRequestedAtMilliseconds\":"<<channel.requestedAtMilliseconds
+        <<",\"stopCompletedAtMilliseconds\":"<<channel.completedAtMilliseconds<<"}\n";
+    const auto bytes=json.str();demand(bytes.size()<=8192,"owned exit report too large");
+    const auto path=(std::filesystem::path(options.ownedDirectory)/L"owned-exit.json").wstring();
+    const auto physicalReportPath=std::wstring(L"\\\\?\\")+path;
+    Handle file(CreateFileW(physicalReportPath.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    win(file.value!=INVALID_HANDLE_VALUE,"new owned exit report");DWORD written=0;
+    win(WriteFile(file.value,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr),"write owned exit report");
+    demand(written==bytes.size(),"incomplete owned exit report");win(FlushFileBuffers(file.value),"flush owned exit report");
+}
+static int launchReviewed(const Options& options,const LockedFile& exe,const LockedFile& dll,const std::wstring& workdir,
+    const std::vector<uint8_t>& vertex,const std::vector<uint8_t>& pixel) {
+    // The old manual branch deliberately retains its original lifecycle.
+    if(!options.owned)return launchReviewedCore(options,exe,dll,workdir,vertex,pixel);
+    using namespace beamrt::unattended;
+    std::string token;for(const wchar_t value:options.ownedToken)token+=static_cast<char>(value);
+    if(options.outerChannel){
+        OuterChildSession outer(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(options.outerChannel)),options.ownedToken,
+            options.outerDigest,exe.path,options.ownedOverall,options.ownedGrace,
+            options.resources?14:options.bindings?12:options.pipeline?9:options.imports?5:options.entry?3:1);
+        auto externalChannel=StartupStopChannel::Create(options.ownedDirectory,token);
+        try {
+            const int core=launchReviewedCore(options,exe,dll,workdir,vertex,pixel,nullptr,externalChannel.get(),&outer);
+            if(!core && options.resources && options.resourceMode==beamrtResourceDescriptorTextures && options.resourceProfile==beamrtResourceStorageInterned && !options.resourceProbeBytes)
+                demand(externalChannel->PublishReceiptReady(outer.ProcessId()),"outer CPU receipt-ready publication refused");
+            outer.Complete(core);return core;
+        } catch(...){outer.Fail(ERROR_GEN_FAILURE);throw;}
+    }
+    auto channel=StartupStopChannel::Create(options.ownedDirectory,token);
+    const WatchdogConfig config{uint64_t(options.ownedOverall)*1000,uint64_t(options.ownedGrace)*1000,5000,true};
+    StartupOwnedSession session(config,[&](DWORD pid){return channel->RequestNormal(pid);});
+    int result=1;
+    try {
+        result=launchReviewedCore(options,exe,dll,workdir,vertex,pixel,&session,channel.get());
+        if(!result && options.ownedReceiptWait){
+            const auto current=session.Report();
+            demand(channel->PublishReceiptReady(current.processId),"CPU receipt-ready publication refused");
+            const auto deadline=GetTickCount64()+uint64_t(options.ownedReceiptWait)*1000;
+            // Do not Finish just because an ACK was published: Lua polls the
+            // owner-stop channel before ACK. Only actual exit completes this
+            // rendezvous; the independent original overall deadline stays live.
+            for(;;){
+                const auto state=session.Report();
+                if(state.processExitVerified)break;
+                if(state.normalRequested || state.observationError || GetTickCount64()>=deadline){result=17;break;}
+                Sleep(10);
+            }
+        }
+    }
+    catch(...){const auto report=session.Finish();saveOwnedExit(options,1,report,session.BeforeResumeTimedOut(),channel->Report());throw;}
+    const auto report=session.Finish();
+    saveOwnedExit(options,result,report,session.BeforeResumeTimedOut(),channel->Report());
+    if(result)return result;
+    if(!report.processExitVerified)return 14;
+    if(report.forceAttempted)return 15;
+    if(report.exitCode)return 16;
+    return 0;
 }
 static void selfTest() {
     const std::vector<std::wstring> arguments={L"",L"plain",L"with spaces",L"trailing\\",L"a\\\"b",L"\"",L"\u96ea"};
@@ -407,13 +686,40 @@ static void selfTest() {
     const std::wstring drive=std::filesystem::current_path().root_path().wstring();
     const std::vector<std::wstring> baseline={L"--target",drive+L"fixture.exe",L"--dll",drive+L"fixture.dll"};
     demand(!parse(baseline).launch,"startup default is not review-only");UINT refused=0;
+    demand(!parse(baseline).owned,"owned shutdown activated by default");
     demand(!parse(baseline).entry,"native-entry rendezvous activated by default");
     demand(!parse(baseline).imports,"device-import observation activated by default");
     demand(!parse(baseline).pipeline,"pipeline audit activated by default");
     demand(!parse(baseline).bindings,"binding observer activated by default");
+    demand(!parse(baseline).resources && !parse(baseline).resourceProbeBytes,"resource observer/probe activated by default");
+    demand(parse(baseline).resourceMode==beamrtResourceAllAllocations,"descriptor-only resource mode activated by default");
+    demand(parse(baseline).resourceProfile==beamrtResourceStorageLegacy,"compact resource storage activated by default");
     auto rejects=[&](std::vector<std::wstring> args){bool rejected=false;try{const auto invalid=parse(args);}catch(const std::exception&){rejected=true;}
         demand(rejected,"unsafe startup arguments accepted");++refused;};
     auto bad=baseline;bad.push_back(L"--launch-reviewed");rejects(bad);
+    const std::vector<std::wstring> ownedArguments={L"--owned-run-directory",drive+L"owned-fixture",L"--owned-run-token",L"0123456789abcdef0123456789abcdef",
+        L"--owned-overall-seconds",L"2",L"--owned-normal-grace-seconds",L"1",L"--acknowledge-owned-force-close",L"exact-created-child-after-normal-quit"};
+    auto validOwned=baseline;validOwned.insert(validOwned.end(),ownedArguments.begin(),ownedArguments.end());
+    demand(parse(validOwned).owned && !parse(validOwned).launch,"owned review did not remain inert");
+    auto outerArgs=validOwned;outerArgs[1]=drive+L"beamrt_startup_fixture.exe";
+    outerArgs.insert(outerArgs.end(),{L"--outer-owned-channel",L"64",L"--outer-config-sha256",std::wstring(64,L'a')});
+    demand(parse(outerArgs).outerChannel==64 && !parse(outerArgs).launch,"outer review did not remain inert");
+    bad=outerArgs;bad[1]=drive+L"BeamNG.drive.x64.exe";rejects(bad);
+    bad=outerArgs;bad.insert(bad.end(),{L"--owned-receipt-wait-seconds",L"1"});rejects(bad);
+    for(const auto value:{L"0",L"-1",L"18446744073709551615",L"64x"}){
+        bad=outerArgs;bad[validOwned.size()+1]=value;rejects(bad);
+    }
+    bad=validOwned;bad.insert(bad.end(),{L"--outer-owned-channel",L"64"});rejects(bad);
+    bad=validOwned;bad.insert(bad.end(),{L"--outer-config-sha256",std::wstring(64,L'a')});rejects(bad);
+    bad=baseline;bad[1]=drive+L"beamrt_startup_fixture.exe";
+    bad.insert(bad.end(),{L"--outer-owned-channel",L"64",L"--outer-config-sha256",std::wstring(64,L'a')});rejects(bad);
+    for(size_t omitted=0;omitted<ownedArguments.size();omitted+=2){
+        auto partial=baseline;for(size_t i=0;i<ownedArguments.size();i+=2)if(i!=omitted)partial.insert(partial.end(),{ownedArguments[i],ownedArguments[i+1]});rejects(partial);
+    }
+    for(const auto index:{3u,5u,7u,9u}){auto invalid=validOwned;invalid[baseline.size()+index]=L"invalid";rejects(invalid);}
+    for(const auto duration:{L"0",L"481",L"-1",L"1.5"}){auto invalid=validOwned;invalid[baseline.size()+5]=duration;rejects(invalid);}
+    for(const auto duration:{L"0",L"31"}){auto invalid=validOwned;invalid[baseline.size()+7]=duration;rejects(invalid);}
+    bad=validOwned;bad.insert(bad.end(),{L"--owned-run-token",L"0123456789abcdef0123456789abcdef"});rejects(bad);
     bad=baseline;bad.push_back(L"--observe-device-import");rejects(bad);
     bad=baseline;bad.push_back(L"--observe-gi-creation");rejects(bad);
     bad=baseline;bad.insert(bad.end(),{L"--pipeline-wait-seconds",L"301"});rejects(bad);
@@ -452,8 +758,128 @@ static void selfTest() {
     bad=baseline;bad.push_back(L"--observe-gi-bindings");rejects(bad);
     bad=baseline;bad.insert(bad.end(),{L"--bindings-out",L"C:\\fixture\\record.bin"});rejects(bad);
     bad=baseline;bad.insert(bad.end(),{L"--bindings-wait-seconds",L"301"});rejects(bad);
-    BeamRTBindingPayload binding{sizeof(binding),1,beamrtBindingMagic,123,456,64,72,80,{0,0}};
+    bad=baseline;bad.push_back(L"--observe-gi-resources");rejects(bad);
+    bad=baseline;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"16"});rejects(bad);
+    bad=baseline;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"0"});rejects(bad);
+    bad=baseline;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"65537"});rejects(bad);
+    bad=baseline;bad.push_back(L"--resource-descriptors-only");rejects(bad);
+    bad=baseline;bad.push_back(L"--resource-compact-storage");rejects(bad);
+    bad=baseline;bad.push_back(L"--resource-interned-storage");rejects(bad);
+    auto descriptorArgs=baseline;descriptorArgs.insert(descriptorArgs.end(),{L"--entry-rendezvous",L"--observe-device-import",L"--observe-gi-creation",
+        L"--gi-vertex",drive+L"fixture.vs.cso",L"--gi-pixel",drive+L"fixture.ps.cso",L"--expected-gi-vertex-sha256",std::wstring(64,L'0'),
+        L"--expected-gi-pixel-sha256",std::wstring(64,L'0'),L"--pipeline-root-out",drive+L"root.bin",L"--observe-gi-bindings",
+        L"--bindings-out",drive+L"draw.bin",L"--observe-gi-resources",L"--resource-descriptors-only"});
+    const auto descriptorOptions=parse(descriptorArgs);
+    demand(descriptorOptions.resources && descriptorOptions.resourceMode==beamrtResourceDescriptorTextures && !descriptorOptions.resourceProbeBytes,
+        "explicit descriptor-only resource mode refused");
+    bad=descriptorArgs;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"16"});rejects(bad);
+    bad=descriptorArgs;bad.push_back(L"--resource-descriptors-only");rejects(bad);
+    auto compactArgs=descriptorArgs;compactArgs.push_back(L"--resource-compact-storage");const auto compactOptions=parse(compactArgs);
+    demand(compactOptions.resources && compactOptions.resourceMode==beamrtResourceDescriptorTextures
+        && compactOptions.resourceProfile==beamrtResourceStorageCompact && !compactOptions.resourceProbeBytes,"explicit compact storage profile refused");
+    bad=descriptorArgs;bad.pop_back();bad.push_back(L"--resource-compact-storage");rejects(bad);
+    bad=compactArgs;bad.push_back(L"--resource-compact-storage");rejects(bad);
+    bad=compactArgs;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"16"});rejects(bad);
+    auto internedArgs=descriptorArgs;internedArgs.push_back(L"--resource-interned-storage");const auto internedOptions=parse(internedArgs);
+    auto receiptArgs=internedArgs;receiptArgs.insert(receiptArgs.end(),ownedArguments.begin(),ownedArguments.end());
+    receiptArgs.insert(receiptArgs.end(),{L"--owned-receipt-wait-seconds",L"30"});
+    for(size_t i=0;i<receiptArgs.size();++i)if(receiptArgs[i]==L"--bindings-out")receiptArgs[i+1]=drive+L"owned-fixture\\recorded-draw.bin";
+    demand(parse(receiptArgs).ownedReceiptWait==30 && !parse(receiptArgs).launch,"receipt wait review did not remain inert");
+    for(const auto duration:{L"0",L"31",L"-1",L"1.5"}){auto invalid=receiptArgs;invalid.back()=duration;rejects(invalid);}
+    bad=baseline;bad.insert(bad.end(),{L"--owned-receipt-wait-seconds",L"1"});rejects(bad);
+    bad=validOwned;bad.insert(bad.end(),{L"--owned-receipt-wait-seconds",L"1"});rejects(bad);
+    bad=receiptArgs;bad.push_back(L"--owned-receipt-wait-seconds");bad.push_back(L"1");rejects(bad);
+    bad=receiptArgs;for(size_t i=0;i<bad.size();++i)if(bad[i]==L"--bindings-out")bad[i+1]=drive+L"draw.bin";rejects(bad);
+    bad=receiptArgs;for(auto& value:bad)if(value==L"--resource-interned-storage")value=L"--resource-compact-storage";rejects(bad);
+    demand(internedOptions.resources && internedOptions.resourceMode==beamrtResourceDescriptorTextures
+        && internedOptions.resourceProfile==beamrtResourceStorageInterned && !internedOptions.resourceProbeBytes,"explicit interned storage profile refused");
+    bad=descriptorArgs;bad.pop_back();bad.push_back(L"--resource-interned-storage");rejects(bad);
+    bad=internedArgs;bad.push_back(L"--resource-interned-storage");rejects(bad);
+    bad=internedArgs;bad.insert(bad.end(),{L"--resource-cbv-probe-bytes",L"16"});rejects(bad);
+    bad=internedArgs;bad.push_back(L"--resource-compact-storage");rejects(bad);
+    bad=compactArgs;bad.push_back(L"--resource-interned-storage");rejects(bad);
+    BeamRTResourcePayload resourcePayload{sizeof(resourcePayload),beamrtResourceHandoffABI,beamrtResourceMagic,123,456,64,72,16,beamrtResourceAllAllocations,beamrtResourceStorageLegacy,0};
+    demand(beamrtResourcePayloadValid(&resourcePayload,sizeof(resourcePayload),123,456),"valid resource payload rejected");
+    auto descriptorPayload=resourcePayload;descriptorPayload.mode=beamrtResourceDescriptorTextures;descriptorPayload.cbvProbeBytes=0;
+    demand(beamrtResourcePayloadValid(&descriptorPayload,sizeof(descriptorPayload),123,456),"valid descriptor-only resource payload rejected");
+    auto probedDescriptorPayload=descriptorPayload;probedDescriptorPayload.cbvProbeBytes=16;
+    demand(!beamrtResourcePayloadValid(&probedDescriptorPayload,sizeof(probedDescriptorPayload),123,456),"descriptor-only CBV probe payload accepted");++refused;
+    auto compactPayload=descriptorPayload;compactPayload.profile=beamrtResourceStorageCompact;
+    demand(beamrtResourcePayloadValid(&compactPayload,sizeof(compactPayload),123,456),"valid compact resource payload rejected");
+    auto compactAllAllocations=compactPayload;compactAllAllocations.mode=beamrtResourceAllAllocations;
+    demand(!beamrtResourcePayloadValid(&compactAllAllocations,sizeof(compactAllAllocations),123,456),"compact all-allocation payload accepted");++refused;
+    auto internedPayload=descriptorPayload;internedPayload.profile=beamrtResourceStorageInterned;
+    demand(beamrtResourcePayloadValid(&internedPayload,sizeof(internedPayload),123,456),"valid interned resource payload rejected");
+    auto internedAllAllocations=internedPayload;internedAllAllocations.mode=beamrtResourceAllAllocations;
+    demand(!beamrtResourcePayloadValid(&internedAllAllocations,sizeof(internedAllAllocations),123,456),"interned all-allocation payload accepted");++refused;
+    auto probedInterned=internedPayload;probedInterned.cbvProbeBytes=16;
+    demand(!beamrtResourcePayloadValid(&probedInterned,sizeof(probedInterned),123,456),"interned CBV probe payload accepted");++refused;
+    for(const auto prior:{1u,2u,3u,4u,5u,6u}){auto invalid=resourcePayload;invalid.abi=prior;
+        demand(!beamrtResourcePayloadValid(&invalid,sizeof(invalid),123,456),"prior resource ABI accepted");++refused;}
+    BeamRTResourceStartReceipt refusedStart{};refusedStart.bytes=sizeof(refusedStart);refusedStart.abi=beamrtResourceHandoffABI;
+    refusedStart.processId=123;refusedStart.initialThread=refusedStart.callerThread=456;
+    auto& rs=refusedStart.status;rs.bytes=sizeof(rs);rs.abi=1;rs.enabled=1;rs.ownerThread=456;rs.attachedSlots=10;rs.callbacks=rs.overlaps=1;
+    auto& rf=refusedStart.firstFailure;rf.bytes=sizeof(rf);rf.abi=1;rf.kind=BeamRTResourceFailureOverlap;rf.method=BeamRTResourceMethodCreateSRV;
+    rf.callerThread=456;rf.activeCallbacks=2;rf.callbackOrdinal=rf.observedCallbacks=rf.overlaps=1;
+    auto& storage=refusedStart.storage;storage.bytes=sizeof(storage);storage.abi=2;storage.profile=beamrtResourceStorageLegacy;
+    storage.locationLimit=256;storage.payloadLimit=256;storage.byteLimit=47104;storage.locationBytes=24;
+    auto& storageFailure=refusedStart.storageFailure;storageFailure.bytes=sizeof(storageFailure);storageFailure.abi=2;
+    storageFailure.present=1;storageFailure.atFailure=storage;
+    demand(beamrtResourceStartReceiptValid(refusedStart,123,456),"coherent unhealthy startup evidence lost");
+    auto descriptorStart=refusedStart;descriptorStart.mode=beamrtResourceDescriptorTextures;
+    demand(beamrtResourceStartReceiptValid(descriptorStart,123,456,beamrtResourceDescriptorTextures),"descriptor-only startup mode echo refused");
+    demand(!beamrtResourceStartReceiptValid(descriptorStart,123,456),"mismatched startup resource mode accepted");++refused;
+    auto compactStart=descriptorStart;compactStart.profile=beamrtResourceStorageCompact;
+    compactStart.status.abi=compactStart.firstFailure.abi=beamrtResourceStatusABI(beamrtResourceStorageCompact);
+    compactStart.storage.profile=beamrtResourceStorageCompact;compactStart.storage.locationLimit=1024;compactStart.storageFailure.atFailure=compactStart.storage;
+    demand(beamrtResourceStartReceiptValid(compactStart,123,456,beamrtResourceDescriptorTextures,beamrtResourceStorageCompact),"compact startup profile echo refused");
+    demand(!beamrtResourceStartReceiptValid(compactStart,123,456,beamrtResourceDescriptorTextures),"legacy validator silently accepted compact startup");++refused;
+    demand(!beamrtResourceFailureValid(compactStart.firstFailure,compactStart.status),"legacy validator silently accepted compact status/failure ABI");++refused;
+    auto internedStart=descriptorStart;internedStart.profile=beamrtResourceStorageInterned;
+    internedStart.status.abi=internedStart.firstFailure.abi=beamrtResourceStatusABI(beamrtResourceStorageInterned);
+    internedStart.storage.profile=beamrtResourceStorageInterned;internedStart.storage.locationLimit=4096;
+    internedStart.storage.directoryBytes=internedStart.storage.usedBytes=512;internedStart.storage.locationBytes=14;internedStart.storage.heapLimit=32;
+    internedStart.storageFailure.atFailure=internedStart.storage;
+    demand(beamrtResourceStartReceiptValid(internedStart,123,456,beamrtResourceDescriptorTextures,beamrtResourceStorageInterned),"interned startup profile/empty directory refused");
+    demand(!beamrtResourceStartReceiptValid(internedStart,123,456,beamrtResourceDescriptorTextures),"legacy validator silently accepted interned zero-view startup");++refused;
+    demand(!beamrtResourceStartReceiptValid(internedStart,123,456,beamrtResourceDescriptorTextures,beamrtResourceStorageCompact),"compact validator silently accepted interned zero-view startup");++refused;
+    demand(!beamrtResourceFailureValid(internedStart.firstFailure,internedStart.status),"legacy validator silently accepted interned status/failure ABI");++refused;
+    for(int field=0;field<12;++field){auto invalid=internedStart;
+        if(field==0)invalid.storage.abi=1;if(field==1)invalid.storage.directoryBytes=0;if(field==2)invalid.storage.locationBytes=24;
+        if(field==3)invalid.storage.heaps=1;if(field==4)invalid.storage.heapLimit=0;if(field==5)invalid.storage.usedBytes=0;
+        if(field==6)invalid.storageFailure.abi=1;if(field==7)invalid.storageFailure.attemptedHeaps=1;if(field==8)invalid.storageFailure.reserved2=1;
+        if(field==9)invalid.status.abi=2;if(field==10)invalid.firstFailure.abi=2;if(field==11)invalid.storageFailure.atFailure.directoryBytes=0;
+        demand(!beamrtResourceStartReceiptValid(invalid,123,456,beamrtResourceDescriptorTextures,beamrtResourceStorageInterned),"malformed interned cold-empty/failure sample accepted");++refused;}
+    for(int field=0;field<14;++field){auto invalid=refusedStart;
+        if(field==0)invalid.abi=2;if(field==1)invalid.firstFailure.method=BeamRTResourceMethodNone;if(field==2)invalid.status.healthy=1;
+        if(field==3)invalid.mode=beamrtResourceDescriptorTextures+1;if(field==4)invalid.reserved=1;if(field==5)invalid.abi=3;
+        if(field==6)invalid.profile=beamrtResourceStorageCompact;if(field==7)invalid.reserved2=1;
+        if(field==8)invalid.storage.profile=beamrtResourceStorageCompact;if(field==9)++invalid.storage.locationLimit;
+        if(field==10)++invalid.storage.payloadLimit;if(field==11)++invalid.storage.byteLimit;
+        if(field==12)invalid.storageFailure.present=0;if(field==13)invalid.storageFailure.atFailure.usedBytes=1;
+        demand(!beamrtResourceStartReceiptValid(invalid,123,456),"malformed startup first failure accepted");++refused;}
+    BeamRTResourceCopyFailure emptyCopy{};emptyCopy.bytes=sizeof(emptyCopy);emptyCopy.abi=beamrtResourceCopyFailureABI;
+    demand(!beamrtResourceCopyFailureExpected(rf) && beamrtResourceCopyFailureValid(emptyCopy,rf,rs,beamrtResourceAllAllocations),
+        "canonical empty copy companion refused for a non-copy first cause");
+    for(int field=0;field<8;++field){auto invalid=emptyCopy;
+        if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.present=1;if(field==3)invalid.mode=beamrtResourceDescriptorTextures;
+        if(field==4)invalid.reserved[0]=1;if(field==5)invalid.lanes[0].sourceCpu=8;if(field==6)invalid.firstFailure=rf;if(field==7)invalid.heaps[0].heapId=1;
+        demand(!beamrtResourceCopyFailureValid(invalid,rf,rs,beamrtResourceAllAllocations),"malformed empty copy companion accepted");++refused;}
+    auto copyCause=rf;copyCause.kind=BeamRTResourceFailureViewCapacity;copyCause.method=BeamRTResourceMethodCopyRanges;
+    copyCause.capacityLimit=beamrtResourceViewLimit;copyCause.attemptedCount=beamrtResourceViewLimit+1;copyCause.pressure=1;
+    auto copyStatus=rs;copyStatus.pressure=1;
+    demand(beamrtResourceCopyFailureExpected(copyCause) && !beamrtResourceCopyFailureValid(emptyCopy,copyCause,copyStatus,beamrtResourceAllAllocations),
+        "copy-capacity first cause accepted without its companion");++refused;
+    for(int field=0;field<12;++field){auto invalid=resourcePayload;
+        if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.magic=0;if(field==3)++invalid.processId;if(field==4)++invalid.initialThread;
+        if(field==5)invalid.outputMapping=0;if(field==6)invalid.startEvent=UINT64_MAX;if(field==7)invalid.startEvent=invalid.outputMapping;
+        if(field==8)invalid.cbvProbeBytes=65537;if(field==9)invalid.mode=beamrtResourceDescriptorTextures+1;
+        if(field==10)invalid.profile=beamrtResourceStorageInterned+1;if(field==11)invalid.reserved=1;
+        demand(!beamrtResourcePayloadValid(&invalid,sizeof(invalid),123,456),"invalid resource payload accepted");++refused;}
+    BeamRTBindingPayload binding{sizeof(binding),beamrtBindingHandoffABI,beamrtBindingMagic,123,456,64,72,80,{0,0}};
     demand(beamrtBindingPayloadValid(&binding,sizeof(binding),123,456),"valid binding payload rejected");
+    auto legacyBinding=binding;legacyBinding.abi=1;
+    demand(!beamrtBindingPayloadValid(&legacyBinding,sizeof(legacyBinding),123,456),"legacy binding transport accepted");++refused;
     for(int field=0;field<10;++field){auto invalid=binding;
         if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.magic=0;if(field==3)++invalid.processId;if(field==4)++invalid.initialThread;
         if(field==5)invalid.outputMapping=0;if(field==6)invalid.startEvent=UINT64_MAX;if(field==7)invalid.recordEvent=invalid.startEvent;
@@ -477,6 +903,25 @@ static void selfTest() {
         if(field==31)invalid.srvHeap.identity=0;if(field==32)invalid.samplerHeap.identity=0;if(field==33)invalid.viewports[0].MaxDepth=2;
         if(field==34)invalid.srvHeap.gpu=0;if(field==35)invalid.samplerHeap.stride=0;if(field==36)++invalid.srvCpu[5];
         demand(!beamrtBindingSnapshotValid(invalid),"invalid CPU recording shape accepted");++refused;}
+    BeamRTBindingThreadDiagnostics diagnostic{};diagnostic.bytes=sizeof(diagnostic);diagnostic.abi=beamrtBindingThreadABI;diagnostic.enabled=1;
+    diagnostic.sampleCount=1;diagnostic.threadRejected=3;diagnostic.firstEpochConflicts=1;diagnostic.repeatedCalls=2;
+    diagnostic.beforeTarget=1;diagnostic.afterTarget=2;diagnostic.resetOwnerOnlyConflicts=1;diagnostic.byMethod[10]=3;
+    diagnostic.samples[0]={1,1,10,123,456,123,0,0,0,1,0,0};
+    demand(beamrtBindingThreadDiagnosticsValid(diagnostic),"valid CPU thread evidence rejected");
+    for(int field=0;field<24;++field){auto invalid=diagnostic;
+        if(field==0)--invalid.bytes;if(field==1)++invalid.abi;if(field==2)invalid.enabled=2;if(field==3)invalid.sampleCount=17;
+        if(field==4)++invalid.threadRejected;if(field==5)invalid.firstEpochConflicts=4;if(field==6)++invalid.repeatedCalls;
+        if(field==7)invalid.beforeTarget=4;if(field==8)++invalid.afterTarget;if(field==9)invalid.resetOwnerOnlyConflicts=2;
+        if(field==10)++invalid.droppedEpochSamples;if(field==11)++invalid.byMethod[10];if(field==12){invalid.byMethod[0]=1;--invalid.byMethod[10];}
+        if(field==13)invalid.samples[0].method=24;if(field==14)invalid.samples[0].expectedThread=456;if(field==15)invalid.samples[0].resetThread=789;
+        if(field==16)invalid.samples[0].firstRecordingThread=789;if(field==17)invalid.samples[0].targetReady=2;
+        if(field==18)invalid.samples[0].previouslyObservedTargetPipeline=1;if(field==19)invalid.samples[0].metadataWasComplete=2;
+        if(field==20)invalid.samples[0].sourceWasSnapshot=2;if(field==21)invalid.samples[0].reserved=1;
+        if(field==22){invalid.sampleCount=2;invalid.firstEpochConflicts=2;invalid.repeatedCalls=1;invalid.samples[1]=invalid.samples[0];}
+        if(field==23){invalid.threadRejected=UINT64_MAX;invalid.repeatedCalls=UINT64_MAX-1;invalid.afterTarget=UINT64_MAX-1;
+            invalid.byMethod[10]=UINT64_MAX;invalid.byMethod[11]=1;}
+        demand(!beamrtBindingThreadDiagnosticsValid(invalid),"invalid thread diagnostic evidence accepted");++refused;
+    }
     std::cout<<"PASS: startup review defaults, exact Windows argument roundtrip, "<<refused<<" rejected option/payload cases. No child launched or DLL loaded.\n";
 }
 int wmain(int argc,wchar_t** argv) {
@@ -488,6 +933,14 @@ int wmain(int argc,wchar_t** argv) {
                 <<"Separate --observe-device-import enables image-scoped creation observation only; requires --entry-rendezvous. No capture or GPU work.\n"
                 <<"Separate --observe-gi-creation additionally requires --gi-vertex/--gi-pixel, both --expected-gi-*-sha256 hashes and --pipeline-root-out; optional --pipeline-wait-seconds 1-300.\n"
                 <<"Separate --observe-gi-bindings requires creation observation and a new --bindings-out; optional --bindings-wait-seconds 1-300. CPU recording only, not resources or GI.\n"
+                <<"Separate --observe-gi-resources requires binding observation; writes CPU-only .resources-start.bin/.resources.bin sidecars. Optional --resource-cbv-probe-bytes 1-65536; absent means no CBV probe, never a guessed camera size.\n"
+                <<"Optional --resource-descriptors-only requires --observe-gi-resources, admits supported descriptor textures only, and forbids CBV probing. Legacy all-allocation admission remains the default.\n"
+                <<"Optional --resource-compact-storage additionally requires descriptor-only observation and no CBV probe; its fixed 47104-byte budget has separate 1024-location and 256-payload limits. Legacy 256-location storage remains the default.\n"
+                <<"Optional --resource-interned-storage selects the separate exact 14-byte-location representation (4096 logical work bound, 256 payloads, 32 heap slots, 512-byte in-arena directory); the same 47104-byte arena can stop first. Requires descriptor-only/no CBV and is mutually exclusive with compact storage.\n"
+                <<"ABI7 resource draw receipts append bounded first-copy-capacity metadata only when joined to the original first failure; no matching draw means no later companion artifact.\n"
+                <<"Optional exact-owned shutdown requires all five --owned-run-directory, --owned-run-token, --owned-overall-seconds 1-480, --owned-normal-grace-seconds 1-30, and --acknowledge-owned-force-close exact-created-child-after-normal-quit options. Review remains inert; launch keeps the created child's private master handle and may force only that child after a normal-request attempt and full grace. No Lua shim or GI activation is added.\n"
+                <<"Separate --owned-receipt-wait-seconds 1-30 requires owned interned descriptor observation, no CBV probe and recorded-draw.bin in that directory. After CPU receipt-ready publication it waits for actual child exit before normal shutdown; original overall deadline stays active. It does not decode/ACK receipts or prove engine/GPU behavior.\n"
+                <<"Separate --outer-owned-channel and --outer-config-sha256 join an inherited outer-created disposable child. The host receives setup rights only; IPC relay, resume and shutdown remain in the independent outer runner. Requires all ownership options, forbids host receipt wait, and is unavailable for game targets. Review never opens the channel.\n"
                 <<"Launching requires --launch-reviewed, both --expected-*-sha256 hashes and --acknowledge-native-insertion startup-observation-only. Deployment is not approved by this build.\n";return 0;}
         std::vector<std::wstring> arguments(argv+1,argv+argc);const auto options=parse(arguments);
         LockedFile exe(options.target),dll(options.dll);exe.pe(false);dll.pe(true);asciiDll(dll.path);
@@ -502,6 +955,10 @@ int wmain(int argc,wchar_t** argv) {
             demand(GetFileAttributesW(options.rootOutput.c_str())==INVALID_FILE_ATTRIBUTES,"root output already exists; no overwrite allowed");
             demand(std::filesystem::is_directory(std::filesystem::path(options.rootOutput).parent_path()),"root output parent directory required");}
         if(options.bindings){demand(GetFileAttributesW(options.bindingOutput.c_str())==INVALID_FILE_ATTRIBUTES,"binding output already exists; no overwrite allowed");
+            for(const wchar_t* suffix:{L".threads.bin",L".thread-samples.bin",L".resources.bin",L".resources-start.bin"}){
+                const auto sidecar=options.bindingOutput+suffix;
+                demand(_wcsicmp(sidecar.c_str(),options.rootOutput.c_str())!=0,"thread evidence aliases root output");
+                demand(GetFileAttributesW(sidecar.c_str())==INVALID_FILE_ATTRIBUTES,"thread evidence output already exists; no overwrite allowed");}
             demand(std::filesystem::is_directory(std::filesystem::path(options.bindingOutput).parent_path()),"binding output parent directory required");}
         const auto requested=options.workdir.empty()?std::filesystem::path(exe.path).parent_path().wstring():options.workdir;
         Handle directory(CreateFileW(requested.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,
@@ -516,6 +973,10 @@ int wmain(int argc,wchar_t** argv) {
         std::wcout<<L"Separate imported-device observer: "<<(options.imports?L"ON (observation only)":L"OFF")<<L'\n';
         std::wcout<<L"Separate GI creation audit: "<<(options.pipeline?L"ON (creation only; no draw/lighting change)":L"OFF")<<L'\n';
         std::wcout<<L"Separate GI recording observer: "<<(options.bindings?L"ON (CPU recording only; no resource/GI activation)":L"OFF")<<L'\n';
+        std::wcout<<L"Separate GI resource observer: "<<(options.resources?L"ON (CPU metadata; native GI OFF)":L"OFF")
+            <<L"; admission="<<(options.resourceMode==beamrtResourceDescriptorTextures?L"descriptor textures only (CBV unavailable)":L"all observed allocations")
+            <<L"; storage="<<(options.resourceProfile==beamrtResourceStorageInterned?L"interned (4096 logical locations / 256 payloads / 32 heap slots / 47104 bytes including 512-byte directory)":options.resourceProfile==beamrtResourceStorageCompact?L"compact (1024 locations / 256 payloads / 47104 bytes)":L"legacy (256 locations / 256 payloads / 47104 bytes)")
+            <<L"; CBV diagnostic probe bytes="<<options.resourceProbeBytes<<L'\n';
         if(options.pipeline)std::wcout<<L"Reviewed VS SHA-256: "<<options.vertexHash<<L"\nReviewed PS SHA-256: "<<options.pixelHash<<L'\n';
         if(!options.launch)return 0;
         return launchReviewed(options,exe,dll,workdir,vertex,pixel);

@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import unittest
 from lupa.lua51 import LuaRuntime
+from lupa.luajit21 import LuaRuntime as LuaJITRuntime
 
 ROOT=Path(__file__).resolve().parents[2]
 MOCK=r'''
@@ -29,7 +30,7 @@ scene={objectId=42,gpuData={texture='/art/beamrt/alignment/real.data.png'},polic
 args={trace=trace,scene=scene,width=160,height=90,bias=.03,viewAvailable=true,
   surfels={{position={x=1.23456789,y=2,z=3},radius=1}},
   applySceneConsts=function(effect,data,enabled)effect:setShaderConst('$meshVisibilityEnabled',enabled and 1 or 0)end,
-  prepareFrame=function()prepareCalls=prepareCalls+1 end}
+  prepareFrame=function()prepareCalls=prepareCalls+1;return true end}
 '''
 
 
@@ -103,9 +104,105 @@ class Buffer(unittest.TestCase):
         self.assertIn('failed camera',self.module.getStatus().reason)
 
     def test_prepare_reconfigure_same_inputs_does_not_double_advance_or_disable(self):
-        self.lua.execute('args.prepareFrame=function()prepareCalls=prepareCalls+1;assert(buffer.configure(args))end')
+        self.lua.execute('args.prepareFrame=function()prepareCalls=prepareCalls+1;assert(buffer.configure(args));return true end')
         self.configure();self.render_receiver();self.assertTrue(self.module.consumePreparedFrame())
         self.assertEqual(self.object('GI').consts['$nativeGIVisibilityEnabled'],1)
+
+
+class FramePreparation(unittest.TestCase):
+    """Execute the installed preparation chain, not a source-string guard."""
+    RUNTIMES = (("Lua 5.1", LuaRuntime), ("LuaJIT", LuaJITRuntime))
+
+    def environment(self, runtime):
+        lua = runtime(unpack_returned_tuples=True)
+        lua.execute(MOCK)
+        lua.execute(r'''
+          M={};giCallbacks={};cameraAvailable=true;prepareThrows=false
+          historyValid=1;historyWarmupFrames=8;reflectionHistoryValid=1
+          reflectionHistoryWarmupFrames=8;giFrameIndex=12;surfelRefreshCheckFrames=0
+          giSourceMode=1;pendingSurfelRefresh=false;giUploads=0;reflectionUploads=0
+          PROGRESSIVE={reflectionSampling={frame=7,sampleIndex=6},
+            prepareFrame=function()
+              if prepareThrows then error('failed camera')end
+              return cameraAvailable
+            end}
+          function applyGIShaderConsts()giUploads=giUploads+1 end
+          function applyReflectionShaderConsts()reflectionUploads=reflectionUploads+1 end
+        ''')
+        text = (ROOT/'lua/ge/extensions/beamrt/main.lua').read_text(encoding='utf-8')
+        source = re.search(
+            r'giCallbacks\.preProcess = function\(\).*?(?=\ngiCallbacks\.setShaderConsts)',
+            text, re.S).group()
+        lua.execute(source)
+        module = lua.eval("require('ge/extensions/beamrt/giVisibilityBuffer')")
+        lua.globals().buffer = module
+        lua.execute('args.prepareFrame=M._prepareGIFrame')
+        return lua, module
+
+    def test_missing_camera_never_prepares_then_valid_camera_recovers(self):
+        for name, runtime in self.RUNTIMES:
+            with self.subTest(runtime=name):
+                lua, module = self.environment(runtime)
+                lua.execute('cameraAvailable=false;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                self.assertFalse(module.getStatus().active)
+                self.assertFalse(module.getStatus().framePrepared)
+                self.assertIn('current GI camera unavailable', module.getStatus().reason)
+                self.assertEqual(lua.globals().trace.consts['$nativeGIVisibilityEnabled'], 0)
+                self.assertFalse(lua.globals().objects['BeamRT_GIVisibilityProducerFx'].isEnabled)
+                self.assertFalse(lua.globals().M._visibilityPreparing)
+                self.assertEqual(lua.globals().historyValid, 0)
+                self.assertEqual(lua.globals().historyWarmupFrames, 0)
+                self.assertEqual(lua.globals().reflectionHistoryValid, 0)
+                self.assertEqual(lua.globals().reflectionHistoryWarmupFrames, 0)
+                self.assertEqual(lua.globals().PROGRESSIVE.reflectionSampling.frame, 0)
+                self.assertEqual(lua.globals().giFrameIndex, 12)
+                lua.execute('cameraAvailable=true;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                self.assertTrue(module.getStatus().active)
+                self.assertTrue(module.consumePreparedFrame())
+                self.assertEqual(lua.globals().trace.consts['$nativeGIVisibilityEnabled'], 1)
+                self.assertEqual(lua.globals().giFrameIndex, 13)
+                self.assertEqual(lua.globals().historyWarmupFrames, 1)
+                self.assertFalse(module.getStatus().gpuExecutionVerified)
+                self.assertFalse(module.getStatus().appearanceVerified)
+
+    def test_false_nil_and_nonboolean_success_are_rejected_then_recover(self):
+        for name, runtime in self.RUNTIMES:
+            for result in ('false', 'nil', '1', "'ready'"):
+                with self.subTest(runtime=name, result=result):
+                    lua, module = self.environment(runtime)
+                    lua.execute("args.prepareFrame=function()return "+result+",'not ready' end;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()")
+                    self.assertFalse(module.getStatus().active)
+                    self.assertFalse(module.getStatus().framePrepared)
+                    self.assertIn('not ready', module.getStatus().reason)
+                    self.assertEqual(lua.globals().trace.consts['$nativeGIVisibilityEnabled'], 0)
+                    self.assertFalse(module.consumePreparedFrame())
+                    lua.execute('args.prepareFrame=M._prepareGIFrame;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                    self.assertTrue(module.consumePreparedFrame())
+
+    def test_exception_releases_preparation_guard_and_allows_recovery(self):
+        for name, runtime in self.RUNTIMES:
+            with self.subTest(runtime=name):
+                lua, module = self.environment(runtime)
+                lua.execute('prepareThrows=true;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                self.assertFalse(module.getStatus().active)
+                self.assertFalse(module.getStatus().framePrepared)
+                self.assertFalse(lua.globals().M._visibilityPreparing)
+                self.assertIn('failed camera', module.getStatus().reason)
+                self.assertEqual(lua.globals().trace.consts['$nativeGIVisibilityEnabled'], 0)
+                lua.execute('prepareThrows=false;assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                self.assertTrue(module.consumePreparedFrame())
+
+    def test_direct_and_matching_buffer_preparation_return_explicit_success(self):
+        for name, runtime in self.RUNTIMES:
+            with self.subTest(runtime=name):
+                lua, module = self.environment(runtime)
+                self.assertTrue(lua.globals().giCallbacks.preProcess())
+                self.assertEqual(lua.globals().giFrameIndex, 13)
+                lua.execute('assert(buffer.configure(args));BeamRT_GIVisibilityReceiverFxCallbacks.preProcess()')
+                self.assertEqual(lua.globals().giFrameIndex, 14)
+                self.assertTrue(lua.globals().giCallbacks.preProcess())
+                self.assertEqual(lua.globals().giFrameIndex, 14)
+                self.assertTrue(module.getStatus().framePrepared)
 
 
 class MainBindings(unittest.TestCase):

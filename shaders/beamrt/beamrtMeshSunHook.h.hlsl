@@ -11,12 +11,16 @@ bool beamrtMeshSunReceiver(float4 hpos,float3 worldPosition,out float visibility
     uint depthWidth,depthHeight;prePassDepthBufferTex.GetDimensions(depthWidth,depthHeight);
     // No upsampling, stale resolution or missing named target accepted.
     if(width!=depthWidth||height!=depthHeight||width==0)return false;
+    // NaN comparisons are not evidence of receiver identity. Reject before
+    // integer conversion or matching, instead of inventing an opaque shadow.
+    if(!all(isfinite(hpos.xy)) || !all(isfinite(worldPosition)))return false;
+    if(any(hpos.xy<0) || any(hpos.xy>=float2(width,height)))return false;
     int2 pixel=int2(hpos.xy);
     if(any(pixel<0)||pixel.x>=(int)width||pixel.y>=(int)height)return false;
     float4 value=beamrtMeshSunVisibilityTex.Load(int3(pixel,0));
     // Receiver identity also rejects main-camera masks in reflection captures.
     // A missing/unbound resource returns zero, which is NOT a blocked sentinel.
-    if((value.w!=1&&value.w!=2)||any(abs(value.xyz-worldPosition)>.01))return false;
+    if(!all(isfinite(value)) || (value.w!=1&&value.w!=2)||any(abs(value.xyz-worldPosition)>.01))return false;
     visibility=value.w==2?0:1;
     return true;
 }

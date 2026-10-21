@@ -68,8 +68,11 @@ local function create()
       if not state.active or not config then return end
       -- Prepare GI sampling/surfels BEFORE exporting origins; consumer skips a
       -- second preparation. Normal (inline/off) frame preparation is unchanged.
-      local ok,why=pcall(config.prepareFrame)
-      if not ok then M.disable('GI frame preparation failed: '..tostring(why));return end
+      local ok,prepared,why=pcall(config.prepareFrame)
+      if not ok then M.disable('GI frame preparation failed: '..tostring(prepared));return end
+      -- A normal return is not camera/frame evidence. The owned preparation
+      -- callback must explicitly confirm success before this frame is enabled.
+      if prepared~=true then M.disable('GI frame preparation unavailable: '..tostring(why or 'explicit success required'));return end
       if not state.active or not config then return end
       state.frame=token(state.frame);state.prepared=true;state.reason='receiver/visibility passes scheduled; GPU appearance unverified';apply()
     end,setShaderConsts=apply})
