@@ -259,6 +259,33 @@ int wmain(int argc,wchar_t** argv) {
         auto matureRejected=accumulate(wrongPlane.Get());
         check(std::abs(decoded(matureRejected.Get(),8)[0][3]-currentAlpha)<1.1f/1023,
             "mature retention resurrected history across a receiver-plane rejection");
+        temporal.vector("uMotionOptions",std::array<float,4>{1,0,0,0});
+        temporal.vector("uVehicleHalf",std::array<float,4>{4,1,4,1});
+        temporal.vector("uVehicleCenter",std::array<float,4>{0,3.75f,0,0});
+        temporal.vector("uVehiclePrevCenter",std::array<float,4>{0,3.75f,0,0});
+        for(auto name:{"uVehicleAxisX","uVehiclePrevAxisX"})temporal.vector(name,std::array<float,4>{1,0,0,0});
+        for(auto name:{"uVehicleAxisY","uVehiclePrevAxisY"})temporal.vector(name,std::array<float,4>{0,1,0,0});
+        for(auto name:{"uVehicleAxisZ","uVehiclePrevAxisZ"})temporal.vector(name,std::array<float,4>{0,0,1,0});
+        auto parkedResult=accumulate(maturePrevious.Get());
+        const float parkedAlpha=decoded(parkedResult.Get(),8)[2*8+4][3];
+        check(std::abs(parkedAlpha-matureAlpha)<1.1f/1023,
+            "parked player vehicle was forced to refresh like a moving vehicle");
+        temporal.vector("uVehiclePrevCenter",std::array<float,4>{.00001f,3.75f,0,0});
+        auto jitterResult=accumulate(maturePrevious.Get());
+        check(std::abs(decoded(jitterResult.Get(),8)[2*8+4][3]-parkedAlpha)<1.1f/1023,
+            "negligible rigid-pose jitter disabled parked-vehicle convergence");
+        temporal.vector("uVehiclePrevCenter",std::array<float,4>{.25f,3.75f,0,0});
+        auto movingResult=accumulate(maturePrevious.Get());
+        const float movingAlpha=decoded(movingResult.Get(),8)[2*8+4][3];
+        check(movingAlpha<parkedAlpha-.02f && movingAlpha>=currentAlpha-1.1f/1023,
+            "translated vehicle lost its motion-driven history refresh");
+        temporal.vector("uVehiclePrevCenter",std::array<float,4>{0,3.75f,0,0});
+        temporal.vector("uVehiclePrevAxisX",std::array<float,4>{.9800666f,0,-.1986693f,0});
+        temporal.vector("uVehiclePrevAxisZ",std::array<float,4>{.1986693f,0,.9800666f,0});
+        auto turningResult=accumulate(maturePrevious.Get());
+        check(decoded(turningResult.Get(),8)[2*8+4][3]<parkedAlpha-.02f,
+            "rotating vehicle was incorrectly treated as parked");
+        temporal.vector("uVehicleHalf",std::array<float,4>{0,0,0,0});
         helper.vector("uWaterDeepColor",std::array<float,4>{.015f,.045f,.05f,1});
         helper.scalar("uWaterColorStrength",0);helper.scalar("uWaterSSR",1);
         for(float angle:{0.f,.5f,1.f}){

@@ -1,4 +1,4 @@
-# Coherent SSR experimental backend (tuner v0.118.1)
+# Coherent SSR experimental backend (tuner v0.119.1)
 
 This is an opt-in rendering-only adaptation of an authorized contribution,
 with BeamRT-owned shaders, resources and controls. It is not the integrated
@@ -38,7 +38,8 @@ The older renderer is stopped before enabling this one, and vice versa. GI
 integration is intentionally not simultaneous in this first comparison path.
 
 Full history storage is the default, not half-width interleaving. Trace scale
-starts at 0.5 with the maximum 128-step trace budget; 1 or 4 rays are selectable.
+starts at 0.5 with the maximum 128-step trace budget and four rays. One, four,
+or sixteen rays are selectable; the heavy cleanup action chooses full resolution.
 Retired/hidden standalone switches now actually honor BeamRT parameter values.
 Parameter changes invalidate history. Camera interruption, vehicle switching,
 invalid OBBs and teleports cannot manufacture a valid previous vehicle pose.
@@ -62,7 +63,7 @@ Exposure, global brightness and the older cinematic renderer are unchanged.
 
 ## Try and revert
 
-Reload BeamRT to get tuner v0.118.1. Turn integrated Screen Space Reflections off
+Reload BeamRT to get tuner v0.119.1. Turn integrated Screen Space Reflections off
 in BeamNG graphics settings. Under **Reflections**, choose **Enable reflections**,
 or run in GE Lua after BeamRT is loaded:
 
@@ -78,7 +79,7 @@ backend rather than labeling legacy captures as Coherent output.
 
 Disable using the matching button or `beamrt_main.setCoherentSsrEnabled(false)`.
 **Lighting & GI -> Start / Apply GI** returns to the older GI renderer. Neither operation toggles
-the game's native SSR setting. Full-resolution/four-ray experiments can be costly.
+the game's native SSR setting. Full-resolution/sixteen-ray experiments are very costly.
 
 ## Verification boundary
 
@@ -95,7 +96,7 @@ wave-intrinsic branches. Strict-compiler fixes include a reserved identifier,
 explicit SH coefficient copy, initialized ray arrays and return-flow forms
 accepted by FXC. Compilation does not execute the game's SM6 path.
 
-The D3D12 offline fixture runs 49 checks on RTX 4070 and WARP, including exact
+The D3D12 offline fixture runs 83 checks on RTX 4070 and WARP, including exact
 zero-tint bypass of stock water color, optional tint isolation, packed
 history/sign bits through an actual RGBA32F target, receiver rejection, independent
 water Fresnel references, sample variation, the actual camera-history pass and
@@ -198,6 +199,90 @@ The pre-cleanup legacy source snapshot is documented in `../../archive/README.md
 The separate optional-native research track is described in `../RT_ROADMAP.md`.
 Neither UI cleanup nor separate hosting establishes repository approval, DXR
 support, native game resource access or a completed hardware-RT renderer.
+
+## v0.119 high-sample cleanup
+
+Under Reflections, **Apply high-sample cleanup (slow)** changes sampling and
+reconstruction only: full-resolution tracing (including rough receivers),
+maximum normal trace work, sixteen GGX rays, non-tiled sampling, fresh samples
+each frame, full-resolution temporal accumulation with 0.98 retention,
+surface-aware reconstruction, reflection-motion reprojection, rough stability,
+0.5 spatial reuse, and the rough color pyramid. It does not start the renderer.
+One/four-ray controls remain available; default sampling is now four rays.
+
+**Undo cleanup settings** restores the sampling values from before the first
+cleanup click, even if cleanup was clicked twice. This is a session-only A/B
+action, not another saved preset family. It leaves reflection intensity,
+roughness cutoff, face-on reflectivity, surface-detail composition, water color,
+water strength/waves, sky/overhang fill and procedural puddles untouched.
+
+The sixteen-ray non-tiled mode samples all sixteen cells of a 4x4 sample-domain
+partition each frame, with independently hashed within-cell offsets per pixel
+and frame. This is not a screen-space 4x4 ordered mask or a blue-noise claim.
+Existing one/four-ray sequences are preserved. The production ray storage and
+budget both permit sixteen; mirror mode still uses one ray.
+
+Fixed a retention limit: native history age saturates at 31 in its five-bit
+field. Previously that permanently forced at least 1/32 fresh contribution,
+even at requested retention 0.98. After warmup, requested retention is now
+honored instead of treating packed age as a perpetual sample-count ceiling.
+Receiver validation, clipping, motion-driven refresh and invalidation remain
+in place. This can retain stale signals longer; driving/disocclusion comparisons
+remain necessary. History storage/layout is unchanged.
+
+The tuner now warns when accumulation is disabled or ray animation is frozen.
+It distinguishes warming history from CPU-scheduled reuse, not measured GPU
+success. Retention alone does nothing when Temporal accumulation is unchecked
+or retention is zero. The cleanup button enables the relevant controls together.
+
+Offline GPU tests check stratification, bounds, reproducibility, frame variation,
+frozen-sequence behavior, ray-budget limits, and the actual packed temporal pass
+at mature age, including receiver-plane rejection. For a smooth sample-domain
+test function with known mean, MSE fell from 0.0146844 (four rays) to 0.00064822
+(sixteen rays) on RTX 4070. That is NOT a measurement of BeamNG image noise or
+proof of unbiased physical reflection radiance. All eighteen production entries
+compile under strict FXC SM5 and DXC SM6. No game reload was performed.
+
+For the in-game check: enable reflections, apply cleanup, keep the same road
+camera still for a few seconds, then slowly pan/drive. Compare beauty, Raw trace
+and History; undo to compare the same material settings. Do not tune brightness
+down to hide noise. More samples cannot recover hidden/off-screen geometry,
+match the engine's water-wave phase, or guarantee zero visible noise in motion.
+
+## v0.119.1 parked-vehicle accumulation repair
+
+Native temporal accumulation previously classified every receiver within the
+valid player-vehicle bounds as moving, even with identical previous/current
+poses. This forced at least 0.20 fresh contribution (at most 0.80 history),
+overriding the requested 0.98 retention and disabling reflection-motion
+reprojection for parked vehicles. A new GPU regression reproduced this failure
+before the repair; the four added cases all pass afterward.
+
+The rigid previous point and normal are still reconstructed. Moving status now
+requires receiver displacement above max(0.5 mm, 0.05 native pixel footprints).
+The point displacement detects both translation and rotation; tiny pose jitter
+does not force the moving floor. The non-native temporal fallback uses the same
+movement test instead of using vehicle membership as movement evidence. This
+is a bounded heuristic and still uses an approximate player OBB, not an object-ID
+mask or deformation motion. Slowly moving sub-threshold receivers can be treated
+as stationary; existing geometry, normal, clipping and invalidation gates remain.
+
+GPU cases check identical parked poses, negligible pose jitter, real translation
+and rotation through the production packed temporal pass. Both shader-model
+builds compile. This is not proof of clean in-game car reflections, nor a repair
+for SSR visibility limitations, GI differences or every source of speckling.
+
+The Temporal accumulation checkbox OFF intentionally freezes the ray sequence;
+it does not remove its grain. ON advances samples for averaging. A static noisy
+image can therefore look calmer than animated samples whose history is not
+converging. Its tooltip now states that distinction. After reload, keep it ON,
+apply high-sample cleanup and compare a parked car with slow movement. Do not
+repeatedly reset history during the convergence test.
+
+The Lighting & GI route and Coherent route are mutually exclusive. Comparing
+those buttons compares lighting/composition as well as reflection sampling, not
+just an accumulation toggle. No lighting brightness, material gain, water tint,
+native settings, game launch or DLL work changed in this repair.
 
 ## Extra-camera capture probe (parked; not a reflection fallback yet)
 

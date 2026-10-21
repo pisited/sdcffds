@@ -1,4 +1,4 @@
--- BeamRT v0.119: high-sample reflection cleanup and explicit accumulation state.
+-- BeamRT v0.120: opt-in PTGI + Coherent SSR, with legacy reflections excluded.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -57,7 +57,17 @@ do
   end
   M._planarCapture = require(key)
 end
-local VERSION = "0.119"
+-- Keep the previous lease if restoration failed, so disable can retry it.
+do
+  local key = "ge/extensions/beamrt/ptgiCoherent"
+  local previous = package.loaded[key]
+  if previous and previous.release then
+    local ok, released = pcall(previous.release)
+    if ok and released then package.loaded[key] = nil end
+  end
+  M._ptgiCoherent = require(key)
+end
+local VERSION = "0.120"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -2906,6 +2916,7 @@ end
 
 function PROGRESSIVE.reflectionHit.sync()
   local selected = enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested)
     and (debugMode == MODE_IDS.reflections
     or debugMode == MODE_IDS.diffusegi and reflectionOverlayEnabled
       and PROGRESSIVE.rayDebugMode < 0.5 and PROGRESSIVE.lightingDiagnostic.mode < 0.5)
@@ -2918,6 +2929,7 @@ end
 function PROGRESSIVE.waterPreview.sync()
   local water = PROGRESSIVE.waterPreview
   local selected = water.enabled and enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested)
     and not materialCachePublication and not CLEAN_RADIANCE.build
     and not PROGRESSIVE.reflectionSourceProbeTarget
     and (debugMode == MODE_IDS.diffusegi or debugMode == MODE_IDS.reflections)
@@ -2931,11 +2943,17 @@ local function syncEffectEnablement()
   -- 0.40 native SSR replaces RT1's F0/retro data before our late passes.
   -- Until an early producer is verified, pause our shading, not native SSR.
   local renderRequested = enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    renderRequested = renderRequested and M._coherentRenderer.getStatus().active
+      and PROGRESSIVE.rayDebugMode < 0.5 and PROGRESSIVE.lightingDiagnostic.mode < 0.5
+      and not materialCachePublication and not CLEAN_RADIANCE.build
+  end
   local useGI = renderRequested and debugMode == MODE_IDS.diffusegi
   local useGIDiagnostic = useGI and (PROGRESSIVE.rayDebugMode > 0.5
     or PROGRESSIVE.lightingDiagnostic.mode > 0.5)
   local useSurfelCache = useGI and giSourceMode ~= 1 and PROGRESSIVE.rayDebugMode < 0.5
-  local useReflections = renderRequested and (
+  local useReflections = renderRequested
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested) and (
     debugMode == MODE_IDS.reflections
     or (debugMode == MODE_IDS.diffusegi and reflectionOverlayEnabled and not useGIDiagnostic))
   local useBufferDiagnostic = renderRequested and debugMode == MODE_IDS.bufferdiag
@@ -3066,7 +3084,10 @@ end
 
 function M.setCoherentSsrEnabled(value)
   if type(value) ~= "boolean" then return false, "Coherent SSR enabled must be boolean." end
-  if not value then return M._coherentRenderer.disable("Coherent SSR disabled by user") end
+  if not value then
+    if M._ptgiCoherent and M._ptgiCoherent.requested then return M.disable() end
+    return M._coherentRenderer.disable("Coherent SSR disabled by user")
+  end
   if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
     or PROGRESSIVE.reflectionSourceProbeTarget or materialCachePublication or CLEAN_RADIANCE.build
     or PROGRESSIVE.reflectionDiagnostic.mode ~= 0 or PROGRESSIVE.lightingAudit.getStatus().active then
@@ -3087,7 +3108,35 @@ function M.getCoherentSsrStatus()
 end
 
 function M.setCoherentSsrParameter(name, value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested
+    and ((name == 'hdrComposite' and value ~= true) or (name == 'debugView' and value ~= 0)) then
+    return false, 'Disable combined rendering before changing reflection stage or diagnostic view.'
+  end
   return M._coherentRenderer.setParameter(name, value)
+end
+
+function M.getPtgiCoherentStatus()
+  return M._ptgiCoherent.getStatus(M)
+end
+
+function M.setPtgiCoherentEnabled(value)
+  if type(value) ~= 'boolean' then return false, 'Combined rendering enabled must be boolean.' end
+  if not value then return M.disable() end
+  if M._coherentRenderer.getOptions().hdrComposite ~= true then
+    return false, 'Combined rendering requires Coherent HDR composition.'
+  end
+  if PROGRESSIVE.rayDebugMode > 0 or PROGRESSIVE.lightingDiagnostic.mode > 0 then
+    return false, 'Restore PTGI beauty before starting combined rendering.'
+  end
+  local ok, reason=M.setCoherentSsrEnabled(true)
+  if not ok then return false, reason end
+  if not M.setMode('lighting') then M.disable(); return false,'Could not select PTGI lighting.' end
+  M._ptgiCoherent.requested=true
+  ok, reason=M.enable()
+  if not ok then M.disable(); return false,reason end
+  M._ptgiCoherent.reason='PTGI before Coherent SSR; CPU pass state only. Visual output unverified.'
+  M.openTuner()
+  return true
 end
 
 function M.startReflectionCaptureProbe(mode, height)
@@ -4048,6 +4097,9 @@ function M.setMode(requestedMode)
   if modeId == nil then
     beamrtLog("E", "unknown mode '" .. tostring(requestedMode) .. "'; expected off, lighting, reflections, bufferdiag, voxeldda, normals, depth, roughness, position, raymarch, geometry, orientedgeometry, surfels, surfelcompare, surfelradiance, or hybridcoverage")
     return false
+  end
+  if M._ptgiCoherent and M._ptgiCoherent.requested and modeId ~= MODE_IDS.diffusegi then
+    if not M.disable() then return false end
   end
   if PROGRESSIVE.reflectionDiagnostic.mode > 0 and modeId ~= MODE_IDS.reflections then
     M.setReflectionDiagnostic("off", false)
@@ -5415,6 +5467,7 @@ function M.setEchoHistoryGuard(value)
 end
 
 function M.setRayHitDiagnostic(value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested and value ~= 'off' then return false end
   if type(value) ~= "string" then
     beamrtLog("E", "ray-hit diagnostic must be off, hits, steps, distance, normals, confidence, error, rejection, direction, or viewalignment")
     return false
@@ -5634,6 +5687,7 @@ function M.getProgressiveStatus()
 end
 
 function M.setLightingDiagnostic(value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested and value ~= 'off' then return false end
   local name = type(value) == "string" and string.lower(value) or ""
   local modes = {off = 0, raw = 1, filtered = 2, contribution = 3, receiver = 4,
     direct = 5, roughness = 6, f0 = 7, reflectance = 8,
@@ -6265,6 +6319,9 @@ function M.resetHistory()
 end
 
 function M.setReflectionsEnabled(value)
+  if value == true and M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false, 'Coherent owns reflections; the legacy SSR overlay must remain off.'
+  end
   if type(value) ~= "boolean" then
     beamrtLog("E", "reflections enabled must be a boolean")
     return false
@@ -6805,7 +6862,7 @@ end
 M._tunerPanels = {}
 
 function M._tunerPanels.lighting()
-  im.TextWrapped("GI and persistent world lighting are retained. Starting GI stops the separate screen-space reflection backend.")
+  im.TextWrapped("Combined PTGI + Coherent is available above. Start / Apply GI below selects the older standalone lighting route.")
   if im.Button("Start / Apply GI") then M.start() end
   im.SameLine()
   if im.Button("Reset legacy history") then M.resetHistory() end
@@ -7356,6 +7413,11 @@ local function drawTuningWindow()
     customActive = M._coherentRenderer.getStatus().active
     customStatus = customActive and "Custom renderer: Coherent SSR passes enabled (visual output unverified)"
       or "Custom renderer: Coherent SSR requested, required passes unavailable"
+    if M._ptgiCoherent and M._ptgiCoherent.requested then
+      customActive = M.getPtgiCoherentStatus().active
+      customStatus = customActive and 'Custom renderer: PTGI + Coherent SSR (experimental; visual output unverified)'
+        or 'Custom renderer: combined rendering incomplete'
+    end
   end
   im.TextColored(
     customActive and im.ImVec4(0.3, 1.0, 0.45, 1.0) or im.ImVec4(1.0, 0.65, 0.25, 1.0),
@@ -7398,7 +7460,7 @@ function M.enable()
     local stopped, reason = M._planarCapture.stop("Switched to the older renderer")
     if not stopped then return false, reason end
   end
-  if M._coherentRenderer then
+  if M._coherentRenderer and not (M._ptgiCoherent and M._ptgiCoherent.requested) then
     local stopped, reason = M._coherentRenderer.disable("Switched to the older BeamRT renderer")
     if not stopped then return false, reason end
   end
@@ -7420,6 +7482,11 @@ function M.enable()
     beamrtLog("W", "BeamRT effects were missing; recreating objects")
     createObjects()
   end
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    if not M._coherentRenderer.getStatus().active then return false,'Coherent SSR is not active.' end
+    local staged, reason=M._ptgiCoherent.prepare()
+    if not staged then return false,reason end
+  end
   enabledRequested = true
   if debugMode == MODE_IDS.diffusegi then
     resetTemporalHistory("enable requested", false)
@@ -7436,6 +7503,7 @@ end
 
 -- One-command entry point for the user-facing beauty mode.
 function M.start()
+  if M._ptgiCoherent and M._ptgiCoherent.requested and not M.disable() then return false end
   M.setMode("lighting")
   M.openTuner()
   return M.enable()
@@ -7450,8 +7518,9 @@ function M.disable()
   M.setMeshLocalLightsEnabled(false)
   enabledRequested = false
   syncEffectEnablement()
+  local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return nativeRestored and coherentStopped and captureStopped
+  return nativeRestored and coherentStopped and captureStopped and combinedRestored
 end
 
 function M.toggle()
@@ -7846,6 +7915,10 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
   if not frameDelta or frameDelta <= 0 then frameDelta = finiteNumber(dtRaw) end
   if not frameDelta or frameDelta <= 0 then frameDelta = 1 / 60 end
   if M._coherentRenderer then M._coherentRenderer.update(frameDelta) end
+  if M._ptgiCoherent and M._ptgiCoherent.requested and not M.getPtgiCoherentStatus().active then
+    beamrtLog('W','Combined rendering stopped: pass loss, stage change, or renderer conflict.')
+    M.disable()
+  end
   PROGRESSIVE.reflectionReconstruction.frameDelta = math.min(math.max(frameDelta, 1 / 240), 1 / 15)
   -- Timing belongs to the current render. Shader/UI callbacks only read it;
   -- an interrupted active reflection history must start fresh after the gap.
@@ -7867,6 +7940,7 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Graphics settings changed") end
   if M._coherentRenderer then M._coherentRenderer.disable("Graphics settings changed; re-enable explicitly") end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("graphics/settings changed") end
@@ -7916,6 +7990,7 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission changed") end
   if M._coherentRenderer then M._coherentRenderer.disable("Mission changed; re-enable explicitly") end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("mission changed") end
@@ -7953,12 +8028,14 @@ function M.onClientStartMission()
 end
 
 function M.onClientEndMission()
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission ended") end
   if M._coherentRenderer then M._coherentRenderer.disable("Mission ended") end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("mission ended") end
 end
 
 function M.onExtensionUnloaded()
+  if M._ptgiCoherent then M.disable() end
   if M._planarCapture then M._planarCapture.release("BeamRT unloaded") end
   if M._coherentRenderer then M._coherentRenderer.release("BeamRT unloaded") end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("BeamRT unloaded") end

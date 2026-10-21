@@ -12,7 +12,7 @@ EffectModule.name = "BeamRT Coherent SSR"
 EffectModule.description = "Opt-in screen-space reflections for roads, vehicles and water. Sky and enclosure fill are separate heuristic experiments."
 EffectModule.category = "Post Processing/Lighting"
 
-EffectModule.version = "0.119.0"
+EffectModule.version = "0.119.1"
 EffectModule.shaderCodeVersion = EffectModule.version
 
 

@@ -184,6 +184,25 @@ class CoherentRenderer(unittest.TestCase):
             renderer.update(1/60)
             self.assertFalse(renderer.getStatus().active)
 
+    def test_accumulation_toggle_freezes_and_restarts_sampling_not_just_history(self):
+        for lua, renderer in self.runtimes():
+            self.assertTrue(renderer.enable())
+            lua.execute('for i=1,12 do renderer.update(1/60)end')
+            self.assertTrue(renderer.getStatus().accumulationReady)
+            self.assertGreater(lua.eval('objects.BeamRTCoherentPostEffectTracePass._const["$uFrame"]'),0)
+            self.assertTrue(renderer.setParameter('temporalDenoising',False))
+            lua.execute('for i=1,3 do renderer.update(1/60)end')
+            for key in ('$uFrame','$uStochasticTemporalRate','$uTemporalStrength'):
+                self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTracePass._const[...]',key),0,key)
+            self.assertFalse(renderer.getStatus().accumulationScheduled)
+            self.assertTrue(renderer.setParameter('temporalDenoising',True))
+            renderer.update(1/60)
+            self.assertFalse(renderer.getStatus().accumulationReady)
+            lua.execute('for i=1,12 do renderer.update(1/60)end')
+            self.assertTrue(renderer.getStatus().accumulationReady)
+            self.assertGreater(lua.eval('objects.BeamRTCoherentPostEffectTracePass._const["$uFrame"]'),0)
+            self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTracePass._const["$uStochasticTemporalRate"]'),1)
+
     def test_heavy_noise_cleanup_is_reversible_and_preserves_appearance(self):
         for lua, renderer in self.runtimes():
             for key, value in [('faceOnReflectance', .04), ('roughnessEnd', .5),

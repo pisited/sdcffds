@@ -36,7 +36,7 @@ function M.reflections(im, api)
   end
   im.SameLine()
   if im.Button('Reset reflection history##BeamRTSSR') then api._coherentRenderer.resetHistory() end
-  im.TextWrapped('Screen-space backend. Integrated BeamNG SSR must be off. Lighting & GI uses a separate, mutually exclusive renderer.')
+  im.TextWrapped('Screen-space reflections. Integrated BeamNG SSR must be off. Lighting & GI offers the optional combined PTGI mode.')
   if not status.requested or not status.active then im.TextWrapped(status.reason) end
   if not status.accumulationConfigured then
     im.TextWrapped('Accumulation OFF: history retention has no effect. Rough reflections can remain noisy.')
@@ -69,6 +69,10 @@ function M.reflections(im, api)
     im.SameLine()
     if im.Button('Four rays##BeamRTSSR') then set(api,'stochasticRayCount',4) end
     im.SameLine()
+    if im.Button('Six rays##BeamRTSSR') then set(api,'stochasticRayCount',6) end
+    im.SameLine()
+    if im.Button('Eight rays##BeamRTSSR') then set(api,'stochasticRayCount',8) end
+    im.SameLine()
     if im.Button('Sixteen rays##BeamRTSSR') then set(api,'stochasticRayCount',16) end
     im.TextUnformatted('Rays per trace pixel: ' .. tostring(options.stochasticRayCount))
     toggle(im,api,options,'stochasticSSR','Rough GGX reflections')
@@ -77,7 +81,7 @@ function M.reflections(im, api)
   end
   if im.CollapsingHeader1('Noise and temporal stability') then
     toggle(im,api,options,'temporalDenoising','Temporal accumulation',
-      'Must be ON with retention above zero to average fresh samples. More retention cleans still scenes but can retain trails; motion/disocclusion still rejects history.')
+      'ON animates and averages fresh samples. OFF freezes a noisy sample pattern; it does not clean it. Retention must be above zero. More retention can retain trails; motion/disocclusion still rejects history.')
     toggle(im,api,options,'nativeTemporal','Full-resolution history')
     toggle(im,api,options,'traceSubpixelJitter','Subpixel sampling')
     toggle(im,api,options,'geometryReconstruction','Surface-aware reconstruction')
@@ -139,6 +143,15 @@ function M.draw(im, api, panels)
   for _, tab in ipairs({{'Reflections','reflections'}, {'Lighting & GI','lighting'},
     {'Diagnostics','diagnostics'}, {'Legacy','legacy'}}) do
     if im.BeginTabItem(tab[1]) then
+      if tab[2] == 'lighting' and api.getPtgiCoherentStatus then
+        local combined=api.getPtgiCoherentStatus()
+        if im.Button(combined.requested and 'Disable PTGI + Coherent##BeamRTCombined' or 'Enable PTGI + Coherent##BeamRTCombined') then
+          local ok,reason=api.setPtgiCoherentEnabled(not combined.requested)
+          if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
+        end
+        im.TextWrapped('Experimental: PTGI diffuse lighting, then Coherent reflections. Older SSR and water overlay stay off. Existing ray count and lighting tuning are retained.')
+        im.TextWrapped(combined.reason)
+      end
       if tab[2] == 'reflections' then M.reflections(im,api) end
       if tab[2] == 'diagnostics' then M.diagnostics(im,api) end
       if panels[tab[2]] then panels[tab[2]]() end

@@ -552,6 +552,15 @@ float3 BrtcPlayerVehiclePrevious(float3 local)
            uVehiclePrevAxisY.xyz * local.y + uVehiclePrevAxisZ.xyz * local.z;
 }
 
+bool BrtcRigidReceiverMoved(float3 currentPoint, float3 previousPoint, float pixelFootprint)
+{
+    // A valid vehicle pose is not evidence of motion. Ignore subpixel numeric/
+    // idle-pose jitter, but measure the receiver point (not just box translation)
+    // so rotation with a stationary vehicle center is detected too.
+    float threshold = max(0.0005, max(pixelFootprint, 0.0) * 0.05);
+    return length(previousPoint-currentPoint) > threshold;
+}
+
 bool BrtcSegmentHitsBoxT(float3 a, float3 b, float3 center,
                         float3 axisX, float3 axisY, float3 axisZ, float3 halfSize, out float enter, out float leave)
 {
@@ -728,7 +737,10 @@ float4 BrtcDenoiseLegacy(PFXVertToPix IN, float2 uv, float4 projectionParams)
             historyWorldPos = BrtcPlayerVehiclePrevious(local);
             if (!BrtcSolvePreviousUV(prevCam, historyWorldPos - prevCam.eye, historyUV, historyDepth))
                 return current;
-            motionSource = BEAMRT_COH_MOTION_VEHICLE;
+            float footprint = eyeDepth01 * max(length(currentRayDU)/gDepthSize.x,
+                length(currentRayDV)/gDepthSize.y);
+            if (BrtcRigidReceiverMoved(worldPos,historyWorldPos,footprint))
+                motionSource = BEAMRT_COH_MOTION_VEHICLE;
         }
         else if (!onVehicle && uMotionOptions.y > 0.5 &&
                  BrtcPlayerVehicleUncovered(prevCam.eye, worldPos, BuildProjectionBasis(IN, uv, worldPos)))

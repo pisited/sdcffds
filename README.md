@@ -1,3 +1,22 @@
+# BeamRT v0.119.1 — parked-vehicle accumulation repair
+
+Parked cars no longer receive the moving-vehicle history-refresh floor merely
+because their rigid pose is available. GPU regressions reproduce the old failure
+and check parked, jittering, translating and rotating receivers. Temporal
+accumulation OFF freezes noisy samples; ON advances and averages them. In-game
+appearance still requires comparison. See [the repair notes](native/lighting/COHERENT_SSR.md#v01191-parked-vehicle-accumulation-repair).
+
+## v0.119 — high-sample reflection cleanup
+
+The Reflections tab now has a reversible **Apply high-sample cleanup (slow)**
+action: full-resolution sixteen-ray sampling and temporal accumulation, without
+changing brightness, material reflectivity or stock water color. Four-ray sampling
+is the new default. Mature history now honors requested retention, and the tuner
+warns when accumulation is off. This is still screen-space rendering; zero noise
+and off-screen reflections are not guaranteed. In-game appearance is unverified.
+See [Coherent SSR notes](native/lighting/COHERENT_SSR.md#v0119-high-sample-cleanup)
+for changes, checks and the stillness/motion comparison.
+
 # BeamRT v0.108 — native device bootstrap and honest feature availability
 
 The offline no-ReShade worker now supports exact-adapter device acquisition and

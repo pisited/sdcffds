@@ -114,7 +114,9 @@ float4 BrtcAccumulateNative(PFXVertToPix IN, float2 uv)
                 float3 localNormal = float3(dot(current.normal,uVehicleAxisX.xyz), dot(current.normal,uVehicleAxisY.xyz), dot(current.normal,uVehicleAxisZ.xyz));
                 previousNormal = normalize(uVehiclePrevAxisX.xyz * localNormal.x + uVehiclePrevAxisY.xyz * localNormal.y + uVehiclePrevAxisZ.xyz * localNormal.z);
                 solved = BrtcSolvePreviousUV(cam, previousPoint - cam.eye, surfaceUV, expectedDepth);
-                moving = true; motionSource = BEAMRT_COH_MOTION_VEHICLE;
+                float footprint = current.depth * max(length(du)/gDepthSize.x,length(dv)/gDepthSize.y);
+                moving = BrtcRigidReceiverMoved(receiverPoint,previousPoint,footprint);
+                if (moving) motionSource = BEAMRT_COH_MOTION_VEHICLE;
             }
             else if (!onVehicle && uMotionOptions.y > 0.5 &&
                      BrtcPlayerVehicleUncovered(cam.eye, receiverPoint, BuildProjectionBasis(IN, uv, receiverPoint)))
