@@ -1,4 +1,97 @@
-# BeamRT v0.121.1 — outdoor shadow-selection assistance
+# BeamRT v0.122.1 — combined beauty recovery and source isolation
+
+The user reports that v0.122 can claim both renderers are active while reflections
+are not visibly working. CPU-enabled objects alone do not validate the GPU image.
+The named HDR target is therefore no longer the default. Combined mode defaults
+to the earlier ordered `$backBuffer` route, keeping the same PTGI-before-Coherent
+staging. **Combined pipeline experiments → Try named HDR source** retains the
+explicit-target experiment as a session-only, inactive-only choice for A/B tests.
+The exact visual regression remains unconfirmed; this is a baseline recovery and
+isolation change, not proof that VL or the named target caused the reported image.
+
+Starting combined mode now restores GI ray/lighting diagnostics and Coherent's
+debug display to beauty after capture guards and safe teardown. Previously a
+retained Coherent debug view could make startup fail the combined beauty contract,
+and GI debug modes were rejected rather than cleared. No sampling or appearance
+settings are reset. Enabling Coherent manually while GI is active now joins them
+through combined startup instead of taking the standalone path that disables GI.
+Repeated enable on a complete combined graph is idempotent.
+
+Volumetrics remain off whenever combined rendering starts (normal safe teardown
+stops them first). Test the baseline without haze, then opt into haze or named HDR
+one at a time. **Log combined pipeline state** is a read-only CPU report of actual
+pass enablement, stages, shader, source/aux textures and targets, plus diagnostic
+and haze state. It is not a GPU readback. An incomplete combined graph logs this
+report before stopping, where serialization is available. Live recovery still
+needs an in-game comparison.
+
+## v0.122 — explicit PTGI handoff and local haze experiment
+
+Combined rendering now gives Coherent an explicit current-frame scene producer:
+native scene → PTGI compose → `#BeamRT_PTGI_LitScene` → Coherent color pyramid,
+trace/rebuild, and final composition. PTGI composition writes a full-resolution
+RGBA16F HDR target instead of the generic `$backBuffer` in combined mode only.
+No extra copy/blit pass is added. The early shared depth pyramid still runs
+before PTGI and deliberately keeps its native source; it must not read a target
+that has not been produced yet. Each renderer retains its own history. This is
+one-way lit-radiance sharing, not shared ray hits, a unified denoiser, or recursive
+multi-bounce transport. CPU binding/order checks stop both on producer/consumer
+loss; actual current-frame GPU execution and improved appearance remain unverified.
+Disable restores the PTGI target fields and standalone Coherent scene binding.
+
+Quality-neutral CPU reductions format vehicle-motion vectors once, suppress
+identical native uniform uploads per owned pass, and avoid a duplicate Coherent
+history reset on combined lamp updates. No ray count, resolution, trace reach,
+history precision, roughness cutoff or lighting-strength preset was reduced.
+There is no measured in-game FPS improvement claim.
+
+**Lighting & GI → Volumetric lighting experiment → Try local lamp haze** is
+explicit opt-in and starts no renderer. Start GI/Coherent first; keep automatic
+lamp shadows and nearby priority enabled. It reads up to four selected native
+SpotLights (color, brightness, cone, range and transform), without changing them.
+A separate HDR pass after Coherent integrates an optically thin scattering
+approximation with eight deterministic midpoint samples per lamp, up to 50 m
+and the visible surface depth. It adds only scattering radiance with One/One
+blending to the live destination, without sampling/copying scene color or
+overwriting the GI/SSR result. No animated noise, accumulation or global fog
+edits; it stays outside GI/SSR histories and is not itself reflected by SSR.
+It adds GPU work when active and disables its pass when no supported lamp is
+available or brightness/density is zero. Point lights, vehicle props, emissive
+geometry and lamps without readable fields are not supported by this prototype.
+
+**This is not shadowed volumetrics.** Native shadow-atlas visibility is not
+bound. Visible foreground depth ends the camera ray, but walls or pipes between
+the lamp and a scattering point can still leak light. This is an appearance
+experiment, not a replacement for the native lamp shadows or physically
+calibrated photometric transport. Test around factory pipes before expanding it.
+Disable-all, mission/settings changes, extension reload/unload, pass loss and
+active captures stop it; it does not silently resume. Cleanup failures retain
+owned objects for an explicit retry. Live GPU behavior still needs testing.
+
+Offline shader check for this experiment:
+`tools/tests/validate_postfx_shaders.py --volumes --game-root <installed-game> --compiler <fxc>`.
+
+## v0.121.2 — low-FPS nearby shadow discovery
+
+Nearby lamp discovery no longer waits behind the level-wide queue when the
+native `findObjectList` / `SOTLight` spatial query is available. Before background
+inspection, it requests an 80 m camera-centered box, inspects at most 256 hits,
+and processes the nearest 16 supported enabled lamps through the same ownership
+and rollback path. Priority still selects at most eight. It refreshes on the
+next update after moving 4 m, or every 0.25 seconds while stationary. Missing or
+rejected native queries fall back to incremental discovery; status identifies
+which route is active. Opening the tuner still makes no shadow writes.
+
+Background throughput now scales with real frame time: 24–192 inspections and
+16–128 validations per update, with a soft 2 ms CPU limit on extra work above
+the original 24/16 minimums. This avoids making a 15 FPS player wait through a
+strict 24-per-frame queue, without synchronously flushing thousands of writes.
+Individual native calls and the spatial query cannot be preempted by that limit.
+Native shadow allocation/rendering remains engine-controlled: this removes our
+queue delay for nearby query hits, not a promise of instant or cheaper GPU
+shadows. Low-FPS live behavior still needs an in-game comparison.
+
+## v0.121.1 — outdoor shadow-selection assistance
 
 The v0.121 automatic path raised every smaller lamp shadow map to 1024. This
 does not guarantee GPU selection and can add pressure to the installed renderer's

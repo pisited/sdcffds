@@ -1,4 +1,4 @@
--- BeamRT v0.121.1: camera-relevant native shadow priority and atlas pressure.
+-- BeamRT v0.122.2: rebuild both sides of combined restart; isolate haze output.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -18,6 +18,15 @@ package.loaded["ge/extensions/beamrt/reflectionLab"] = nil
 package.loaded["ge/extensions/beamrt/tunerUI"] = nil
 M._tunerUI = require("ge/extensions/beamrt/tunerUI")
 M._automaticLampShadows = true -- session preference; renderer startup opts in
+do
+  local key='ge/extensions/beamrt/localVolumes'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._localVolumes=require(key)
+end
 do
   local key='ge/extensions/beamrt/nearbyLampShadows'
   local previous=package.loaded[key]
@@ -77,7 +86,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.121.1"
+local VERSION = "0.122.2"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -3106,6 +3115,16 @@ function M.setCoherentSsrEnabled(value)
     if M._ptgiCoherent and M._ptgiCoherent.requested then return M.disable() end
     return M._coherentRenderer.disable("Coherent SSR disabled by user")
   end
+  if M._ptgiCoherent and (M._ptgiCoherent.requested or effectIsEnabled(GI_EFFECT_NAME)) then
+    if M._ptgiCoherent.requested and M.getPtgiCoherentStatus().active then return true end
+    return M.setPtgiCoherentEnabled(true)
+  end
+  return M._enableCoherentBackend()
+end
+
+-- Shared startup implementation, not the public switch that joins active GI.
+-- Keeps combined startup non-recursive and all capture/compatibility guards.
+function M._enableCoherentBackend(beauty)
   if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
     or PROGRESSIVE.reflectionSourceProbeTarget or materialCachePublication or CLEAN_RADIANCE.build
     or CLEAN_RADIANCE.materialBatch
@@ -3116,6 +3135,18 @@ function M.setCoherentSsrEnabled(value)
   if not compatibility.safe then return false, compatibility.reason end
   local stopped = M.disable()
   if not stopped then return false, "Could not safely release the previous rendering experiment." end
+  if beauty then
+    -- Starting combined beauty must not inherit a ray/debug display from the
+    -- previous session. Do this only after capture guards and safe teardown.
+    if PROGRESSIVE.rayDebugMode>0 and not M.setRayHitDiagnostic('off') then return false,'Could not restore GI ray beauty.' end
+    if PROGRESSIVE.lightingDiagnostic.mode>0 and not M.setLightingDiagnostic('off') then return false,'Could not restore GI lighting beauty.' end
+    local restored,why=M._coherentRenderer.setParameter('debugView',0)
+    if not restored then return false,why end
+    -- Coherent releases/recreates its graph on every restart. PTGI must not
+    -- carry cached child targets/shader requirements across that teardown.
+    local rebuilt,why=M._rebuildPtgiPassGraph()
+    if not rebuilt then return false,why end
+  end
   local ok, reason = M._coherentRenderer.enable()
   if ok and M._startAutomaticLampShadows then M._startAutomaticLampShadows() end
   beamrtLog(ok and "I" or "W", "Coherent SSR: " .. tostring(reason or M._coherentRenderer.getStatus().reason))
@@ -3139,16 +3170,62 @@ function M.getPtgiCoherentStatus()
   return M._ptgiCoherent.getStatus(M)
 end
 
+function M.setPtgiNamedHandoffEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if M._ptgiCoherent.requested or M._ptgiCoherent.hasLease() then
+    return false,'Disable combined rendering before changing the scene-source experiment.'
+  end
+  M._ptgiCoherent.namedHandoff=value
+  return true
+end
+
+function M.logPtgiCoherentStatus()
+  local report={combined=M.getPtgiCoherentStatus(),reflections=M.getCoherentSsrStatus(),
+    rayDebugMode=PROGRESSIVE.rayDebugMode,lightingDiagnostic=PROGRESSIVE.lightingDiagnostic.mode,
+    volumes=M._localVolumes and M._localVolumes.getStatus() or nil,passes={}}
+  for _,name in ipairs({'BeamRT_GIFx','BeamRT_ComposeFx','BeamRTCoherentPostEffectHiZ0Pass',
+    'BeamRTCoherentPostEffectColorMip1Pass','BeamRTCoherentPostEffectTracePass',
+    'BeamRTCoherentPostEffectNativeResolvePass','BeamRTCoherentPostEffectApplyPass','BeamRT_LocalVolumeFx'}) do
+    local ok,pass=pcall(function()
+      local object=findObject(name)
+      if not object then return {name=name,missing=true} end
+      return {name=name,enabled=object:isEnabled(),time=object:getField('renderTime',0),
+        bin=object:getField('renderBin',0),priority=object.renderPriority,
+        target=object:getField('target',0),format=object:getField('targetFormat',0),
+        source=object:getField('texture',0),aux=object:getField('texture',3),skip=object:getField('skip',0),
+        shader=object:getField('shader',0)}
+    end)
+    report.passes[#report.passes+1]=ok and pass or {name=name,error=tostring(pass)}
+  end
+  beamrtLog('I','Combined pipeline CPU bindings (not GPU texture contents): '..jsonEncode(report))
+  return report
+end
+
+function M.getLocalVolumeStatus() return M._localVolumes.getStatus() end
+function M.setLocalVolumesEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._localVolumes.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before enabling local haze.' end
+  if not effectIsEnabled(GI_EFFECT_NAME) and not M._coherentRenderer.getStatus().active then
+    return false,'Start GI or Coherent before enabling local haze.'
+  end
+  if M._coherentRenderer.getStatus().active and not M._coherentRenderer.getOptions().hdrComposite then
+    return false,'Local haze requires the Coherent HDR stage.'
+  end
+  return M._localVolumes.enable()
+end
+function M.setLocalVolumeParameter(key,value) return M._localVolumes.setParameter(key,value) end
+
 function M.setPtgiCoherentEnabled(value)
   if type(value) ~= 'boolean' then return false, 'Combined rendering enabled must be boolean.' end
   if not value then return M.disable() end
+  if M.getPtgiCoherentStatus().active then return true end
   if M._coherentRenderer.getOptions().hdrComposite ~= true then
     return false, 'Combined rendering requires Coherent HDR composition.'
   end
-  if PROGRESSIVE.rayDebugMode > 0 or PROGRESSIVE.lightingDiagnostic.mode > 0 then
-    return false, 'Restore PTGI beauty before starting combined rendering.'
-  end
-  local ok, reason=M.setCoherentSsrEnabled(true)
+  local ok, reason=M._enableCoherentBackend(true)
   if not ok then return false, reason end
   local selected, modeOK=pcall(M.setMode,'lighting')
   if not selected or not modeOK then
@@ -3163,10 +3240,14 @@ function M.setPtgiCoherentEnabled(value)
     return false,called and reason or tostring(ok)
   end
   if not M.getPtgiCoherentStatus().active then
+    pcall(M.logPtgiCoherentStatus)
     M.disable()
     return false,'Combined CPU pass graph did not become ready.'
   end
-  M._ptgiCoherent.reason='PTGI before Coherent SSR; CPU pass state only. Visual output unverified.'
+  M._ptgiCoherent.reason=M._ptgiCoherent.namedHandoff
+    and 'Experimental named HDR source; GPU execution and appearance unverified.'
+    or 'Baseline ordered PTGI + Coherent route. Named HDR source and local haze are off on startup; GPU appearance unverified.'
+  beamrtLog('I','Combined route enabled: '..M._ptgiCoherent.getSceneSource()..'; local haze off at startup.')
   M.openTuner()
   return true
 end
@@ -3285,6 +3366,45 @@ local function deleteObject(name)
   if object then
     object:delete()
   end
+end
+
+function M._rebuildPtgiPassGraph()
+  if enabledRequested or M._ptgiCoherent.hasLease() then
+    return false,'Stop rendering and release PTGI staging before rebuilding its passes.'
+  end
+  local roots={GI_EFFECT_NAME,PROGRESSIVE.inputPrep.receiverEffectName,SURFEL_CACHE_EFFECT_NAME}
+  local names={GI_EFFECT_NAME,PROGRESSIVE.inputPrep.receiverEffectName,
+    PROGRESSIVE.inputPrep.auxiliaryEffectName,TEMPORAL_EFFECT_NAME,COMPOSE_EFFECT_NAME,COPY_EFFECT_NAME,
+    PROGRESSIVE.svgf.effectName,PROGRESSIVE.svgf.copyEffectName,
+    SURFEL_CACHE_EFFECT_NAME,SURFEL_CACHE_COPY_EFFECT_NAME}
+  for _,name in ipairs(PROGRESSIVE.svgf.atrousEffectNames) do names[#names+1]=name end
+  local ok,why=pcall(function()
+    for _,name in ipairs(roots) do assert(not effectIsEnabled(name),'PTGI root still enabled: '..name) end
+    -- Validate before deleting anything. ShaderData, materials, native lights,
+    -- settings, geometry and the frozen material publications are not rebuilt.
+    for _,name in ipairs(names) do
+      local object=findObject(name)
+      assert(not object or tostring(object:getField('shader',0)):match('^BeamRT_'),
+        'Unrecognized PTGI pass: '..name)
+    end
+    for _,name in ipairs(names) do
+      deleteObject(name) -- parent deletion may already have removed its children
+      assert(not findObject(name),'PTGI pass could not be released: '..name)
+    end
+    M.sharedMeshGI.bound=false
+    createSurfelCacheEffect()
+    PROGRESSIVE.inputPrep.createEffects()
+    createGIEffect()
+    for _,name in ipairs(names) do assert(findObject(name),'PTGI pass missing after rebuild: '..name) end
+  end)
+  if not ok then
+    for _,name in ipairs(roots) do pcall(setEffectEnabled,name,false) end
+    beamrtLog('E','PTGI restart failed: '..tostring(why))
+    return false,'PTGI pass rebuild failed: '..tostring(why)
+  end
+  resetTemporalHistory('PTGI pass graph rebuilt for combined startup',false)
+  beamrtLog('I','PTGI pass graph rebuilt for combined startup; tuning retained.')
+  return true
 end
 
 local function destroyObjects()
@@ -7620,6 +7740,8 @@ function M.enable()
     if not M._coherentRenderer.getStatus().active then return false,'Coherent SSR is not active.' end
     local staged, reason=M._ptgiCoherent.prepare()
     if not staged then return false,reason end
+    local bound, bindingReason=M._coherentRenderer.setSceneColorSource(M._ptgiCoherent.getSceneSource())
+    if not bound then return false,bindingReason end
   end
   enabledRequested = true
   if debugMode == MODE_IDS.diffusegi then
@@ -7645,6 +7767,7 @@ function M.start()
 end
 
 function M.disable()
+  local volumesStopped=not M._localVolumes or M._localVolumes.disable('BeamRT disabled')
   local lampsRestored = not M._nearbyLampShadows or M._nearbyLampShadows.disable('BeamRT disabled')
   local captureStopped = not M._planarCapture or M._planarCapture.stop("BeamRT disabled")
   local coherentStopped = not M._coherentRenderer or M._coherentRenderer.disable("BeamRT disabled")
@@ -7656,7 +7779,7 @@ function M.disable()
   syncEffectEnablement()
   local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored
+  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped
 end
 
 function M.toggle()
@@ -8046,7 +8169,7 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
     and (not PROGRESSIVE.lightingAudit.getStatus or not PROGRESSIVE.lightingAudit.getStatus().active)
     and M._nearbyLampShadows.update(dtReal) then
     resetTemporalHistory('native lamp shadow cohort changed',false)
-    if M._coherentRenderer then M._coherentRenderer.resetHistory() end
+    if M._coherentRenderer and not (M._ptgiCoherent and M._ptgiCoherent.requested) then M._coherentRenderer.resetHistory() end
   end
   if M._planarCapture then M._planarCapture.update() end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.update() end
@@ -8062,8 +8185,19 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
     resetTemporalHistory('GI render interrupted', false)
   end
   if M._ptgiCoherent and M._ptgiCoherent.requested and not M.getPtgiCoherentStatus().active then
-    beamrtLog('W','Combined rendering stopped: pass loss, stage change, or renderer conflict.')
+    beamrtLog('W','Combined rendering stopped: '..tostring(M.getPtgiCoherentStatus().reason)
+      ..'; Coherent: '..tostring(M.getCoherentSsrStatus().reason))
+    pcall(M.logPtgiCoherentStatus)
     M.disable()
+  end
+  if M._localVolumes and M._localVolumes.requested then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+      or PROGRESSIVE.reflectionSampling.isFrozen()
+      or (M._coherentRenderer and M._coherentRenderer.getStatus().active and not M._coherentRenderer.getOptions().hdrComposite)
+      or (not effectIsEnabled(GI_EFFECT_NAME) and not (M._coherentRenderer and M._coherentRenderer.getStatus().active)) then
+      M._localVolumes.disable('Local haze stopped for capture or inactive rendering; re-enable explicitly.')
+    else M._localVolumes.update(frameDelta,M._nearbyLampShadows) end
   end
   PROGRESSIVE.reflectionReconstruction.frameDelta = math.min(math.max(frameDelta, 1 / 240), 1 / 15)
   -- Timing belongs to the current render. Shader/UI callbacks only read it;
@@ -8086,6 +8220,7 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._localVolumes then M._localVolumes.disable('Graphics/settings changed') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Graphics/settings changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Graphics settings changed") end
@@ -8137,6 +8272,7 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._localVolumes then M._localVolumes.disable('Mission changed') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission changed") end
@@ -8176,6 +8312,7 @@ function M.onClientStartMission()
 end
 
 function M.onClientEndMission()
+  if M._localVolumes then M._localVolumes.disable('Mission ended') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission ended') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission ended") end
@@ -8184,6 +8321,7 @@ function M.onClientEndMission()
 end
 
 function M.onExtensionUnloaded()
+  if M._localVolumes then M._localVolumes.disable('BeamRT unloaded') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('BeamRT unloaded') end
   if M._ptgiCoherent then M.disable() end
   if M._planarCapture then M._planarCapture.release("BeamRT unloaded") end

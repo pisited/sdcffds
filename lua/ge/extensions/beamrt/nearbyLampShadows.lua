@@ -11,6 +11,14 @@ local validationCursor, visited, skipped = 1, 0, 0
 local pool, prioritized = {}, {}
 local priorityAssist, priorityElapsed, priorityRejected = true, 1, 0
 local scanCycles, newLightsThisScan = 0, 0
+local priorityCamera, nearbyLookup = nil, 'Not checked yet'
+local function cameraPosition()
+  if not core_camera or type(core_camera.getPosition)~='function' then return end
+  local ok,p=pcall(core_camera.getPosition)
+  if ok and p and type(p.x)=='number' and type(p.y)=='number' and type(p.z)=='number'
+    and p.x==p.x and p.y==p.y and p.z==p.z
+    and math.abs(p.x)<math.huge and math.abs(p.y)<math.huge and math.abs(p.z)<math.huge then return p end
+end
 local function truth(value)
   if value == true or value == 1 or value == '1' or value == 'true' then return true end
   if value == false or value == 0 or value == '0' or value == 'false' then return false end
@@ -70,6 +78,7 @@ function M.disable(reason)
   validationCursor,visited,skipped=1,0,0
   pool,prioritized={},{}
   priorityElapsed,priorityRejected,scanCycles,newLightsThisScan=1,0,0,0
+  priorityCamera,nearbyLookup=nil,'Not checked yet'
   M.reason = reason or 'Original lamp shadow settings restored.'
   return true
 end
@@ -176,15 +185,65 @@ local function assistField(entry,key,base,wanted)
   return true
 end
 
-local function updatePriority()
+-- The engine spatial query bypasses the level-wide queue. Its existence and
+-- SOTLight flag are optional: unavailable/rejected queries retain the safe scan.
+-- Query enumeration is read-only; only the nearest 16 supported enabled lamps
+-- enter the ordinary ownership/rollback path. Bound Lua inspection to 256 hits.
+local function inspectNearby(p)
+  if type(findObjectList)~='function' or not SOTLight or not Box3F or not vec3 then
+    nearbyLookup='Background fallback (native nearby query unavailable)'
+    return false
+  end
+  local ok,candidates=pcall(function()
+    local box=Box3F()
+    box:setExtents(vec3(160,160,160));box:setCenter(vec3(p.x,p.y,p.z))
+    local hits=findObjectList(box,SOTLight,0)
+    assert(type(hits)=='table','Nearby query unavailable')
+    local result,ids={},{}
+    for i=1,math.min(256,#hits) do
+      local readable,item=pcall(function()
+        local raw=hits[i]
+        local o=(type(raw)=='number' or type(raw)=='string') and scenetree.findObject(raw) or raw
+        if o and Sim and type(Sim.upcast)=='function' then o=Sim.upcast(o) or o end
+        local class=o and o:getClassName()
+        if class~='SpotLight' and class~='PointLight' then return end
+        local id=o:getID()
+        if ids[id] or (pool[id] and pool[id].object==o and pool[id].blocked) then return end
+        ids[id]=true
+        if truth(o:getField('isEnabled',0))~=true then return end
+        local q=o:getPosition()
+        local d=(q.x-p.x)^2+(q.y-p.y)^2+(q.z-p.z)^2
+        if d==d and d<=80*80 then return {id=id,distance=d} end
+      end)
+      if readable and item then result[#result+1]=item end
+    end
+    table.sort(result,function(a,b)
+      if a.distance==b.distance then return a.id<b.id end
+      return a.distance<b.distance
+    end)
+    return result
+  end)
+  if not ok then nearbyLookup='Background fallback (native nearby query rejected)';return false end
+  nearbyLookup='Native nearby query active'
+  local changed,nearIds=false,{}
+  for i=1,math.min(16,#candidates) do
+    local id=candidates[i].id
+    changed=applyAutomatic(id) or changed
+    nearIds[id]=true
+  end
+  return changed,nearIds
+end
+
+local function updatePriority(nearIds)
   local nextSet, candidates={},{}
   if priorityAssist and core_camera and type(core_camera.getPosition)=='function' then
     local readable,p=pcall(core_camera.getPosition)
     if not readable or not p or type(p.x)~='number' or type(p.y)~='number' or type(p.z)~='number'
       or p.x~=p.x or p.y~=p.y or p.z~=p.z then return false end
     if p then
-      for id,entry in pairs(pool) do
-        local q=entry.position
+      for id in pairs(nearIds or pool) do
+        local entry=pool[id]
+        local q=entry and entry.position
         if q and entry.enabled and not entry.blocked then
           local d=(q.x-p.x)^2+(q.y-p.y)^2+(q.z-p.z)^2
           if d==d and d<=80*80 then candidates[#candidates+1]={id=id,distance=d} end
@@ -230,17 +289,37 @@ local function updateAutomatic(dt)
   local ok,why=pcall(function()
     local step=tonumber(dt)
     if not step or step~=step or step==math.huge or step==-math.huge then step=1/60 end
-    elapsed=elapsed+math.max(0,math.min(step,1))
-    priorityElapsed=priorityElapsed+math.max(0,math.min(step,1))
+    step=math.max(0,math.min(step,1))
+    elapsed=elapsed+step
+    priorityElapsed=priorityElapsed+step
+    local p=cameraPosition()
+    local moved=p and (not priorityCamera or
+      (p.x-priorityCamera.x)^2+(p.y-priorityCamera.y)^2+(p.z-priorityCamera.z)^2>=4*4)
+    local refresh=priorityElapsed>=.25 or moved
     if cursor>#queue and elapsed>=5 then discover() end
-    -- At most 24 discovery/inspection jobs and 16 owned-light validations per
-    -- frame, regardless of total level size. No distance/camera dependence.
-    for _=1,24 do
+    -- Near-camera work runs first, even on the initial low-FPS frame. No
+    -- whole-level flush, allocations for distant maps, or extra renderer start.
+    local nearIds
+    if refresh and p then
+      local nearbyChanged
+      nearbyChanged,nearIds=inspectNearby(p)
+      changed=nearbyChanged or changed
+      priorityCamera={x=p.x,y=p.y,z=p.z}
+    end
+    -- Keep roughly the old per-second throughput at low FPS, not merely 24
+    -- jobs per slow frame. Extra work has a soft 2 ms CPU budget and hard caps;
+    -- individual native calls cannot be interrupted. No catch-up backlog.
+    local started=os.clock()
+    local jobs=math.max(24,math.min(192,math.ceil(1440*step)))
+    for job=1,jobs do
+      if job>24 and os.clock()-started>=.002 then break end
       local token=queue[cursor];if token==nil then break end
       cursor=cursor+1
       changed=applyAutomatic(token) or changed
     end
-    for _=1,math.min(16,#validationIds) do
+    local checks=math.max(16,math.min(128,math.ceil(960*step)))
+    for check=1,math.min(checks,#validationIds) do
+      if check>16 and os.clock()-started>=.002 then break end
       if validationCursor>#validationIds then validationCursor=1 end
       local id=validationIds[validationCursor];validationCursor=validationCursor+1
       local lease=leases[id]
@@ -258,9 +337,9 @@ local function updateAutomatic(dt)
         end
       end
     end
-    if priorityElapsed>=1 then
+    if refresh then
       priorityElapsed=0
-      changed=updatePriority() or changed
+      changed=updatePriority(nearIds) or changed
     end
   end)
   if not ok then
@@ -383,12 +462,13 @@ function M.getStatus()
     automatic=automatic,processedLights=visited,pendingJobs=math.max(0,#queue-cursor+1),skippedLights=skipped,
     priorityAssist=priorityAssist,prioritizedLights=near,priorityRejected=priorityRejected,
     scanCycles=scanCycles,newLightsThisScan=newLightsThisScan,
+    nearbyLookup=nearbyLookup,
     globalGraphicsSettingsChanged=false,lightColorOrIntensityChanged=false,gpuExecutionVerified=false}
 end
 
 function M.setPriorityAssist(value)
   if type(value)~='boolean' then return false end
-  priorityAssist=value;priorityElapsed=1
+  priorityAssist=value;priorityElapsed=1;priorityCamera=nil
   return true
 end
 
@@ -425,5 +505,57 @@ function M.getNearbyReport()
 end
 
 function M.isRequested() return M.requested end
+
+-- Read-only, bounded handoff to the optional local haze experiment. Reuse the
+-- selected native lamp identities; never launch a second whole-level scan.
+function M.getVolumetricLights()
+  local result={}
+  if not automatic or not M.requested then return result end
+  local p=cameraPosition();if not p then return result end
+  local candidates={}
+  for id in pairs(prioritized) do
+    local entry=pool[id]
+    local q=entry and entry.position
+    if q and entry.class=='SpotLight' and not entry.blocked then
+      candidates[#candidates+1]={entry=entry,d=(q.x-p.x)^2+(q.y-p.y)^2+(q.z-p.z)^2}
+    end
+  end
+  table.sort(candidates,function(a,b)
+    if a.d==b.d then return a.entry.id<b.entry.id end
+    return a.d<b.d
+  end)
+  for _,candidate in ipairs(candidates) do
+    if #result>=4 then break end
+    local ok,light=pcall(function()
+      local entry=candidate.entry
+      if not owner(entry) or truth(read(entry,'isEnabled'))~=true then return end
+      local fields=entry.object:getFields()
+      for _,key in ipairs({'color','brightness','range','innerAngle','outerAngle'}) do
+        if fields[key]==nil then return end
+      end
+      local function number(key)
+        local value=tonumber(read(entry,key))
+        assert(value and value==value and math.abs(value)<math.huge,'Invalid lamp scalar')
+        return value
+      end
+      local color={}
+      for value in tostring(read(entry,'color')):gmatch('[^%s]+') do color[#color+1]=tonumber(value) end
+      for i=1,3 do assert(color[i] and color[i]>=0 and color[i]<math.huge,'Invalid lamp color') end
+      local q=entry.object:getPosition()
+      for _,v in ipairs({q.x,q.y,q.z}) do assert(type(v)=='number' and v==v and math.abs(v)<math.huge,'Invalid lamp position') end
+      local d=entry.object:getTransform():getColumn(1)
+      local n=math.sqrt(d.x*d.x+d.y*d.y+d.z*d.z)
+      assert(n>0 and n<math.huge,'Invalid lamp direction')
+      local range,brightness=number('range'),number('brightness')
+      local inner,outer=number('innerAngle'),number('outerAngle')
+      if range<=0 or brightness<=0 or inner<0 or outer<=inner or outer>=179 then return end
+      return {id=entry.id,position={q.x,q.y,q.z},direction={d.x/n,d.y/n,d.z/n},
+        range=math.min(range,80),color={math.min(color[1],8),math.min(color[2],8),math.min(color[3],8)},
+        brightness=math.min(brightness,100),inner=math.cos(math.rad(inner*.5)),outer=math.cos(math.rad(outer*.5))}
+    end)
+    if ok and light then result[#result+1]=light end
+  end
+  return result
+end
 
 return M

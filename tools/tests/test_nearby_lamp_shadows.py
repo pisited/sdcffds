@@ -36,6 +36,26 @@ scenetree={findObject=function(id)return objects[id]end,findClassObjects=functio
 end}
 '''
 
+SPATIAL_MOCK=r'''
+queryCount=0;SOTLight=64
+function vec3(x,y,z)return {x=x,y=y,z=z}end
+function Box3F()
+ local b={}
+ function b:setExtents(v)self.extents=v end
+ function b:setCenter(v)self.center=v end
+ return b
+end
+function findObjectList(box,flags,detail)
+ assert(flags==64 and detail==0 and box.extents.x==160)
+ queryCount=queryCount+1
+ local hits={}
+ for _,o in pairs(objects)do
+   if math.abs(o.p.x-box.center.x)<=80 then hits[#hits+1]=o end
+ end
+ return hits
+end
+'''
+
 
 class NearbyLampShadows(unittest.TestCase):
     def runtimes(self):
@@ -196,7 +216,7 @@ class NearbyLampShadows(unittest.TestCase):
             self.assertFalse(api.getStatus().pendingRestore)
 
     def test_renderer_start_hooks_auto_enable_and_disable_all_does_not_restart_itself(self):
-        for name in ('enable','setCoherentSsrEnabled'):
+        for name in ('enable','_enableCoherentBackend'):
             body=re.search(r'^function M\.'+name+r'\(.*?\nend',MAIN,re.M|re.S).group()
             self.assertIn('M._startAutomaticLampShadows()',body)
         self.assertNotIn('M._startAutomaticLampShadows()',
@@ -291,6 +311,123 @@ class NearbyLampShadows(unittest.TestCase):
             self.assertGreaterEqual(api.getStatus().scanCycles,2)
             self.assertEqual(api.getStatus().newLightsThisScan,0)
             self.assertIn('not new shadow maps',api.getStatus().reason)
+
+    def test_native_nearby_query_bypasses_thousands_at_low_fps_and_refreshes_next_moving_frame(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('''
+            for i=1,5000 do lamp(i,10000+i)end
+            lamp(6000,10);lamp(6001,510)
+            -- Deterministic worst case: nearby lamps are last in discovery.
+            scenetree.findClassObjects=function(class)
+              local ids={};if class~='SpotLight' then return ids end
+              for i=1,5000 do ids[#ids+1]=i end
+              ids[#ids+1]=6000;ids[#ids+1]=6001;return ids
+            end
+            ''')
+            api.enableAutomatic()
+            self.assertEqual(len(lua.globals().writes),0)
+            api.update(1/15)
+            self.assertEqual(lua.globals().objects[6000].fields.castShadows,'1')
+            self.assertEqual(lua.globals().objects[6000].fields.texSize,'1024')
+            self.assertEqual(lua.globals().objects[6001].fields.castShadows,'0')
+            self.assertGreater(api.getStatus().pendingJobs,4000)
+            self.assertIn('Native nearby query active',api.getStatus().nearbyLookup)
+            self.assertEqual(api.getStatus().newLightsThisScan,api.getStatus().processedLights)
+            lua.execute('camera.x=500')
+            api.update(1/15)  # no one-second wait, no queue completion required
+            self.assertEqual(lua.globals().objects[6001].fields.castShadows,'1')
+            self.assertEqual(lua.globals().objects[6001].fields.texSize,'1024')
+            self.assertEqual(lua.globals().objects[6000].fields.texSize,'256')
+            self.assertEqual(lua.globals().queryCount,2)
+            self.assertTrue(api.disable())
+            self.assertEqual(lua.globals().objects[6001].fields.castShadows,'0')
+            self.assertEqual(lua.globals().objects[6001].fields.texSize,'256')
+
+    def test_nearby_query_is_throttled_stationary_and_accepts_ids(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('''
+            lamp(1,1)
+            local query=findObjectList
+            findObjectList=function(...)local hits=query(...);return {hits[1]:getID()}end
+            ''')
+            api.enableAutomatic();api.update(1/60)
+            self.assertEqual(lua.globals().queryCount,1)
+            before=len(lua.globals().writes)
+            for _ in range(10):api.update(1/60)
+            self.assertEqual(lua.globals().queryCount,1)
+            for _ in range(10):api.update(1/60)
+            self.assertEqual(lua.globals().queryCount,2)
+            self.assertEqual(len(lua.globals().writes),before)
+            api.setPriorityAssist(False);api.update(1/60)
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'256')
+
+    def test_native_query_failure_uses_safe_background_and_query_write_failure_rolls_back(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('lamp(1,1);findObjectList=function()error("unsupported")end')
+            api.enableAutomatic();api.update(1/15)
+            self.assertTrue(api.getStatus().requested)
+            self.assertIn('Background fallback',api.getStatus().nearbyLookup)
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'1')
+            self.assertTrue(api.disable())
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('objects[1].throwAfter=true')
+            api.enableAutomatic();api.update(1/15)
+            self.assertFalse(api.getStatus().requested)
+            self.assertFalse(api.getStatus().pendingRestore)
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'0')
+
+    def test_native_nearby_selection_uses_live_enabled_state_not_stale_background_cache(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('lamp(1,1)')
+            api.enableAutomatic();api.update(1/60)
+            self.assertEqual(len(api.getStatus().prioritizedLights),1)
+            lua.execute('objects[1].fields.isEnabled="0"')
+            api.update(.25)
+            self.assertEqual(len(api.getStatus().prioritizedLights),0)
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'256')
+            self.assertEqual(lua.globals().objects[1].fields.isEnabled,'0')
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'1')
+
+    def test_background_throughput_scales_with_real_dt_and_respects_soft_budget_and_caps(self):
+        for lua,api in self.runtimes():
+            lua.execute('for i=1,500 do lamp(i,10000+i)end;os.clock=function()return 0 end')
+            api.enableAutomatic();api.update(1/15)
+            self.assertEqual(api.getStatus().processedLights,96)
+            api.disable();api.enableAutomatic();api.update(1/60)
+            self.assertEqual(api.getStatus().processedLights,24)
+            api.disable();api.enableAutomatic();api.update(10)
+            self.assertEqual(api.getStatus().processedLights,192)
+            api.disable();api.enableAutomatic()
+            lua.execute('clock=0;os.clock=function()clock=clock+.003;return clock end')
+            api.update(1/15)
+            self.assertEqual(api.getStatus().processedLights,24)
+
+    def test_nearby_native_hit_inspection_and_writes_are_bounded_and_filter_disabled_lights(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('''
+            for i=1,300 do lamp(i,i/100)end
+            objects[1].fields.isEnabled='0'
+            for i=1,300 do objects[i].positionReads=0
+              local o=objects[i]
+              function o:getPosition()self.positionReads=self.positionReads+1;return self.p end
+            end
+            -- Hide the background queue to measure the nearby path in isolation.
+            scenetree.findClassObjects=function()return {}end
+            findObjectList=function()
+              local hits={};for i=1,300 do hits[#hits+1]=objects[i]end;return hits
+            end
+            ''')
+            api.enableAutomatic();api.update(1/15)
+            self.assertEqual(api.getStatus().processedLights,16)
+            self.assertEqual(len(api.getStatus().prioritizedLights),8)
+            self.assertEqual(lua.globals().objects[1].fields.castShadows,'0')
+            self.assertEqual(lua.globals().objects[257].positionReads,0)
+            self.assertEqual(lua.globals().objects[300].fields.castShadows,'0')
 
 
 if __name__=='__main__':unittest.main()

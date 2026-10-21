@@ -31,7 +31,7 @@ class CoherentIntegration(unittest.TestCase):
             function M.openTuner()table.insert(events,'tuner')end
             function beamrtLog()end
             ''')
-            for name in ('setCoherentSsrEnabled', 'getCoherentSsrStatus', 'setCoherentSsrParameter'):
+            for name in ('_enableCoherentBackend','setCoherentSsrEnabled', 'getCoherentSsrStatus', 'setCoherentSsrParameter'):
                 lua.execute(method(name))
             yield lua
 

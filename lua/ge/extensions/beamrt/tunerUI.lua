@@ -170,16 +170,37 @@ function M.lampShadows(im, api)
     im.TextUnformatted(string.format('Inspected: %d | Discovery checks: %d | Owned fields: %d',
       status.processedLights or 0,status.pendingJobs or 0,status.changedFields or 0))
     im.TextWrapped('Discovery checks repeat periodically; these are not thousands of newly allocated shadow maps.')
+    im.TextWrapped(status.nearbyLookup or 'Nearby lookup status unavailable.')
     if api.setNearbyLampPriorityAssistEnabled then
       if im.Button((status.priorityAssist and 'Nearby shadow priority ON' or 'Nearby shadow priority OFF')..'##BeamRTLamps') then
         api.setNearbyLampPriorityAssistEnabled(not status.priorityAssist)
       end
-      tip(im,'Reversible priority boost on up to eight enabled lamps within 80 m, refreshed once a second from cached positions. Nearby spot maps are at least 1024; point maps at least 512. Original larger maps remain. This can help native selection but cannot repair non-shadow-casting materials or create unlimited atlas capacity.')
+      tip(im,'Reversible priority boost on up to eight enabled lamps within 80 m. Native nearby lookup runs before the background queue, on the next update after moving 4 m, or every 0.25 seconds while stationary. Unsupported lookup falls back to background discovery. Nearby spot maps are at least 1024; point maps at least 512. Original larger maps remain. Native GPU budgets and caster materials still apply.')
       im.TextUnformatted('Nearby priority candidates: '..tostring(#(status.prioritizedLights or {})))
       if (status.priorityRejected or 0)>0 then im.TextWrapped('Native priority writes rejected: '..status.priorityRejected..'; baseline shadows retained.') end
     end
     if api.logNearbyLampShadowInputs and im.Button('Log nearby light shadow inputs##BeamRTLamps') then
       api.logNearbyLampShadowInputs()
+    end
+  end
+end
+
+function M.localVolumes(im,api)
+  if not api.getLocalVolumeStatus or not im.CollapsingHeader1('Volumetric lighting experiment') then return end
+  local status=api.getLocalVolumeStatus()
+  if im.Button((status.requested and 'Disable local lamp haze' or 'Try local lamp haze')..'##BeamRTVolumes') then
+    local ok,reason=api.setLocalVolumesEnabled(not status.requested)
+    if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
+  end
+  im.TextWrapped(status.reason)
+  im.TextWrapped('Opt-in approximation: up to four nearby native spotlights, 8 integration samples per lamp. Stops at visible depth, but does NOT use native lamp shadows; shafts can leak through unseen blockers. No point, emissive or vehicle light coverage. Uses automatic shadows / nearby priority selection. Adds GPU work; disabled by default.')
+  if status.pendingCleanup and im.Button('Retry haze cleanup##BeamRTVolumes') then api.setLocalVolumesEnabled(false) end
+  im.TextUnformatted('Supported spotlights: '..tostring(status.lightCount or 0))
+  for _,control in ipairs({{'strength','Haze brightness',0,4},{'density','Particle density',0,.1}}) do
+    im.TextUnformatted(control[2])
+    local pointer=im.FloatPtr(status[control[1]])
+    if im.SliderFloat('##BeamRTVolume'..control[1],pointer,control[3],control[4],'%.3f') then
+      api.setLocalVolumeParameter(control[1],pointer[0])
     end
   end
 end
@@ -197,9 +218,19 @@ function M.draw(im, api, panels)
         end
         im.TextWrapped('Experimental: PTGI diffuse lighting, then Coherent reflections. Older SSR and water overlay stay off. Existing ray count and lighting tuning are retained.')
         im.TextWrapped(combined.reason)
+        if combined.requested then im.TextWrapped('Scene route: '..tostring(combined.sceneTarget)..' → '..tostring(combined.sceneColorSource)..'. CPU bindings only; not GPU output proof.') end
+        if api.logPtgiCoherentStatus and im.Button('Log combined pipeline state##BeamRTCombined') then api.logPtgiCoherentStatus() end
+        if api.setPtgiNamedHandoffEnabled and im.CollapsingHeader1('Combined pipeline experiments') then
+          if im.Button((combined.namedHandoff and 'Use baseline ordered source' or 'Try named HDR source')..'##BeamRTCombined') then
+            local ok,reason=api.setPtgiNamedHandoffEnabled(not combined.namedHandoff)
+            if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
+          end
+          im.TextWrapped('Baseline source is the default. Disable combined mode before switching routes. Named HDR is unverified; test with volumetrics off first. Opening this panel starts nothing.')
+        end
       end
       if tab[2] == 'lighting' then M.giExperiments(im,api) end
       if tab[2] == 'lighting' then M.lampShadows(im,api) end
+      if tab[2] == 'lighting' then M.localVolumes(im,api) end
       if tab[2] == 'reflections' then M.reflections(im,api) end
       if tab[2] == 'diagnostics' then M.diagnostics(im,api) end
       if panels[tab[2]] then panels[tab[2]]() end

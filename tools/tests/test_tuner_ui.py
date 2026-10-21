@@ -65,6 +65,24 @@ class TunerUI(unittest.TestCase):
                 self.assertFalse(renderer.getStatus().requested)
                 self.assertEqual(lua.eval('(function()local n=0;for _ in pairs(objects)do n=n+1 end;return n end)()'), 1)
 
+    def test_combined_source_choice_and_report_require_explicit_clicks_and_do_not_start_rendering(self):
+        for lua,renderer in self.runtimes():
+            lua.execute('''
+            named=false;sourceChanges=0;reports=0
+            api.getPtgiCoherentStatus=function()return {requested=false,namedHandoff=named,reason='baseline'}end
+            api.setPtgiNamedHandoffEnabled=function(v)sourceChanges=sourceChanges+1;named=v;return true end
+            api.logPtgiCoherentStatus=function()reports=reports+1 end
+            tab='Lighting & GI';expanded=true;ui.draw(im,api,panels)
+            ''')
+            self.assertEqual(lua.globals().sourceChanges,0)
+            self.assertEqual(lua.globals().reports,0)
+            lua.execute("click='Try named HDR source##BeamRTCombined';ui.draw(im,api,panels)")
+            self.assertTrue(lua.globals().named)
+            self.assertEqual(lua.globals().sourceChanges,1)
+            lua.execute("click='Log combined pipeline state##BeamRTCombined';ui.draw(im,api,panels)")
+            self.assertEqual(lua.globals().reports,1)
+            self.assertFalse(renderer.getStatus().requested)
+
     def test_main_reflection_page_excludes_debug_and_legacy_controls(self):
         for lua, renderer in self.runtimes():
             lua.execute("expanded=true;ui.draw(im,api,panels)")

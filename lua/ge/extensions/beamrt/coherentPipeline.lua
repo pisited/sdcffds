@@ -1,4 +1,7 @@
 local EffectModule = {}
+EffectModule.sceneColorSource = '$backBuffer'
+EffectModule.sceneConsumers = {}
+EffectModule.motionUploads = setmetatable({}, {__mode='k'})
 -- Rendering-only adaptation of an author-authorized contribution. No external
 -- mod manager, loader, identity, input bindings or global engine overrides.
 local ownedObjects = {}
@@ -2648,8 +2651,10 @@ local function createPostEffect(name, shaderPass, renderPriority, sourceTexture,
     effect:setField("stateBlock", 0, stateBlockName)
 
     local sourceBinding = (sourceTexture and sourceTexture ~= "") and sourceTexture or fallbackTexture
+    if sourceBinding == '$backBuffer' and not depthPass then sourceBinding = EffectModule.sceneColorSource end
     local auxBinding = (auxTexture and auxTexture ~= "") and auxTexture or fallbackTexture
     effect:setField("texture", 0, sourceBinding)
+    if sourceTexture=='$backBuffer' and not depthPass then EffectModule.sceneConsumers[name]=effect end
     effect:setField("texture", 1, "#prepass[RT0]")
     effect:setField("texture", 2, "#prepass[Depth]")
     effect:setField("texture", 3, auxBinding)
@@ -2725,7 +2730,7 @@ end
 
 local function configureHiZ0Bindings(pass)
     if not pass then return end
-    pass:setField("texture", 0, "$backBuffer")
+    pass:setField("texture", 0, "$backBuffer") -- depth producer runs before PTGI
     pass:setField("texture", 1, "#prepass[RT0]")
     pass:setField("texture", 2, "#prepass[Depth]")
     pass:setField("texture", 3, riverTextureBinding())
@@ -3128,7 +3133,7 @@ local function applyRouting(self)
     end
 
     if applyPass then
-        applyPass:setField("texture", 0, "$backBuffer")
+        applyPass:setField("texture", 0, EffectModule.sceneColorSource)
         if debugRoute == "current" then
             applyPass:setField("texture", 4, "#BeamRTCoherentCurrent")
         elseif debugRoute == "nativeCurrent" then
@@ -3404,21 +3409,24 @@ end
 local function onPreRender(self, motion)
     local valid = type(motion) == "table" and motion.valid == true and
         motion.current ~= nil and motion.previous ~= nil
+    local constants={['$uVehicleHalf']='0 0 0 0'}
+    if valid then
+        local c,p=motion.current,motion.previous
+        constants={['$uVehicleCenter']=vectorString(c.center),['$uVehicleAxisX']=vectorString(c.axes[1]),
+            ['$uVehicleAxisY']=vectorString(c.axes[2]),['$uVehicleAxisZ']=vectorString(c.axes[3]),
+            ['$uVehicleHalf']=vectorString(c.half,1),['$uVehiclePrevCenter']=vectorString(p.center),
+            ['$uVehiclePrevAxisX']=vectorString(p.axes[1]),['$uVehiclePrevAxisY']=vectorString(p.axes[2]),
+            ['$uVehiclePrevAxisZ']=vectorString(p.axes[3])}
+    end
     for _, pass in ipairs({ temporalPassA, temporalPassB, temporalDebugPass }) do
         if pass then
-            if valid then
-                local c, p = motion.current, motion.previous
-                pass:setShaderConst("$uVehicleCenter", vectorString(c.center))
-                pass:setShaderConst("$uVehicleAxisX", vectorString(c.axes[1]))
-                pass:setShaderConst("$uVehicleAxisY", vectorString(c.axes[2]))
-                pass:setShaderConst("$uVehicleAxisZ", vectorString(c.axes[3]))
-                pass:setShaderConst("$uVehicleHalf", vectorString(c.half, 1.0))
-                pass:setShaderConst("$uVehiclePrevCenter", vectorString(p.center))
-                pass:setShaderConst("$uVehiclePrevAxisX", vectorString(p.axes[1]))
-                pass:setShaderConst("$uVehiclePrevAxisY", vectorString(p.axes[2]))
-                pass:setShaderConst("$uVehiclePrevAxisZ", vectorString(p.axes[3]))
-            else
-                pass:setShaderConst("$uVehicleHalf", "0 0 0 0")
+            local cache=EffectModule.motionUploads[pass] or {}
+            EffectModule.motionUploads[pass]=cache
+            for key,value in pairs(constants) do
+                if cache[key]~=value then
+                    pass:setShaderConst(key,value)
+                    cache[key]=value
+                end
             end
         end
     end
@@ -3691,6 +3699,12 @@ end
 
 function EffectModule.getRuntimeStatus()
     local ready = true
+    for name,object in pairs(EffectModule.sceneConsumers) do
+        local ok,valid=pcall(function()
+            return scenetree.findObject(name)==object and object:getField('texture',0)==EffectModule.sceneColorSource
+        end)
+        if not ok or not valid then ready=false end
+    end
     for _, suffix in ipairs({"HiZ0Pass", "HiZPackedPass", "TracePass", "ApplyPass", "CameraHistoryPass"}) do
         local ok, active = pcall(function()
             local pass = scenetree.findObject(basePostEffectName .. suffix)
@@ -3705,9 +3719,29 @@ function EffectModule.getRuntimeStatus()
             and temporalPass:getField("skip", 0) ~= "1"
     end)
     return {passesEnabled = ready, frame = frame, historyWarmup = temporalHistoryWarmup,
+        sceneColorSource = EffectModule.sceneColorSource,
         accumulationScheduled = ready and temporalScheduled and okTemporal and temporalEnabled == true,
         cameraHistoryReady = cameraHistoryReady, waterMapAvailable = riverState.available == true,
         waterMapReason = riverState.lastFailure, historyInterleaved = value(EffectModule, "interleavedHistory", true)}
+end
+
+function EffectModule.setSceneColorSource(source)
+    assert(source == '$backBuffer' or source == '#BeamRT_PTGI_LitScene', 'Unrecognized scene producer')
+    local old = EffectModule.sceneColorSource
+    if source == old then return true end
+    -- Only replace exact scene-color bindings, never depth/history inputs.
+    for name, object in pairs(ownedObjects) do
+        if name:sub(1, #basePostEffectName) == basePostEffectName
+            and not applyVariant.depth.owns(name)
+            and scenetree.findObject(name) == object
+            and object:getField('texture',0) == old then
+            object:setField('texture',0,source)
+            assert(object:getField('texture',0) == source, 'Scene producer binding rejected')
+        end
+    end
+    EffectModule.sceneColorSource = source
+    EffectModule.resetHistory()
+    return true
 end
 
 function EffectModule.release()
@@ -3729,6 +3763,10 @@ function EffectModule.release()
         end
     end
     EffectModule.resetHistory()
+    if not failed then
+        EffectModule.sceneColorSource = '$backBuffer'
+        EffectModule.sceneConsumers = {}
+    end
     return not failed
 end
 

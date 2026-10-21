@@ -62,7 +62,14 @@ function M.getStatus()
     waterMapAvailable = runtime.waterMapAvailable == true,
     waterMapReason = runtime.waterMapReason,
     nativeSettingsChanged = false, gameAppearanceVerified = false,
-    gpuExecutionVerified = false, options = M.getOptions()}
+    gpuExecutionVerified = false, sceneColorSource = runtime.sceneColorSource, options = M.getOptions()}
+end
+
+function M.setSceneColorSource(source)
+  if source ~= '$backBuffer' and source ~= '#BeamRT_PTGI_LitScene' then return false,'Unknown scene producer.' end
+  local ok,why=pcall(pipeline.setSceneColorSource,source)
+  if not ok then M.disable('Scene producer binding failed: '..tostring(why));return false,tostring(why) end
+  return true
 end
 
 function M.disable(why)

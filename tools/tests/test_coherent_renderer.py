@@ -80,6 +80,31 @@ class CoherentRenderer(unittest.TestCase):
             for key in ('interleavedHistory', 'skyReflection', 'overhangFill', 'engineVelocity', 'fillEngineVelocityHole'):
                 self.assertFalse(options[key], key)
 
+    def test_identical_vehicle_uniforms_skip_native_uploads_without_changing_values(self):
+        for lua,renderer in self.runtimes():
+            self.assertTrue(renderer.enable())
+            lua.execute('''
+            pipeline=require('ge/extensions/beamrt/coherentPipeline')
+            motion={valid=true,current={center={1,2,3},axes={{1,0,0},{0,1,0},{0,0,1}},half={2,3,1}}}
+            motion.previous=motion.current
+            motionWrites=0
+            for _,suffix in ipairs({'TemporalPassA','TemporalPassB','TemporalDebugPass'})do
+              local pass=objects['BeamRTCoherentPostEffect'..suffix]
+              local original=pass.setShaderConst
+              rawset(pass,'setShaderConst',function(self,k,v)motionWrites=motionWrites+1;original(self,k,v)end)
+            end
+            pipeline.onPreRender(pipeline,motion)
+            ''')
+            self.assertEqual(lua.globals().motionWrites,27)
+            lua.execute('motionWrites=0;pipeline.onPreRender(pipeline,motion)')
+            self.assertEqual(lua.globals().motionWrites,0)
+            self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTemporalPassA._const["$uVehicleCenter"]'),
+                             '1.000000 2.000000 3.000000 0.0')
+            lua.execute('motion.current.center[1]=2;pipeline.onPreRender(pipeline,motion)')
+            self.assertEqual(lua.globals().motionWrites,6) # current and previous share the test table
+            lua.execute('motionWrites=0;pipeline.onPreRender(pipeline,nil);pipeline.onPreRender(pipeline,nil)')
+            self.assertEqual(lua.globals().motionWrites,3)
+
     def test_enable_routes_a_complete_independent_pipeline_and_cleanup(self):
         for lua, renderer in self.runtimes():
             self.assertTrue(renderer.enable(), lua.eval('table.concat(messages,"; ")'))

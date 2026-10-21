@@ -20,6 +20,7 @@ findObject=scenetree.findObject
 PROGRESSIVE={rendererCompatibility=require('ge/extensions/beamrt/rendererCompatibility'),
  reflectionSampling={isFrozen=function()return frozen==true end},
  reflectionDiagnostic={mode=0},lightingDiagnostic={mode=0},rayDebugMode=0,
+ svgf={atrousTargets={'#a','#b','#c'}},
  lightingAudit={getStatus=function()return {active=capturing==true}end,cancel=function()end},
  inputPrep={receiverEffectName='BeamRT_ReceiverResponseFx',auxiliaryEffectName='Aux'},
  reflectionHit={inputsEffectName='HitInputs',copyEffectName='HitCopy',sizeValid=true,
@@ -51,15 +52,17 @@ end
 '''
 
 class PtgiCoherent(unittest.TestCase):
-    def runtimes(self):
+    def runtimes(self,named=False):
         for lua,renderer in backend.CoherentRenderer().runtimes():
             lua.execute(SETUP)
             lua.globals().M._ptgiCoherent=lua.execute((ROOT/'lua/ge/extensions/beamrt/ptgiCoherent.lua').read_text())
+            if named: lua.globals().M._ptgiCoherent.namedHandoff=True
             for name,value in re.findall(r'local (\w+_NAME) = "([^"]+)"',MAIN):
                 lua.globals()[name]=value
                 lua.globals().object(value)
             lua.execute("for _,n in ipairs({'Aux','HitInputs','HitCopy','Half','Atlas','Voxel','Raw','WaterPreview'})do object(n)end")
             lua.execute("object('BeamRT_SurfelCacheFx',10004);object('BeamRT_ReceiverResponseFx',10003);object('BeamRT_GIFx',10002)")
+            lua.execute("objects.BeamRT_ComposeFx:setField('target',0,'$backBuffer')")
             start=MAIN.index('local function effectIsEnabled(')
             section=MAIN[start:MAIN.index('local function setNormalBeamRTEffectsEnabled(',start)]
             for name in ('effectIsEnabled','setEffectEnabled','syncEffectEnablement'):
@@ -92,10 +95,16 @@ class PtgiCoherent(unittest.TestCase):
                 self.assertEqual(obj.renderPriority,priority)
             self.assertLess(lua.globals().objects.BeamRTCoherentPostEffectTracePass.renderPriority,46)
             self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTracePass:getField("texture",0)'),'$backBuffer')
+            for suffix in ('ColorMip1Pass','NativeResolvePass','ApplyPass'):
+                obj=lua.globals().objects['BeamRTCoherentPostEffect'+suffix]
+                self.assertEqual(obj.getField(obj,'texture',0),'$backBuffer')
+            self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectHiZ0Pass:getField("texture",0)'),'$backBuffer')
+            self.assertEqual(lua.eval('objects.BeamRT_ComposeFx:getField("target",0)'),'$backBuffer')
             self.assertFalse(api.getPtgiCoherentStatus().gpuExecutionVerified)
             self.assertTrue(api.disable())
             self.assertFalse(api.getPtgiCoherentStatus().requested)
             self.assertFalse(renderer.getStatus().active)
+            self.assertEqual(lua.eval('objects.BeamRT_ComposeFx:getField("target",0)'),'$backBuffer')
             for name,priority in (('BeamRT_SurfelCacheFx',10004),('BeamRT_ReceiverResponseFx',10003),('BeamRT_GIFx',10002)):
                 obj=lua.globals().objects[name]
                 self.assertEqual(obj.getField(obj,'renderTime',0),'PFXAfterDiffuse')
@@ -115,10 +124,23 @@ class PtgiCoherent(unittest.TestCase):
             self.assertFalse(api.setRayHitDiagnostic('hits'))
             self.assert_started(lua,api)
 
+    def test_named_source_survives_routing_updates_then_restores_standalone_source(self):
+        for lua,renderer,api in self.runtimes(named=True):
+            self.assertTrue(api.setPtgiCoherentEnabled(True))
+            for name,value in (('stochasticRayCount',1),('filteredColor',False),('nativeTemporal',False)):
+                self.assertTrue(api.setCoherentSsrParameter(name,value))
+                api.onPreRender(.016,.016,.016)
+                self.assert_started(lua,api)
+                self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectTracePass:getField("texture",0)'),
+                                 '#BeamRT_PTGI_LitScene')
+            self.assertTrue(api.disable())
+            self.assertTrue(api.setCoherentSsrEnabled(True))
+            self.assertEqual(renderer.getStatus().sceneColorSource,'$backBuffer')
+            self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectApplyPass:getField("texture",0)'),'$backBuffer')
+
     def test_native_conflict_capture_and_wrong_stage_fail_before_combined_enable(self):
         for setup in ('native=true','frozen=true','capturing=true','CLEAN_RADIANCE.build={}',
-                      'CLEAN_RADIANCE.materialBatch={}',
-                      'PROGRESSIVE.lightingDiagnostic.mode=1','PROGRESSIVE.rayDebugMode=1'):
+                      'CLEAN_RADIANCE.materialBatch={}'):
             for lua,renderer,api in self.runtimes():
                 lua.execute(setup)
                 self.assertFalse(api.setPtgiCoherentEnabled(True)[0],setup)
@@ -132,6 +154,8 @@ class PtgiCoherent(unittest.TestCase):
     def test_runtime_conflict_and_pass_loss_stop_both_without_auto_resume(self):
         for setup in ('native=true','objects.BeamRT_GIFx:disable()',
                       "objects.BeamRT_GIFx.renderPriority=10002",
+                      "objects.BeamRT_ComposeFx:setField('target',0,'#foreign')",
+                      "objects.BeamRTCoherentPostEffectTracePass:setField('texture',0,'#foreign')",
                       'objects.BeamRTCoherentPostEffectTracePass:delete()'):
             for lua,renderer,api in self.runtimes():
                 self.assertTrue(api.setPtgiCoherentEnabled(True))
@@ -243,5 +267,79 @@ class PtgiCoherent(unittest.TestCase):
                 lua.execute(method(name))
                 self.assertFalse(api[name]('baseColor')[0],name)
                 self.assert_started(lua,api)
+
+    def test_manual_reflections_join_active_gi_and_repeated_enable_keeps_both(self):
+        for named in (False,True):
+            for lua,renderer,api in self.runtimes(named=named):
+                self.assertTrue(api.start())
+                self.assertTrue(lua.eval('objects.BeamRT_GIFx:isEnabled()'))
+                self.assertFalse(renderer.getStatus().requested)
+                self.assertTrue(api.setCoherentSsrEnabled(True))
+                self.assert_started(lua,api)
+                lua.execute('traceIdentity=objects.BeamRTCoherentPostEffectTracePass')
+                for _ in range(12):api.onPreRender(.016,.016,.016)
+                self.assertTrue(api.setCoherentSsrEnabled(True))
+                self.assert_started(lua,api)
+                self.assertTrue(lua.eval('objects.BeamRTCoherentPostEffectTracePass==traceIdentity'))
+                self.assertTrue(renderer.getStatus().accumulationReady)
+
+    def test_named_source_is_opt_in_cannot_change_live_and_combined_stops_volumes(self):
+        for lua,renderer,api in self.runtimes():
+            self.assertFalse(api.getPtgiCoherentStatus().namedHandoff)
+            self.assertFalse(api.setPtgiNamedHandoffEnabled('yes')[0])
+            self.assertTrue(api.setPtgiNamedHandoffEnabled(True))
+            self.assertFalse(api.getPtgiCoherentStatus().requested)
+            lua.execute('''
+            volumeStops=0
+            M._localVolumes={requested=true,disable=function()
+              volumeStops=volumeStops+1;M._localVolumes.requested=false;return true end}
+            ''')
+            self.assertTrue(api.setPtgiCoherentEnabled(True))
+            self.assert_started(lua,api)
+            self.assertEqual(api.getPtgiCoherentStatus().sceneTarget,'#BeamRT_PTGI_LitScene')
+            self.assertEqual(lua.eval('objects.BeamRT_ComposeFx:getField("target",0)'),'#BeamRT_PTGI_LitScene')
+            self.assertGreater(lua.globals().volumeStops,0)
+            self.assertFalse(lua.globals().M._localVolumes.requested)
+            self.assertFalse(api.setPtgiNamedHandoffEnabled(False)[0])
+            self.assertTrue(api.disable())
+            self.assertTrue(api.setPtgiNamedHandoffEnabled(False))
+            self.assertTrue(api.setPtgiCoherentEnabled(True))
+            self.assertEqual(api.getPtgiCoherentStatus().sceneTarget,'$backBuffer')
+
+    def test_read_only_report_includes_debug_volume_and_actual_pass_bindings(self):
+        for lua,renderer,api in self.runtimes():
+            self.assertTrue(api.setPtgiCoherentEnabled(True))
+            lua.execute('function jsonEncode()return "report"end;M._localVolumes={getStatus=function()return {requested=false}end}')
+            before=dict(renderer.getOptions().items())
+            report=api.logPtgiCoherentStatus()
+            self.assertEqual(report.rayDebugMode,0)
+            self.assertFalse(report.volumes.requested)
+            self.assertEqual(len(report.passes),8)
+            self.assertEqual(report.passes[2].target,'$backBuffer')
+            self.assertEqual(report.passes[5].source,'$backBuffer')
+            self.assertEqual(dict(renderer.getOptions().items()),before)
+            self.assert_started(lua,api)
+
+    def test_combined_start_restores_beauty_from_ray_lighting_and_coherent_debug_views(self):
+        for setup in ('PROGRESSIVE.rayDebugMode=8', 'PROGRESSIVE.lightingDiagnostic.mode=1',
+                      "renderer.setParameter('debugView',50)"):
+            for lua,renderer,api in self.runtimes():
+                lua.execute(setup)
+                before=dict(renderer.getOptions().items())
+                self.assertTrue(api.setPtgiCoherentEnabled(True),setup)
+                self.assert_started(lua,api)
+                self.assertEqual(lua.globals().PROGRESSIVE.rayDebugMode,0)
+                self.assertEqual(lua.globals().PROGRESSIVE.lightingDiagnostic.mode,0)
+                self.assertEqual(renderer.getOptions().debugView,0)
+                for key,value in before.items():
+                    if key!='debugView':self.assertEqual(renderer.getOptions()[key],value,key)
+
+    def test_capture_guard_does_not_clear_debug_views_or_start_any_pipeline(self):
+        for lua,renderer,api in self.runtimes():
+            lua.execute("capturing=true;PROGRESSIVE.rayDebugMode=8;renderer.setParameter('debugView',50)")
+            self.assertFalse(api.setPtgiCoherentEnabled(True)[0])
+            self.assertEqual(lua.globals().PROGRESSIVE.rayDebugMode,8)
+            self.assertEqual(renderer.getOptions().debugView,50)
+            self.assertFalse(renderer.getStatus().requested)
 
 if __name__=='__main__':unittest.main()
