@@ -2,6 +2,9 @@
 // while every source fits within BeamNG PostEffect's six texture inputs.
 // Store linear response in RGB and scalar pre-gate reflectance in alpha.
 #include "shaders/common/postFx/postFx.h.hlsl"
+#ifdef BEAMRT_DELIT_RECEIVER
+#include "beamrtReceiverColor.h.hlsl"
+#endif
 
 uniform_sampler2D(backBufferTex, 0);
 uniform_sampler2D(prepassTex, 1);
@@ -12,6 +15,9 @@ uniform_sampler2D(prepassDepthTex, 4);
 cbuffer perDraw : register(b0)
 {
     uniform float giReceiverTint;
+#ifdef BEAMRT_DELIT_RECEIVER
+    uniform float giReceiverDeLight;
+#endif
     POSTFX_UNIFORMS
 };
 
@@ -58,6 +64,13 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         approximateReflectance.xxx,
         receiverChroma * approximateReflectance,
         saturate(giReceiverTint) * chromaConfidence);
+#ifdef BEAMRT_DELIT_RECEIVER
+    float3 delitResponse = approximateReflectance * lerp(
+        float3(1.0, 1.0, 1.0),
+        beamrtDelitReceiverChroma(baseLinear, receiverDirectLighting),
+        saturate(giReceiverTint));
+    receiverResponse = lerp(receiverResponse, delitResponse, saturate(giReceiverDeLight));
+#endif
 
     float3 receiverSpecularF0 = saturate(tex2D(receiverMaterialSpecTex, IN.uv3).rgb);
     float receiverSpecularPeak = max(

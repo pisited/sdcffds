@@ -109,6 +109,15 @@ class MainCompatibility(unittest.TestCase):
             self.assertFalse(lua.globals().objects[lua.globals().GI_EFFECT_NAME].enabled)
             self.assertFalse(lua.globals().objects[lua.globals().REFLECTION_EFFECT_NAME].enabled)
 
+    def test_long_render_gap_invalidates_gi_not_only_reflections(self):
+        for lua in self.runtimes():
+            lua.execute('M.onPreRender(.016,.016,.016);syncEffectEnablement()')
+            before=lua.globals().giResets
+            lua.execute('M.onPreRender(1,1,1)')
+            self.assertEqual(lua.globals().giResets,before+1)
+            lua.execute('M.onPreRender(.016,.016,.016)')
+            self.assertEqual(lua.globals().giResets,before+1)
+
     def test_independent_reflection_preparation_cannot_bypass_guard(self):
         for lua in self.runtimes():
             lua.execute('configured=true;PROGRESSIVE.reflectionHit.sync()')

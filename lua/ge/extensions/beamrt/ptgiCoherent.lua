@@ -6,12 +6,15 @@ local roots = {
   {'BeamRT_SurfelCacheFx',48}, {'BeamRT_ReceiverResponseFx',47}, {'BeamRT_GIFx',46}
 }
 
+function M.hasLease() return next(leases)~=nil end
+
 function M.release()
   M.requested=false
   local clean=true
   for name, lease in pairs(leases) do
     local ok=pcall(function()
       if scenetree.findObject(name)==lease.object then
+        if lease.object:isEnabled() then lease.object:disable() end
         lease.object:setField('renderTime',0,lease.time)
         lease.object:setField('renderBin',0,lease.bin)
         lease.object.renderPriority=lease.priority
@@ -19,11 +22,16 @@ function M.release()
     end)
     if ok then leases[name]=nil else clean=false end
   end
-  return clean, clean and nil or 'PTGI stage restoration failed; retry disable.'
+  if not clean then
+    M.reason='PTGI stage restoration failed; retry disable.'
+    return false,M.reason
+  end
+  M.reason='Combined rendering is disabled.'
+  return true
 end
 
 function M.prepare()
-  if next(leases) then return false,'An existing PTGI stage lease must be released first.' end
+  if next(leases) then return M.validate() end
   local ok, failure=pcall(function()
     -- Validate the entire set before editing any stage. Only disabled GI roots
     -- can be leased; no live partial graph is moved between render bins.
@@ -68,7 +76,9 @@ function M.getStatus(api)
   local gi=scenetree.findObject('BeamRT_GIFx')
   local legacy=scenetree.findObject('BeamRT_ReflectionFx')
   local ok, active=pcall(function()
-    return M.requested and valid and coherent.active and gi and gi:isEnabled()
+    return M.requested and valid and coherent.active
+      and coherent.options.hdrComposite==true and coherent.options.debugView==0
+      and gi and gi:isEnabled()
       and not (legacy and legacy:isEnabled())
   end)
   return {requested=M.requested,active=ok and active==true,stageValid=valid,

@@ -83,6 +83,16 @@ class TunerUI(unittest.TestCase):
             self.assertAlmostEqual(renderer.getOptions().faceOnReflectance, .1)
             self.assertFalse(renderer.getStatus().requested)
 
+    def test_intermediate_ray_buttons_do_not_change_reach_or_appearance(self):
+        for lua, renderer in self.runtimes():
+            before=dict(renderer.getOptions().items())
+            for count,label in ((6,'Six'),(8,'Eight')):
+                lua.execute("expanded=true;click='"+label+" rays##BeamRTSSR';ui.draw(im,api,panels)")
+                self.assertEqual(renderer.getOptions().stochasticRayCount,count)
+                for key in ('traceQuality','renderScale','intensity','waterSSRStrength','waterColorStrength'):
+                    self.assertEqual(renderer.getOptions()[key],before[key],key)
+                self.assertFalse(renderer.getStatus().requested)
+
     def test_every_full_width_slider_has_a_separate_visible_label_above_it(self):
         expected = {'intensity': 'Reflection strength', 'roughnessEnd': 'Roughness cutoff',
                     'faceOnReflectance': 'Face-on reflectivity', 'surfaceDetail': 'Preserve surface detail',
@@ -132,6 +142,65 @@ class TunerUI(unittest.TestCase):
             renderer.setParameter('temporalStrength',.98)
             lua.execute('ui.draw(im,api,panels)')
             self.assertIn('Accumulation OFF', '\n'.join(lua.globals().labels.values()))
+
+    def test_combined_mode_button_is_explicit_and_kept_in_lighting_tab(self):
+        for lua, renderer in self.runtimes():
+            lua.execute("""
+            combined=false
+            api.getPtgiCoherentStatus=function()return {requested=combined,reason='CPU only'}end
+            api.setPtgiCoherentEnabled=function(v)writes=writes+1;combined=v;return true end
+            tab='Lighting & GI';ui.draw(im,api,panels)
+            """)
+            self.assertFalse(lua.globals().combined)
+            self.assertEqual(lua.globals().writes,0)
+            lua.execute("click='Enable PTGI + Coherent##BeamRTCombined';ui.draw(im,api,panels)")
+            self.assertTrue(lua.globals().combined)
+            lua.execute("click='Disable PTGI + Coherent##BeamRTCombined';ui.draw(im,api,panels)")
+            self.assertFalse(lua.globals().combined)
+            self.assertEqual(lua.globals().writes,2)
+
+    def test_gi_experiments_are_explicit_and_leave_renderer_and_bounce_color_alone(self):
+        for lua, renderer in self.runtimes():
+            lua.execute('''
+            receiver=0;coverageCalls=0
+            api.getSettings=function()return {giReceiverDeLight=receiver}end
+            api.setGIReceiverDeLight=function(v)writes=writes+1;receiver=v;return true end
+            api.setGIWideDdaExperiment=function(v)
+              coverageCalls=coverageCalls+1;api._giDdaCoverageRestore=v and {} or nil;return true
+            end
+            tab='Lighting & GI';expanded=true;ui.draw(im,api,panels)
+            ''')
+            self.assertEqual(lua.globals().writes,0)
+            self.assertEqual(lua.globals().coverageCalls,0)
+            before=dict(renderer.getOptions().items())
+            lua.execute("click='Try de-lit receiver color##BeamRTGI';ui.draw(im,api,panels)")
+            self.assertEqual(lua.globals().receiver,1)
+            lua.execute("click='Restore original receiver color##BeamRTGI';ui.draw(im,api,panels)")
+            self.assertEqual(lua.globals().receiver,0)
+            lua.execute("click='Try wider DDA coverage##BeamRTGI';ui.draw(im,api,panels)")
+            self.assertIsNotNone(lua.globals().api._giDdaCoverageRestore)
+            lua.execute("click='Undo wider DDA coverage##BeamRTGI';ui.draw(im,api,panels)")
+            self.assertIsNone(lua.globals().api._giDdaCoverageRestore)
+            self.assertFalse(renderer.getStatus().requested)
+            self.assertEqual(dict(renderer.getOptions().items()),before)
+
+    def test_native_lamp_shadows_require_explicit_click_and_do_not_start_custom_rendering(self):
+        for lua,renderer in self.runtimes():
+            lua.execute('''
+            lampRequested=false;lampWrites=0;lampPreference=false
+            api.getNearbyLampShadowStatus=function()
+              return {requested=lampRequested,automaticPreference=lampPreference,pendingRestore=false,selected={},reason='GPU unverified'}
+            end
+            api.setAutomaticLampShadowsEnabled=function(v)lampWrites=lampWrites+1;lampRequested=v;lampPreference=v;return true end
+            tab='Lighting & GI';expanded=true;ui.draw(im,api,panels)
+            ''')
+            self.assertEqual(lua.globals().lampWrites,0)
+            lua.execute("click='Enable automatic lamp shadows##BeamRTLamps';ui.draw(im,api,panels)")
+            self.assertTrue(lua.globals().lampRequested)
+            lua.execute("click='Disable automatic lamp shadows##BeamRTLamps';ui.draw(im,api,panels)")
+            self.assertFalse(lua.globals().lampRequested)
+            self.assertEqual(lua.globals().lampWrites,2)
+            self.assertFalse(renderer.getStatus().requested)
 
     def test_legacy_panels_remain_callable_but_closed_headers_do_not_mutate(self):
         for lua, renderer in self.runtimes():

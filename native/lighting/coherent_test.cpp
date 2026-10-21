@@ -101,6 +101,9 @@ int wmain(int argc,wchar_t** argv) {
         check(uniform(run(23),Pixel{16,0,0,1}),"production trace budget still capped the requested 16 rays");
         helper.scalar("uStochasticRayCount",32);
         check(uniform(run(23),Pixel{16,0,0,1}),"trace budget allowed out-of-bounds ray storage");
+        for(float count:{6.f,8.f}){
+            helper.scalar("uStochasticRayCount",count);
+            check(uniform(run(23),Pixel{count,0,0,1}),"intermediate ray request was silently capped or rounded to another tier");}
         helper.scalar("uStochasticSSR",0);
         check(uniform(run(23),Pixel{1,0,0,1}),"non-stochastic mirror tracing repeated identical rays");
         helper.scalar("uStochasticRayCount",1);

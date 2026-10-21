@@ -1,4 +1,93 @@
-# BeamRT v0.119.1 — parked-vehicle accumulation repair
+# BeamRT v0.121 — automatic native lamp shadows
+
+The previously tested native-lamp shadow request now starts automatically with
+GI, Coherent, or combined rendering. There is **no four-light or camera-radius
+limit** in automatic mode: every supported scene PointLight/SpotLight is
+processed, including currently switched-off lights so their shadows are ready
+when they turn on. This does not enable lights or alter their brightness, color,
+range, direction or global graphics settings. It requests `castShadows` and
+raises smaller advertised per-light shadow maps to 1024, retaining higher sizes.
+
+Discovery/inspection is limited to 24 lights per frame and ownership validation
+to 16 lights per frame. Rescans discover new/replaced lights every five seconds
+once the previous queue finishes. Large maps take time to populate. Lua queues
+are incremental; native shadow-map allocation/rendering can still cost GPU
+time. The engine's visibility, shadow budgets and material caster rules still
+limit actual rendered shadows; requesting every light is not unlimited GPU
+shadow support. Embedded vehicle lights not exposed as scene PointLight or
+SpotLight objects are outside this scanner.
+
+Lighting & GI → **Automatic lamp shadows** shows progress and offers a disable/
+restore button. Automatic mode defaults ON at renderer startup; opting out lasts
+for the current session. Disable-all restores owned native fields and does not
+restart by itself; the next renderer start resumes automatic mode unless opted
+out. Mission/settings/unload restore as before. Captures/audits pause automatic
+updates, and conflicting field owners are left alone instead of repeatedly
+overwritten. Restoration failures retain their rollback lease.
+
+No map files, native DLLs or shader hooks are changed. The user confirmed the
+original nearby experiment's visual benefit; level-wide cost and appearance
+still need live verification. The old fixed-cohort diagnostic API remains
+available as `setNearbyLampShadowsEnabled(true)`, but the normal tuner now uses
+automatic mode via `setAutomaticLampShadowsEnabled(true/false)`.
+
+## v0.120.2 — nearby native lamp-shadow experiment
+
+In Lighting & GI, open **Nearby lamp shadows (native experiment)** and choose
+**Try nearby lamp shadows**. This explicitly requests native `castShadows` on
+up to four enabled PointLight/SpotLight objects within 30 m of the camera. Smaller
+advertised shadow maps are raised to 1024; higher sizes remain unchanged. The
+selected lamp names/distances are shown. This fixed selection does not follow
+the camera: restore, then try again at a different location.
+
+**Restore lamp shadows** restores original owned values. Disable-all, graphics
+changes, mission changes and unload also restore them. Restoration failures keep
+their lease for retry; replaced objects and externally changed fields are never
+overwritten. This does not save a level, alter global quality/budgets, replace
+shaders, create lights or change their brightness, color, range or direction.
+
+This is separate from the still-unconnected custom clustered mesh-light hook.
+Native shadow budgets, graphics quality, disabled caster materials, and light
+placement may still prevent the pipe/support shadows. Already-shadowed lamps
+are reported without pretending a change occurred. GPU execution and appearance
+must be checked in-game; control tests do not establish visual success.
+
+## v0.120.1 — receiver color and coverage experiments
+
+Lighting & GI has a collapsed **GI color and coverage experiments** section:
+
+- **Try de-lit receiver color** estimates material tint after dividing out direct
+  light color, rather than tinting arriving GI with the already-lit orange/brown
+  scene color again. It keeps the existing scalar reflectance, F0/roughness gates,
+  source-light color, Bounce color and GI strength controls. The new chroma has
+  unit luminance; this can recover energy lost by the old peak-normalized tint.
+  This is an approximate albedo estimate, not a physical material-buffer fix.
+  Default OFF; **Restore original receiver color** restores the baseline.
+- **Try wider DDA coverage** doubles the current screen stride, retaining the
+  same sample count, world reach and validation. Select Screen DDA first. It may
+  skip thin geometry; more coverage is not automatically more correct. **Undo**
+  restores the exact previous stride. Linear and Coherent traversal are unchanged.
+
+Neither action starts a renderer, changes presets, desaturates the entire GI,
+or edits native water/reflections. Receiver strength is included in explicit
+tuning saves and audit manifests; the DDA undo snapshot is session-only. Test
+each option separately before combining them. Warm lights should remain warm.
+Offline shader/control tests are not in-game appearance verification.
+
+## v0.120 — opt-in PTGI + Coherent reflections
+
+In **Lighting & GI**, choose **Enable PTGI + Coherent** for the experimental
+combined path. PTGI diffuse lighting is composed before Coherent captures its
+reflection source; the older BeamRT SSR stays off. The original stages are
+restored on disable. New six/eight-ray controls sit between four and sixteen,
+with six now the default. Existing material, water and GI tuning is retained.
+
+The audit also repairs GI history invalidation after long frame gaps and links
+GI changes to reflection-history resets while combined. CPU graph checks and
+offline shader/GPU tests do not establish combined appearance or performance in
+BeamNG. See [combined mode and audit notes](native/lighting/COHERENT_SSR.md#v0120-ptgi--coherent-and-intermediate-ray-counts).
+
+## v0.119.1 — parked-vehicle accumulation repair
 
 Parked cars no longer receive the moving-vehicle history-refresh floor merely
 because their rigid pose is available. GPU regressions reproduce the old failure

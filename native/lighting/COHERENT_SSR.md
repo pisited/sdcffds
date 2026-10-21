@@ -1,4 +1,4 @@
-# Coherent SSR experimental backend (tuner v0.119.1)
+# Coherent SSR experimental backend (tuner v0.120)
 
 This is an opt-in rendering-only adaptation of an authorized contribution,
 with BeamRT-owned shaders, resources and controls. It is not the integrated
@@ -34,12 +34,13 @@ added by this change.
 The backend starts disabled, has its own exact-object cleanup and fails closed
 on native-SSR conflict, missing passes, exceptions or incomplete cleanup. It
 stops on settings/mission/unload changes and requires explicit re-enabling.
-The older renderer is stopped before enabling this one, and vice versa. GI
-integration is intentionally not simultaneous in this first comparison path.
+The older renderer is stopped before enabling this one, and vice versa, except
+for the explicit v0.120 combined PTGI mode described below. Ordinary standalone
+selection remains exclusive; legacy SSR never joins the combined path.
 
 Full history storage is the default, not half-width interleaving. Trace scale
-starts at 0.5 with the maximum 128-step trace budget and four rays. One, four,
-or sixteen rays are selectable; the heavy cleanup action chooses full resolution.
+starts at 0.5 with the maximum 128-step trace budget and six rays. One, four,
+six, eight or sixteen rays are selectable; heavy cleanup chooses full resolution.
 Retired/hidden standalone switches now actually honor BeamRT parameter values.
 Parameter changes invalidate history. Camera interruption, vehicle switching,
 invalid OBBs and teleports cannot manufacture a valid previous vehicle pose.
@@ -63,7 +64,7 @@ Exposure, global brightness and the older cinematic renderer are unchanged.
 
 ## Try and revert
 
-Reload BeamRT to get tuner v0.119.1. Turn integrated Screen Space Reflections off
+Reload BeamRT to get tuner v0.120. Turn integrated Screen Space Reflections off
 in BeamNG graphics settings. Under **Reflections**, choose **Enable reflections**,
 or run in GE Lua after BeamRT is loaded:
 
@@ -78,7 +79,7 @@ debug views, not the old eight-image audit: the latter explicitly refuses this
 backend rather than labeling legacy captures as Coherent output.
 
 Disable using the matching button or `beamrt_main.setCoherentSsrEnabled(false)`.
-**Lighting & GI -> Start / Apply GI** returns to the older GI renderer. Neither operation toggles
+**Lighting & GI -> Standalone GI / legacy route** returns to the older renderer. Neither operation toggles
 the game's native SSR setting. Full-resolution/sixteen-ray experiments are very costly.
 
 ## Verification boundary
@@ -96,7 +97,7 @@ wave-intrinsic branches. Strict-compiler fixes include a reserved identifier,
 explicit SH coefficient copy, initialized ray arrays and return-flow forms
 accepted by FXC. Compilation does not execute the game's SM6 path.
 
-The D3D12 offline fixture runs 83 checks on RTX 4070 and WARP, including exact
+The D3D12 offline fixture runs 85 checks on RTX 4070 and WARP, including exact
 zero-tint bypass of stock water color, optional tint isolation, packed
 history/sign bits through an actual RGBA32F target, receiver rejection, independent
 water Fresnel references, sample variation, the actual camera-history pass and
@@ -283,6 +284,92 @@ The Lighting & GI route and Coherent route are mutually exclusive. Comparing
 those buttons compares lighting/composition as well as reflection sampling, not
 just an accumulation toggle. No lighting brightness, material gain, water tint,
 native settings, game launch or DLL work changed in this repair.
+
+## v0.120 PTGI + Coherent and intermediate ray counts
+
+Under **Lighting & GI**, click **Enable PTGI + Coherent**. This is a session-only,
+explicit combined experiment, not a fifth quality preset. Alternatively:
+
+```lua
+beamrt_main.setPtgiCoherentEnabled(true)
+-- Stops both renderers and restores the original GI stages:
+beamrt_main.setPtgiCoherentEnabled(false)
+```
+
+It retains current GI tuning and Coherent sampling/material settings. No older
+SSR overlay, its independent hit/color preparation passes, or the legacy water
+preview overlay is allowed alongside Coherent. Reflections remain owned by
+Coherent; diffuse GI is owned by PTGI. Native SSR must still be OFF, and BeamRT
+does not toggle it. The six-ray default and six/eight-ray buttons give intermediate
+cost choices; changing ray count does not change the per-ray step budget or
+hard-cut water reach. More samples still cost more, and equal detail/noise or a
+specific FPS improvement is not guaranteed. Heavy cleanup remains sixteen rays.
+
+The combined staging lease puts these roots in PFXBeforeBin / AfterPostFX:
+
+| Priority (descending execution) | Root / purpose |
+| --- | --- |
+| 64.x | Existing Coherent depth hierarchy |
+| 48 | PTGI world-surfel update and its history copy |
+| 47 | PTGI receiver response and packed auxiliary inputs |
+| 46 | PTGI trace, moments, temporal/spatial filtering, HDR composition and history copies |
+| 24.x | Coherent source-color pyramid, tracing, history and reflection composition |
+
+GI composition already uses the engine HDR decode/encode helpers. Coherent's
+color source is captured after GI composition and before Coherent's own reflection
+composition. The signal flow is intended to reflect GI-lit scene color, not a
+previously composed SSR image. Histories remain separate. This ordering is
+checked in the Lua object graph; actual engine scheduling/HDR resource lifetime
+and combined appearance still need in-game verification.
+
+The lease captures each original GI root's stage/bin/priority and restores it
+on disable, standalone selection, mission/settings changes or unload. It does
+not restore fields onto a foreign replacement. A failed restoration blocks
+another activation until disable can restore the outstanding lease. Native
+conflicts, lost/disabled passes, modified GI stages or non-beauty/non-HDR Coherent
+configuration stop the combined route. Legacy audits and incompatible diagnostic
+views stay blocked until combined rendering is disabled.
+
+While combined, the four existing presets/applySettings apply their GI portion
+only: their legacy reflection entries do not enable or retune either SSR path.
+The existing standalone route and legacy settings are retained outside this mode.
+GI history resets also invalidate Coherent history, since the reflected source
+lighting has changed. The Lighting history reset resets both in combined mode;
+the Reflections history button resets only Coherent.
+
+### PTGI audit findings in this batch
+
+- Fixed: long render interruptions invalidated reflection history but not GI
+  history. GI now invalidates after a frame gap greater than 0.25 seconds too.
+- Fixed for combined use: GI and SSR previously had incompatible selection and
+  stage ownership. Both being enabled was not an integration; the lease/order
+  and older-SSR exclusion above are required.
+- Fixed for combined use: old presets carry legacy reflection settings, and GI
+  parameter changes could otherwise leave reflection history of an older lighting
+  state. Preset filtering and linked invalidation handle those cases.
+- Fixed for this integration: producer-view material/clean-radiance captures
+  could otherwise interrupt the active reflection source. They now require
+  Coherent/combined mode to be disabled, and a pending material batch blocks
+  activation. Startup callback exceptions attempt teardown and stage restoration.
+- Remaining: GI uses inferred material/receiver response, not a guaranteed true
+  diffuse-albedo buffer. Screen-space visibility and coarse surfel caches cannot
+  establish all off-screen blockers or eliminate leakage everywhere.
+- Remaining: GI history still samples the engine velocity target. Its existing
+  Lua camera-motion guard reduces stale-history risk but is not full exact camera
+  reprojection, object deformation motion or proof of that target's validity in
+  every configuration. No global motion-blur setting was forced.
+- Remaining: second-bounce history and appearance/energy controls are approximations,
+  not proof of an unbiased physical PTGI estimator or hardware ray tracing.
+
+New tests execute the actual main switching/lifecycle functions, real Coherent
+Lua graph and staging module in Lua 5.1/LuaJIT, with engine object mocks. Cases
+cover opt-in, order, tuning retention, six/eight-ray controls, older-SSR exclusion,
+linked resets, preset isolation, conflicts, loss, rollback, restoration failure
+and foreign replacements. Offline GPU checks confirm six/eight-ray budget values
+in addition to prior math/history tests. They do not execute the combined mode
+inside BeamNG. Start with six rays, compare GI OFF/ON at fixed reflection settings,
+then try eight rays if frame time permits. Do not use sixteen-ray cleanup as a
+gameplay default for this comparison.
 
 ## Extra-camera capture probe (parked; not a reflection fallback yet)
 

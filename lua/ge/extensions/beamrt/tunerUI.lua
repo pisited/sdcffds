@@ -138,6 +138,40 @@ function M.diagnostics(im, api)
   end
 end
 
+function M.giExperiments(im, api)
+  if not api.setGIReceiverDeLight or not im.CollapsingHeader1('GI color and coverage experiments') then return end
+  local settings = api.getSettings()
+  local enabled = (settings.giReceiverDeLight or 0) > 0
+  if im.Button((enabled and 'Restore original receiver color' or 'Try de-lit receiver color') .. '##BeamRTGI') then
+    api.setGIReceiverDeLight(enabled and 0 or 1)
+  end
+  tip(im, 'Estimates material tint after removing direct-light color. Keeps Bounce color, GI intensity, source light color, metallic rejection and native reflections unchanged. Approximate, not measured albedo.')
+  im.TextWrapped('Warm lamps should remain warm. This targets repeated orange/brown receiver tint, not all colored bounce. Reversible; default OFF.')
+  if im.Button((api._giDdaCoverageRestore and 'Undo wider DDA coverage' or 'Try wider DDA coverage') .. '##BeamRTGI') then
+    local ok, reason = api.setGIWideDdaExperiment(not api._giDdaCoverageRestore)
+    if not ok and type(log) == 'function' then log('W', 'BeamRT', tostring(reason)) end
+  end
+  tip(im, 'Doubles screen-pixel stride only; requires Screen DDA. Same depth-sample budget and world reach. May miss thin geometry. Does not change Coherent tracing, GI brightness or select a renderer.')
+end
+
+function M.lampShadows(im, api)
+  if not api.getNearbyLampShadowStatus or not im.CollapsingHeader1('Automatic lamp shadows') then return end
+  local status=api.getNearbyLampShadowStatus()
+  local label=status.pendingRestore and not status.requested and 'Retry lamp restoration'
+    or (status.automaticPreference~=false and 'Disable automatic lamp shadows' or 'Enable automatic lamp shadows')
+  if im.Button(label..'##BeamRTLamps') then
+    local ok,reason=api.setAutomaticLampShadowsEnabled(status.automaticPreference==false and not status.pendingRestore)
+    if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
+  end
+  tip(im,'Default ON when starting GI, Coherent or combined rendering. Incrementally requests shadows for all advertised scene PointLight/SpotLight objects, including currently disabled lights; rescans for new lights. Raises smaller maps to 1024. Disable restores original owned fields.')
+  im.TextWrapped(status.reason)
+  im.TextWrapped('No camera-radius or four-light limit. Native GPU shadow budgets and caster materials still apply. No light color, intensity, range or global quality changes. Disable-all restores shadows; the next renderer start resumes automatic mode unless opted out this session.')
+  if status.automatic then
+    im.TextUnformatted(string.format('Inspected: %d | Pending: %d | Owned fields: %d',
+      status.processedLights or 0,status.pendingJobs or 0,status.changedFields or 0))
+  end
+end
+
 function M.draw(im, api, panels)
   if not im.BeginTabBar('BeamRTTunerTabs') then return end
   for _, tab in ipairs({{'Reflections','reflections'}, {'Lighting & GI','lighting'},
@@ -152,6 +186,8 @@ function M.draw(im, api, panels)
         im.TextWrapped('Experimental: PTGI diffuse lighting, then Coherent reflections. Older SSR and water overlay stay off. Existing ray count and lighting tuning are retained.')
         im.TextWrapped(combined.reason)
       end
+      if tab[2] == 'lighting' then M.giExperiments(im,api) end
+      if tab[2] == 'lighting' then M.lampShadows(im,api) end
       if tab[2] == 'reflections' then M.reflections(im,api) end
       if tab[2] == 'diagnostics' then M.diagnostics(im,api) end
       if panels[tab[2]] then panels[tab[2]]() end

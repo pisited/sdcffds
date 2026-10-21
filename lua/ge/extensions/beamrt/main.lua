@@ -1,4 +1,4 @@
--- BeamRT v0.120: opt-in PTGI + Coherent SSR, with legacy reflections excluded.
+-- BeamRT v0.121: automatic, incremental native point/spot lamp shadows.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -17,6 +17,16 @@ package.loaded["ge/extensions/beamrt/waterReceivers"] = nil
 package.loaded["ge/extensions/beamrt/reflectionLab"] = nil
 package.loaded["ge/extensions/beamrt/tunerUI"] = nil
 M._tunerUI = require("ge/extensions/beamrt/tunerUI")
+M._automaticLampShadows = true -- session preference; renderer startup opts in
+do
+  local key='ge/extensions/beamrt/nearbyLampShadows'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok, restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._nearbyLampShadows=require(key)
+end
 
 -- A native experiment can own a temporary field value. Restore that ownership
 -- before refreshing its module; never orphan a failed restoration on reload.
@@ -67,7 +77,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.120"
+local VERSION = "0.121"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -182,6 +192,7 @@ local PROGRESSIVE = {
   cameraCutReason = nil,
   lightingDiagnostic = {mode = 0, name = "off", gain = 4.0},
   lightingAccuracyMode = 1, -- conservative by default; 0 is legacy baseline
+  receiverDeLight = 0, -- opt-in; preserve the existing appearance by default
   reflectionDiagnostic = {mode = 0, name = "off"},
   reflectionSampling = {mode = 0, name = "mirror", frame = 0, sampleIndex = 0},
   reflectionReconstruction = {mode = 1, name = "playable", frameDelta = 1 / 60},
@@ -222,7 +233,7 @@ local PROGRESSIVE = {
   },
   inputPrep = {
     receiverShaderName = "BeamRT_ReceiverResponseShader",
-    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v001.hlsl",
+    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v002.hlsl",
     receiverEffectName = "BeamRT_ReceiverResponseFx",
     receiverTarget = "#BeamRT_ReceiverResponse",
     auxiliaryShaderName = "BeamRT_AuxiliaryPackShader",
@@ -1327,6 +1338,8 @@ local function applyGIShaderConsts(forceGeometryRebind)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giExposure", giExposure)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giShadowFocus", giShadowFocus)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverDeLight", PROGRESSIVE.receiverDeLight)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giContrast", giContrast)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giEnergyLimit", giEnergyLimit)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giHighlightRolloff", giHighlightRolloff)
@@ -1693,6 +1706,11 @@ local function resetReflectionHistory(reason, shouldLog)
 end
 
 local function resetTemporalHistory(reason, shouldLog)
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    -- Coherent samples GI-lit scene color. A changed GI signal must not retain
+    -- reflections accumulated from the previous lighting configuration.
+    M._coherentRenderer.resetHistory()
+  end
   giFrameIndex = 0
   historyValid = 0
   historyWarmupFrames = 0
@@ -3090,6 +3108,7 @@ function M.setCoherentSsrEnabled(value)
   end
   if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
     or PROGRESSIVE.reflectionSourceProbeTarget or materialCachePublication or CLEAN_RADIANCE.build
+    or CLEAN_RADIANCE.materialBatch
     or PROGRESSIVE.reflectionDiagnostic.mode ~= 0 or PROGRESSIVE.lightingAudit.getStatus().active then
     return false, "Finish the active BeamRT diagnostic/capture before switching pipelines."
   end
@@ -3098,6 +3117,7 @@ function M.setCoherentSsrEnabled(value)
   local stopped = M.disable()
   if not stopped then return false, "Could not safely release the previous rendering experiment." end
   local ok, reason = M._coherentRenderer.enable()
+  if ok and M._startAutomaticLampShadows then M._startAutomaticLampShadows() end
   beamrtLog(ok and "I" or "W", "Coherent SSR: " .. tostring(reason or M._coherentRenderer.getStatus().reason))
   M.openTuner()
   return ok, reason
@@ -3130,10 +3150,22 @@ function M.setPtgiCoherentEnabled(value)
   end
   local ok, reason=M.setCoherentSsrEnabled(true)
   if not ok then return false, reason end
-  if not M.setMode('lighting') then M.disable(); return false,'Could not select PTGI lighting.' end
+  local selected, modeOK=pcall(M.setMode,'lighting')
+  if not selected or not modeOK then
+    pcall(M.disable)
+    return false,'Could not select PTGI lighting: '..tostring(modeOK)
+  end
   M._ptgiCoherent.requested=true
-  ok, reason=M.enable()
-  if not ok then M.disable(); return false,reason end
+  local called
+  called, ok, reason=pcall(M.enable)
+  if not called or not ok then
+    pcall(M.disable)
+    return false,called and reason or tostring(ok)
+  end
+  if not M.getPtgiCoherentStatus().active then
+    M.disable()
+    return false,'Combined CPU pass graph did not become ready.'
+  end
   M._ptgiCoherent.reason='PTGI before Coherent SSR; CPU pass state only. Visual output unverified.'
   M.openTuner()
   return true
@@ -3401,6 +3433,7 @@ function PROGRESSIVE.inputPrep.applyConsts()
   end
   setIfPresent(GI_EFFECT_NAME, "$giAuxImageSize", PROGRESSIVE.inputPrep.imageSize)
   setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverDeLight", PROGRESSIVE.receiverDeLight)
 end
 
 local function getOrCreateRenderView(name)
@@ -4310,6 +4343,9 @@ function M._copyMaterialCacheResult(key)
 end
 
 function M.publishMaterialCache(requestedKey)
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before producer-view material captures.'
+  end
   local key = M._normalizeMaterialCacheKey(requestedKey)
   local config = key and MATERIAL_CACHE_CONFIGS[key] or nil
   if not config then
@@ -4411,6 +4447,9 @@ function M.publishMaterialCache(requestedKey)
 end
 
 function M.publishMaterialV2Caches()
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before producer-view material captures.'
+  end
   if materialCachePublication or CLEAN_RADIANCE.materialBatch then
     beamrtLog("W", "a material-cache publication or Material V2 batch is already active")
     return false
@@ -4575,6 +4614,9 @@ function M.invalidateMaterialCaches(reason)
 end
 
 function M.refreshCleanRadianceDiagnostics()
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before legacy clean-radiance captures.'
+  end
   local compatibility = PROGRESSIVE.rendererCompatibility.check()
   if not compatibility.safe then
     beamrtLog("W", compatibility.reason)
@@ -5089,6 +5131,73 @@ function M.setGIReceiverTint(value)
   giReceiverTint = numericValue
   applyGIShaderConsts()
   beamrtLog("I", "GI receiver tint set to " .. tostring(giReceiverTint))
+  return true
+end
+
+function M.setGIReceiverDeLight(value)
+  local amount = finiteNumber(value)
+  if not amount or amount < 0 or amount > 1 then return false end
+  PROGRESSIVE.receiverDeLight = amount
+  resetTemporalHistory("receiver color experiment changed", false)
+  applyGIShaderConsts()
+  return true
+end
+
+function M.setNearbyLampShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected a boolean.' end
+  if value and (PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch) then
+    return false,'Finish the active audit/material capture before changing lamp shadows.'
+  end
+  local ok, reason
+  if value then ok,reason=M._nearbyLampShadows.enable()
+  else ok,reason=M._nearbyLampShadows.disable() end
+  resetTemporalHistory('native lamp shadow settings changed',false)
+  if M._coherentRenderer then M._coherentRenderer.resetHistory() end
+  return ok,reason
+end
+
+function M.getNearbyLampShadowStatus()
+  local status=M._nearbyLampShadows.getStatus()
+  status.automaticPreference=M._automaticLampShadows~=false
+  return status
+end
+
+function M._startAutomaticLampShadows()
+  if not M._nearbyLampShadows or M._automaticLampShadows==false then return true end
+  if PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch then return true end
+  local ok,reason=M._nearbyLampShadows.enableAutomatic()
+  if not ok then beamrtLog('W','Automatic lamp shadows: '..tostring(reason)) end
+  return ok,reason
+end
+
+function M.setAutomaticLampShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected a boolean.' end
+  if value and (PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch) then
+    return false,'Finish the active capture before changing automatic lamp shadows.'
+  end
+  M._automaticLampShadows=value
+  if value then return M._startAutomaticLampShadows() end
+  return M.setNearbyLampShadowsEnabled(false)
+end
+
+function M.setGIWideDdaExperiment(enabled)
+  if type(enabled) ~= "boolean" then return false, "Expected a boolean." end
+  if enabled then
+    if PROGRESSIVE.marcherName ~= "screendda" then
+      return false, "Select Screen DDA first; linear traversal is unchanged."
+    end
+    if M._giDdaCoverageRestore then return true end
+    M._giDdaCoverageRestore = {stride = PROGRESSIVE.screenRayStride}
+    -- Same number of depth samples; more screen reach, but thin geometry may
+    -- be skipped. Keep world reach, hit validation and all light gains intact.
+    M.setScreenRayStride(math.min(8, PROGRESSIVE.screenRayStride * 2))
+  elseif M._giDdaCoverageRestore then
+    if not M.setScreenRayStride(M._giDdaCoverageRestore.stride) then return false end
+    M._giDdaCoverageRestore = nil
+  end
   return true
 end
 
@@ -6040,6 +6149,7 @@ function M.getSettings()
     giExposure = giExposure,
     giShadowFocus = giShadowFocus,
     giReceiverTint = giReceiverTint,
+    giReceiverDeLight = PROGRESSIVE.receiverDeLight,
     giContrast = giContrast,
     giEnergyLimit = giEnergyLimit,
     giHighlightRolloff = giHighlightRolloff,
@@ -6109,6 +6219,7 @@ function M.settingsCommand()
     PROGRESSIVE.screenDdaMaxPaths, PROGRESSIVE.screenDdaMaxSteps,
     CLEAN_RADIANCE.selectedPTGISource, modeName)
     .. "; beamrt_main.setReflectionColorFilterEnabled(" .. tostring(PROGRESSIVE.reflectionColor.enabled) .. ")"
+    .. "; beamrt_main.setGIReceiverDeLight(" .. tostring(PROGRESSIVE.receiverDeLight) .. ")"
     .. string.format("; beamrt_main.setReflectionSampleCellPixels(%.4g); beamrt_main.setReflectionNoiseSeed(%d); beamrt_main.setReflectionFilterRadiusScale(%.4g); beamrt_main.setReflectionSourceFootprintScale(%.4g)",
       PROGRESSIVE.reflectionTuning.sampleCellPixels, PROGRESSIVE.reflectionTuning.noiseSeed,
       PROGRESSIVE.reflectionTuning.filterRadiusScale, PROGRESSIVE.reflectionTuning.sourceFootprintScale)
@@ -6169,6 +6280,7 @@ function M.applySettings(settings)
     {"giExposure", M.setGIExposure},
     {"giShadowFocus", M.setGIShadowFocus},
     {"giReceiverTint", M.setGIReceiverTint},
+    {"giReceiverDeLight", M.setGIReceiverDeLight},
     {"giContrast", M.setGIContrast},
     {"giEnergyLimit", M.setGIEnergyLimit},
     {"giHighlightRolloff", M.setGIHighlightRolloff},
@@ -6217,7 +6329,11 @@ function M.applySettings(settings)
   local success = true
   for _, entry in ipairs(setters) do
     local value = settings[entry[1]]
-    if value ~= nil and not entry[2](value) then
+    -- The four existing presets also contain legacy SSR tuning. In combined
+    -- mode apply their GI portion only; never touch either reflection backend.
+    local skipLegacyReflection = M._ptgiCoherent and M._ptgiCoherent.requested
+      and entry[1]:match('^reflection')
+    if value ~= nil and not skipLegacyReflection and not entry[2](value) then
       success = false
     end
   end
@@ -6307,6 +6423,10 @@ function M.loadTuning()
 end
 
 function M.resetHistory()
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    resetTemporalHistory('manual combined history reset', true)
+    return true
+  end
   if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
     M._coherentRenderer.resetHistory()
     return true
@@ -6862,10 +6982,10 @@ end
 M._tunerPanels = {}
 
 function M._tunerPanels.lighting()
-  im.TextWrapped("Combined PTGI + Coherent is available above. Start / Apply GI below selects the older standalone lighting route.")
-  if im.Button("Start / Apply GI") then M.start() end
+  im.TextWrapped("Combined PTGI + Coherent is available above. Standalone GI below selects the older rendering route.")
+  if im.Button("Standalone GI / legacy route") then M.start() end
   im.SameLine()
-  if im.Button("Reset legacy history") then M.resetHistory() end
+  if im.Button("Reset lighting history") then M.resetHistory() end
   im.TextUnformatted("Presets")
   for index, preset in ipairs(M.getPresets()) do
     if index == 2 or index == 4 then im.SameLine() end
@@ -7456,6 +7576,10 @@ function M.toggleTuner()
 end
 
 function M.enable()
+  if M._ptgiCoherent and not M._ptgiCoherent.requested and M._ptgiCoherent.hasLease() then
+    local restored, reason=M._ptgiCoherent.release()
+    if not restored then return false,reason end
+  end
   if M._planarCapture then
     local stopped, reason = M._planarCapture.stop("Switched to the older renderer")
     if not stopped then return false, reason end
@@ -7496,6 +7620,7 @@ function M.enable()
   applyShaderConsts()
   syncEffectEnablement()
   local compatibility = M.getRendererCompatibilityStatus()
+  if compatibility.safe and M._startAutomaticLampShadows then M._startAutomaticLampShadows() end
   beamrtLog(compatibility.safe and "I" or "W", "enable requested; current mode is " .. modeName
     .. (compatibility.safe and "" or "; " .. compatibility.reason))
   return true
@@ -7510,6 +7635,7 @@ function M.start()
 end
 
 function M.disable()
+  local lampsRestored = not M._nearbyLampShadows or M._nearbyLampShadows.disable('BeamRT disabled')
   local captureStopped = not M._planarCapture or M._planarCapture.stop("BeamRT disabled")
   local coherentStopped = not M._coherentRenderer or M._coherentRenderer.disable("BeamRT disabled")
   local nativeRestored = true
@@ -7520,7 +7646,7 @@ function M.disable()
   syncEffectEnablement()
   local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return nativeRestored and coherentStopped and captureStopped and combinedRestored
+  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored
 end
 
 function M.toggle()
@@ -7905,6 +8031,13 @@ local function validateCleanRadianceLifetimes()
 end
 
 function M.onPreRender(dtReal, dtSim, dtRaw)
+  if M._nearbyLampShadows and not materialCachePublication and not CLEAN_RADIANCE.build
+    and not CLEAN_RADIANCE.materialBatch
+    and (not PROGRESSIVE.lightingAudit.getStatus or not PROGRESSIVE.lightingAudit.getStatus().active)
+    and M._nearbyLampShadows.update(dtReal) then
+    resetTemporalHistory('native lamp shadow cohort changed',false)
+    if M._coherentRenderer then M._coherentRenderer.resetHistory() end
+  end
   if M._planarCapture then M._planarCapture.update() end
   if M._nativeSsrEnhancement then M._nativeSsrEnhancement.update() end
   -- Recheck actual native state before any render, including runtime toggles.
@@ -7915,6 +8048,9 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
   if not frameDelta or frameDelta <= 0 then frameDelta = finiteNumber(dtRaw) end
   if not frameDelta or frameDelta <= 0 then frameDelta = 1 / 60 end
   if M._coherentRenderer then M._coherentRenderer.update(frameDelta) end
+  if frameDelta > 0.25 and effectIsEnabled(GI_EFFECT_NAME) then
+    resetTemporalHistory('GI render interrupted', false)
+  end
   if M._ptgiCoherent and M._ptgiCoherent.requested and not M.getPtgiCoherentStatus().active then
     beamrtLog('W','Combined rendering stopped: pass loss, stage change, or renderer conflict.')
     M.disable()
@@ -7940,6 +8076,7 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Graphics/settings changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Graphics settings changed") end
   if M._coherentRenderer then M._coherentRenderer.disable("Graphics settings changed; re-enable explicitly") end
@@ -7990,6 +8127,7 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission changed") end
   if M._coherentRenderer then M._coherentRenderer.disable("Mission changed; re-enable explicitly") end
@@ -8028,6 +8166,7 @@ function M.onClientStartMission()
 end
 
 function M.onClientEndMission()
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission ended') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
   if M._planarCapture then M._planarCapture.stop("Mission ended") end
   if M._coherentRenderer then M._coherentRenderer.disable("Mission ended") end
@@ -8035,6 +8174,7 @@ function M.onClientEndMission()
 end
 
 function M.onExtensionUnloaded()
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('BeamRT unloaded') end
   if M._ptgiCoherent then M.disable() end
   if M._planarCapture then M._planarCapture.release("BeamRT unloaded") end
   if M._coherentRenderer then M._coherentRenderer.release("BeamRT unloaded") end
