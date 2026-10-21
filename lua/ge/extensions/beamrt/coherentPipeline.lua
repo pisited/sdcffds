@@ -15,7 +15,7 @@ EffectModule.name = "BeamRT Coherent SSR"
 EffectModule.description = "Opt-in screen-space reflections for roads, vehicles and water. Sky and enclosure fill are separate heuristic experiments."
 EffectModule.category = "Post Processing/Lighting"
 
-EffectModule.version = "0.119.1"
+EffectModule.version = "0.124"
 EffectModule.shaderCodeVersion = EffectModule.version
 
 
@@ -93,6 +93,7 @@ EffectModule.parameters = {
     hdrComposite = { label = "HDR Composite", type = "bool", default = true },
     surfaceDetail = { label = "Surface Detail Under Reflections", type = "number", default = 1.0, min = 0.0, max = 1.0, step = 0.05 },
     faceOnReflectance = { label = "Face-On Reflectance", type = "number", default = 0.35, min = 0.0, max = 1.0, step = 0.01 },
+    nativeMaterialResponse = { label = "Native material response (experimental)", type = "bool", default = false },
     facingFade = { label = "Facing Fade", type = "number", default = 0.15, min = 0.001, max = 1.0, step = 0.01 },
     highRoughnessSuppression = { label = "High Rough Suppression", type = "number", default = 0.45, min = 0.0, max = 1.0, step = 0.01 },
 
@@ -456,7 +457,7 @@ local function polishParameterMetadata()
         hdrComposite = { "HDR Composite", "Applies reflections to the HDR scene, after water, particles and clouds and before BeamNG's exposure, bloom and tonemapping. Reflected highlights keep their full brightness, and reflections do not pick up bloom or map icons. When off, reflections are applied to the final image and clip at white. Sky brightness settings behave differently in the two modes; in HDR, 1.0 is the physically based sky." },
         surfaceDetail = { "Surface Detail Under Reflections", "How much of a surface's own fine detail (texture, bumps, specular highlights) stays visible under a reflection. The reflection replaces only the local average of the image. Applies fully on rough surfaces, less on mirror-like ones and not on water. 0 = the reflection replaces the whole pixel." },
         pixelRebuild = { "Per-Pixel Reflection Rebuild", "Rebuilds glossy reflections for each native pixel from its own normal and the traced hit distance, using this frame's colour. Keeps normal-map, ripple and texture detail at low Render Resolution and prevents ghosting on moving objects. When off, the traced reflection is upscaled." },
-        faceOnReflectance = { "Face-On Reflectance", "Reflection strength when looking straight at a surface; it rises to full at grazing angles (Schlick Fresnel). Real paint, plastic and asphalt are about 0.04, but BeamNG's G-buffer has no metalness or specular colour, so this is set by preference." },
+        faceOnReflectance = { "Legacy / Water Face-On Reflectance", "Legacy reflection blend-mask floor, not a measured material F0. Native material response bypasses it for ordinary surfaces and reads per-pixel specular colour from RT1. Water and procedural puddles retain the legacy response." },
         roughnessEnd = { "Roughness Cutoff", "Material roughness at which reflections have faded out completely. The fade starts at 15% of this value. Rougher surfaces keep BeamNG's own reflections." },
         stochasticBias = { "Reflection Stability", "Narrows ray sampling toward the mirror direction. Higher values are more stable but blur rough reflections less." },
         temporalStrength = { "Temporal Denoising", "Weight of accumulated history. 0 = no accumulation." },
@@ -2267,6 +2268,7 @@ local function setStaticConstants(pass, self)
     pass:setShaderConst("$uRoughnessPower", value(self, "roughnessPower", 1.0))
     pass:setShaderConst("$uFresnelPower", value(self, "fresnelPower", 6.0))
     pass:setShaderConst("$uFresnelStrength", 1.0 - math.min(math.max(tonumber(value(self, "faceOnReflectance", 0.35)) or 0.35, 0.0), 1.0))
+    pass:setShaderConst("$uNativeMaterialResponse", applyVariant.materialResponse(self) and 1 or 0)
     pass:setShaderConst("$uFacingFade", value(self, "facingFade", 0.15))
     pass:setShaderConst("$uHighRoughnessSuppression", value(self, "highRoughnessSuppression", 0.45))
 
@@ -2843,6 +2845,8 @@ function applyVariant.recreate(self, variant)
     applyPass = createPostEffect(name, variant, renderPriorityBase - 0.3, "$backBuffer", nil, nil,
         "#BeamRTCoherentHistoryA", nil)
     applyPass:setField("texture", 4, "#BeamRTCoherentHiZ0")
+    applyPass:setField("texture", 5, applyVariant.materialResponse(self) and '#prepass[RT1]' or terrainTexPath)
+    applyVariant.materialRoute=applyVariant.materialResponse(self)
     applyVariant.current = variant
     setStaticConstants(applyPass, self)
     sendWaterVolumes(applyPass, self)
@@ -3098,7 +3102,7 @@ local function applyRouting(self)
         recreateTracePass(self, variant)
     end
     local wantApplyVariant = (debugMode ~= 0) and 16.0 or 3.0
-    if applyPass and wantApplyVariant ~= applyVariant.current then
+    if applyPass and (wantApplyVariant ~= applyVariant.current or applyVariant.materialRoute~=applyVariant.materialResponse(self)) then
         applyVariant.recreate(self, wantApplyVariant)
     end
     local wantTemporalDebug = useTemporal and debugMode >= 44 and debugMode <= 47
@@ -3283,6 +3287,7 @@ local function ensureEffect(self)
     traceShaderVariant = initialTraceVariant
     applyVariant.current = 3.0
     applyPass = createPostEffect(basePostEffectName .. "ApplyPass", 3.0, renderPriorityBase - 0.3, "$backBuffer", nil, nil, "#BeamRTCoherentHistoryA", nil)
+    applyVariant.bindMaterial(self)
     cameraHistoryPass = createPostEffect(basePostEffectName .. "CameraHistoryPass", 9.0,
         renderPriorityBase - 0.4, "$backBuffer", "#BeamRTCoherentCameraHistory", "1 1",
         fallbackTexture, "PFXTargetClear_OnCreate", "GFXFormatR32G32B32A32F")
@@ -3357,6 +3362,7 @@ local function clearPassReferences()
     temporalPassB = nil
     temporalDrawingPass = nil
     applyPass = nil
+    applyVariant.materialRoute=nil
     temporalTargetAReady = false
     temporalTargetBReady = false
     temporalScheduledTarget = nil
@@ -3398,6 +3404,16 @@ function applyVariant.setStage(self, move)
         end
     end
     temporalHistoryWarmup = 2
+end
+
+function applyVariant.materialResponse(self)
+    return value(self,'nativeMaterialResponse',false)==true and value(self,'hdrComposite',true)==true
+        and value(self,'terrainMaskEnable',false)~=true and value(self,'debugView',0)==0
+end
+
+function applyVariant.bindMaterial(self)
+    applyVariant.materialRoute=applyVariant.materialResponse(self)
+    if applyPass then applyPass:setField('texture',5,applyVariant.materialRoute and '#prepass[RT1]' or terrainTexPath) end
 end
 
 local RETIRED_PASS_NAMES = { "TemporalPass", "CopyPass", "HiZ7Pass", "HiZ8Pass" }
@@ -3553,7 +3569,8 @@ local function update(self, dt)
 
     if terrainTexRevision ~= boundTerrainRevision then
         for _, pass in ipairs({ tracePass, roughTracePass, applyPass, applyVariant.unified.pass }) do
-            if pass then pcall(function() pass:setField("texture", 5, terrainTexPath) end) end
+            if pass then pcall(function() pass:setField("texture", 5,
+                pass==applyPass and applyVariant.materialResponse(self) and '#prepass[RT1]' or terrainTexPath) end) end
         end
         boundTerrainRevision = terrainTexRevision
     end
@@ -3586,7 +3603,8 @@ local function onMissionLoad(self)
     end
     refreshTerrain(self)
     for _, pass in ipairs({tracePass, roughTracePass, applyPass, applyVariant.unified.pass}) do
-        if pass then pass:setField("texture", 5, terrainTexPath) end
+        if pass then pass:setField("texture", 5,
+            pass==applyPass and applyVariant.materialResponse(self) and '#prepass[RT1]' or terrainTexPath) end
     end
     boundTerrainRevision = terrainTexRevision
     staticConstantsDirty = true
@@ -3699,6 +3717,10 @@ end
 
 function EffectModule.getRuntimeStatus()
     local ready = true
+    if applyVariant.materialRoute then
+        local ok,valid=pcall(function()return applyPass and applyPass:getField('texture',5)=='#prepass[RT1]' end)
+        if not ok or not valid then ready=false end
+    end
     for name,object in pairs(EffectModule.sceneConsumers) do
         local ok,valid=pcall(function()
             return scenetree.findObject(name)==object and object:getField('texture',0)==EffectModule.sceneColorSource
@@ -3719,7 +3741,7 @@ function EffectModule.getRuntimeStatus()
             and temporalPass:getField("skip", 0) ~= "1"
     end)
     return {passesEnabled = ready, frame = frame, historyWarmup = temporalHistoryWarmup,
-        sceneColorSource = EffectModule.sceneColorSource,
+        sceneColorSource = EffectModule.sceneColorSource,materialResponseActive=applyVariant.materialRoute==true,
         accumulationScheduled = ready and temporalScheduled and okTemporal and temporalEnabled == true,
         cameraHistoryReady = cameraHistoryReady, waterMapAvailable = riverState.available == true,
         waterMapReason = riverState.lastFailure, historyInterleaved = value(EffectModule, "interleavedHistory", true)}

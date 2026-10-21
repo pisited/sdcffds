@@ -113,7 +113,7 @@ class TunerUI(unittest.TestCase):
 
     def test_every_full_width_slider_has_a_separate_visible_label_above_it(self):
         expected = {'intensity': 'Reflection strength', 'roughnessEnd': 'Roughness cutoff',
-                    'faceOnReflectance': 'Face-on reflectivity', 'surfaceDetail': 'Preserve surface detail',
+                    'faceOnReflectance': 'Legacy / water face-on reflectivity', 'surfaceDetail': 'Preserve surface detail',
                     'renderScale': 'Trace resolution', 'traceQuality': 'Trace work budget',
                     'temporalStrength': 'History retention', 'stochasticReuse': 'Spatial reuse',
                     'waterSSRStrength': 'Water reflection strength', 'waterColorStrength': 'Added tint (0 = stock color)',

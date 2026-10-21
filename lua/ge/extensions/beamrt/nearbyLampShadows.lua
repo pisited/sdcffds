@@ -12,6 +12,7 @@ local pool, prioritized = {}, {}
 local priorityAssist, priorityElapsed, priorityRejected = true, 1, 0
 local scanCycles, newLightsThisScan = 0, 0
 local priorityCamera, nearbyLookup = nil, 'Not checked yet'
+local NEAR_RADIUS=100 -- camera discovery/priority only; native lamp ranges stay intact
 local function cameraPosition()
   if not core_camera or type(core_camera.getPosition)~='function' then return end
   local ok,p=pcall(core_camera.getPosition)
@@ -196,7 +197,7 @@ local function inspectNearby(p)
   end
   local ok,candidates=pcall(function()
     local box=Box3F()
-    box:setExtents(vec3(160,160,160));box:setCenter(vec3(p.x,p.y,p.z))
+    box:setExtents(vec3(NEAR_RADIUS*2,NEAR_RADIUS*2,NEAR_RADIUS*2));box:setCenter(vec3(p.x,p.y,p.z))
     local hits=findObjectList(box,SOTLight,0)
     assert(type(hits)=='table','Nearby query unavailable')
     local result,ids={},{}
@@ -213,7 +214,7 @@ local function inspectNearby(p)
         if truth(o:getField('isEnabled',0))~=true then return end
         local q=o:getPosition()
         local d=(q.x-p.x)^2+(q.y-p.y)^2+(q.z-p.z)^2
-        if d==d and d<=80*80 then return {id=id,distance=d} end
+        if d==d and d<=NEAR_RADIUS*NEAR_RADIUS then return {id=id,distance=d} end
       end)
       if readable and item then result[#result+1]=item end
     end
@@ -246,7 +247,7 @@ local function updatePriority(nearIds)
         local q=entry and entry.position
         if q and entry.enabled and not entry.blocked then
           local d=(q.x-p.x)^2+(q.y-p.y)^2+(q.z-p.z)^2
-          if d==d and d<=80*80 then candidates[#candidates+1]={id=id,distance=d} end
+          if d==d and d<=NEAR_RADIUS*NEAR_RADIUS then candidates[#candidates+1]={id=id,distance=d} end
         end
       end
       table.sort(candidates,function(a,b)
@@ -462,7 +463,7 @@ function M.getStatus()
     automatic=automatic,processedLights=visited,pendingJobs=math.max(0,#queue-cursor+1),skippedLights=skipped,
     priorityAssist=priorityAssist,prioritizedLights=near,priorityRejected=priorityRejected,
     scanCycles=scanCycles,newLightsThisScan=newLightsThisScan,
-    nearbyLookup=nearbyLookup,
+    nearbyLookup=nearbyLookup,priorityRadius=NEAR_RADIUS,
     globalGraphicsSettingsChanged=false,lightColorOrIntensityChanged=false,gpuExecutionVerified=false}
 end
 
@@ -481,7 +482,7 @@ function M.getNearbyReport()
       local q=entry.position
       if q then
         local d=(p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2
-        if d==d and d<=80*80 then entries[#entries+1]={entry=entry,distance=math.sqrt(d)} end
+        if d==d and d<=NEAR_RADIUS*NEAR_RADIUS then entries[#entries+1]={entry=entry,distance=math.sqrt(d)} end
       end
     end
     table.sort(entries,function(a,b)return a.distance<b.distance end)

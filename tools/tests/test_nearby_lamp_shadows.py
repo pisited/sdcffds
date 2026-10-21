@@ -46,11 +46,11 @@ function Box3F()
  return b
 end
 function findObjectList(box,flags,detail)
- assert(flags==64 and detail==0 and box.extents.x==160)
+ assert(flags==64 and detail==0 and box.extents.x==200)
  queryCount=queryCount+1
  local hits={}
  for _,o in pairs(objects)do
-   if math.abs(o.p.x-box.center.x)<=80 then hits[#hits+1]=o end
+   if math.abs(o.p.x-box.center.x)<=100 then hits[#hits+1]=o end
  end
  return hits
 end
@@ -164,7 +164,7 @@ class NearbyLampShadows(unittest.TestCase):
 
     def test_automatic_mode_covers_all_distances_and_disabled_lights_incrementally(self):
         for lua,api in self.runtimes():
-            lua.execute('for i=1,80 do lamp(i,i*100)end;objects[80].fields.isEnabled="0"')
+            lua.execute('for i=1,80 do lamp(i,i*200)end;objects[80].fields.isEnabled="0"')
             self.assertTrue(api.enableAutomatic())
             self.assertEqual(len(lua.globals().writes),0)
             self.assertTrue(api.update(.016))
@@ -343,6 +343,17 @@ class NearbyLampShadows(unittest.TestCase):
             self.assertTrue(api.disable())
             self.assertEqual(lua.globals().objects[6001].fields.castShadows,'0')
             self.assertEqual(lua.globals().objects[6001].fields.texSize,'256')
+
+    def test_expanded_priority_radius_includes_90m_without_changing_far_native_fields(self):
+        for lua,api in self.runtimes():
+            lua.execute(SPATIAL_MOCK)
+            lua.execute('lamp(1,90);lamp(2,101)')
+            api.enableAutomatic();api.update(.016)
+            self.assertEqual(api.getStatus().priorityRadius,100)
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'1024')
+            self.assertEqual(lua.globals().objects[2].fields.texSize,'256')
+            self.assertTrue(api.disable())
+            self.assertEqual(lua.globals().objects[1].fields.texSize,'256')
 
     def test_nearby_query_is_throttled_stationary_and_accepts_ids(self):
         for lua,api in self.runtimes():

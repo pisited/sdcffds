@@ -119,6 +119,13 @@ float FresnelMask(float3 viewToSurfaceDir, float3 normalWS)
     return saturate(lerp(1.0, fresnel, saturate(uFresnelStrength)));
 }
 
+float BrtcOrdinaryFresnelMask(float3 viewToSurfaceDir, float3 normalWS)
+{
+    // Store unweighted incident reflection in history. Apply native RGB F0
+    // once at the final receiver, not once per ray and again after denoising.
+    return uNativeMaterialResponse > 0.5 ? 1.0 : FresnelMask(viewToSurfaceDir, normalWS);
+}
+
 float BrtcPuddleFresnelMask(float3 viewToSurfaceDir, float3 normalWS)
 {
     float3 surfaceToEye = normalize(-viewToSurfaceDir);

@@ -57,10 +57,12 @@ function M.reflections(im, api)
 
   im.PushItemWidth(-1)
   if im.CollapsingHeader1('Look', im.TreeNodeFlags_DefaultOpen) then
+    toggle(im,api,options,'nativeMaterialResponse','Native material response (experimental)',
+      'Uses native RGB specular reflectance for ordinary surfaces and preserves native direct/GI lighting. Water/puddles keep their existing model. Adds material-weighted SSR; does not isolate/remove native probe lighting. Requires HDR and terrain mask OFF. OFF restores legacy composition.')
     slider(im,api,options,'intensity','Reflection strength',0,2)
     slider(im,api,options,'roughnessEnd','Roughness cutoff',0.05,1,'Restricts which surfaces receive reflections. This is not global scene exposure.')
-    slider(im,api,options,'faceOnReflectance','Face-on reflectivity',0,1,'Lower this if dry asphalt or concrete looks too mirror-like.')
-    slider(im,api,options,'surfaceDetail','Preserve surface detail',0,1)
+    slider(im,api,options,'faceOnReflectance','Legacy / water face-on reflectivity',0,1,'Native material mode ignores this for ordinary surfaces; native material reflectance is used instead. Water retains the legacy control.')
+    slider(im,api,options,'surfaceDetail','Preserve surface detail',0,1,'Legacy composition detail control. Native material mode preserves the original direct/diffuse/GI image without this low-pass replacement.')
   end
   if im.CollapsingHeader1('Quality') then
     slider(im,api,options,'renderScale','Trace resolution',0.25,1)
@@ -175,7 +177,7 @@ function M.lampShadows(im, api)
       if im.Button((status.priorityAssist and 'Nearby shadow priority ON' or 'Nearby shadow priority OFF')..'##BeamRTLamps') then
         api.setNearbyLampPriorityAssistEnabled(not status.priorityAssist)
       end
-      tip(im,'Reversible priority boost on up to eight enabled lamps within 80 m. Native nearby lookup runs before the background queue, on the next update after moving 4 m, or every 0.25 seconds while stationary. Unsupported lookup falls back to background discovery. Nearby spot maps are at least 1024; point maps at least 512. Original larger maps remain. Native GPU budgets and caster materials still apply.')
+      tip(im,'Reversible priority boost on up to eight enabled lamps within 100 m. Native nearby lookup runs before the background queue, on the next update after moving 4 m, or every 0.25 seconds while stationary. Unsupported lookup falls back to background discovery. Nearby spot maps are at least 1024; point maps at least 512. Original larger maps remain. Native GPU budgets and caster materials still apply. Haze uses a separate read-only detector.')
       im.TextUnformatted('Nearby priority candidates: '..tostring(#(status.prioritizedLights or {})))
       if (status.priorityRejected or 0)>0 then im.TextWrapped('Native priority writes rejected: '..status.priorityRejected..'; baseline shadows retained.') end
     end
@@ -193,15 +195,33 @@ function M.localVolumes(im,api)
     if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
   end
   im.TextWrapped(status.reason)
-  im.TextWrapped('Opt-in approximation: up to four nearby native spotlights, 8 integration samples per lamp. Stops at visible depth, but does NOT use native lamp shadows; shafts can leak through unseen blockers. No point, emissive or vehicle light coverage. Uses automatic shadows / nearby priority selection. Adds GPU work; disabled by default.')
+  im.TextWrapped('Two-tier coverage: shadow discovery/priority within 100 m; independent read-only haze detection within 180 m, up to eight spotlights and 160 m view distance. 8 integration samples per lamp. Haze does not request shadows or require shadow priority. Stops at visible depth, but does NOT use native lamp shadows; unseen blockers can leak. No general point, emissive or vehicle light coverage. Adds GPU work; disabled by default.')
   if status.pendingCleanup and im.Button('Retry haze cleanup##BeamRTVolumes') then api.setLocalVolumesEnabled(false) end
   im.TextUnformatted('Supported spotlights: '..tostring(status.lightCount or 0))
+  if status.discovery then
+    im.TextWrapped(status.discovery.lookup or '')
+    im.TextUnformatted(string.format('Haze-only discovery checks: %d | Cached candidates: %d / %d',
+      status.discovery.pendingJobs or 0,status.discovery.cachedCandidates or 0,status.discovery.candidateLimit or 512))
+  end
   for _,control in ipairs({{'strength','Haze brightness',0,4},{'density','Particle density',0,.1}}) do
     im.TextUnformatted(control[2])
     local pointer=im.FloatPtr(status[control[1]])
     if im.SliderFloat('##BeamRTVolume'..control[1],pointer,control[3],control[4],'%.3f') then
       api.setLocalVolumeParameter(control[1],pointer[0])
     end
+  end
+  if status.emissive and api.setEmissiveVolumesEnabled then
+    local pointer=im.BoolPtr(status.emissive.requested)
+    if im.Checkbox('Prepared LED emissive haze (experimental)##BeamRTEmissive',pointer) then
+      local ok,why=api.setEmissiveVolumesEnabled(pointer[0])
+      if not ok and type(log)=='function' then log('W','BeamRT',tostring(why)) end
+    end
+    im.TextWrapped(status.emissive.reason)
+    im.TextUnformatted('Prepared LED emitters: '..tostring(status.emissive.count or 0)..' / 2')
+    im.TextWrapped('Only the two separate Polish Roads Owlen LED meshes, not signs or arbitrary glowing pixels. Uses geometry, live emissive colour/nits and instance transforms; four area samples per mesh, 12 m local reach. Haze only: no surface lighting or native shadow visibility. Alignment and brightness are unverified; experimental gain is not calibrated. Off by default and after haze restart.')
+    im.TextUnformatted('Emissive haze gain')
+    local gain=im.FloatPtr(status.emissiveGain or 1)
+    if im.SliderFloat('##BeamRTVolumeemissiveGain',gain,0,4,'%.3f') then api.setLocalVolumeParameter('emissiveGain',gain[0]) end
   end
 end
 

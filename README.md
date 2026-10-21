@@ -1,4 +1,142 @@
-# BeamRT v0.122.1 — combined beauty recovery and source isolation
+# BeamRT v0.124 — material-aware reflection and prepared LED haze experiments
+
+Two independent A/B options are added; both default OFF. Existing ray counts,
+roughness cutoff, reflection strength, PTGI tuning and native materials/lights
+are not changed by enabling either option. Reload the extension once to load
+the new modules and shader cache version.
+
+**Reflections → Look → Native material response (experimental)** reads native
+per-pixel RGB specular reflectance from `#prepass[RT1]`, alongside the existing
+native normal/roughness inputs. A second material/texture library or material-name
+guess is not used. Ordinary surfaces no longer use the legacy global face-on
+blend-mask floor; material reflectance and view angle determine their response.
+Zero-specular material data stays nonreflective even at grazing angles, matching
+the native low-reflectance Fresnel guard. Water and procedural puddles retain
+their existing model, including their legacy face-on control.
+
+The new composition preserves scene direct/diffuse/PTGI lighting and adds a
+bounded material-weighted screen-space reflection. This is NOT exact native
+probe replacement or a full BRDF integration: native probe lighting cannot be
+isolated from the final beauty input, so overlapping native specular can still
+be counted twice. Incorrect native material authoring is not repaired. Ordinary
+surface detail no longer needs the four beauty low-pass taps in this mode.
+It uses the existing trace/history graph and adds no rays or fullscreen pass;
+no measured FPS improvement is claimed.
+
+Native integrated SSR must remain OFF (it can repurpose RT1). This option also
+requires HDR composition and terrain material masking OFF, because Apply's sixth
+texture slot is shared. Conflicting changes are refused, not silently applied.
+Diagnostic views temporarily use their original bindings. Turning the option
+OFF restores legacy composition; restarting preserves the chosen option. Missing
+or invalid material samples retain the original beauty. These are CPU binding
+checks, not proof of live GPU texture contents or the named HDR handoff.
+
+**Lighting & GI → Volumetric lighting experiment → Prepared LED emissive haze**
+is a separate opt-in after local lamp haze is enabled. It supports only the two
+standalone Polish Roads Owlen LED meshes (`owlen_ledy.dae` and
+`owlen_led_budynek.dae`), not the pylon sign, textured logos, arbitrary glowing
+surfaces or vehicle lights. The prepared catalogue contains material-mapped
+triangle quadratures from those installed assets; runtime verifies source size
+and Adler checksum, material identity/emission state/map, live emissive RGB/nits
+and native instance transforms. It creates no native lights and edits no assets,
+materials, global fog or shadow fields.
+Emission uses the live RGB/nits as a uniform approximation over the selected
+geometry; it does not sample the emissive texture per triangle/texel. The known
+red data map is not perfectly uniform, so its variation is not reproduced.
+
+Read-only spatial discovery inspects at most 128 TSStatic query results every
+0.5 seconds or after 4 m movement; at most two emitters are selected. Four
+geometry-oriented area samples per mesh feed four deterministic view-integration
+steps, with 12 m local source reach and the existing 160 m view limit. Nearby
+same-colour native haze samples are suppressed by a conservative proximity
+heuristic, not fixture identity. No bright-pixel emitter detection is used.
+
+This produces **haze only**, not surface illumination or area-light GI. It is
+coarse, unshadowed and uses an uncalibrated nits-to-working-radiance gain; hidden
+blockers may leak, and native visual mesh/pivot alignment still needs an in-game
+check. It does not imply support for every emissive material. The original
+eight-spotlight wide haze remains available unchanged when this option is OFF.
+Disabling/restarting haze, captures and lifecycle stops clear emitter discovery
+and leave emissive haze OFF until explicitly enabled again. Adds GPU work.
+
+Offline tests cover material routing/rollback/conflicts, cold restart, live
+emission validation, source integrity, placement math, nonuniform scale, bounded
+selection, native-source suppression and haze-only lifecycle. Coherent and haze
+shaders compile against installed BeamNG headers. Live appearance, photometry,
+shadow visibility and frame time remain unverified.
+
+## v0.123 — separate wide haze discovery
+
+Nearby native shadow discovery and priority assistance now use 100 m instead of
+80 m, keeping the same eight-light priority budget and native light ranges.
+The existing level-wide automatic `castShadows` eligibility requests are not
+expanded or replaced; nearby distance is not a promise of a GPU shadow view.
+Native shadow selection, atlas budgets and caster materials still apply.
+
+Haze has its own read-only `volumeLights.lua` detector. It does not borrow the
+shadow-prioritized list, require shadow assistance, or write any lamp fields.
+While explicitly enabled, it queries a 180 m camera-centered region and selects
+up to eight supported native spotlights by a bounded brightness/range/distance
+importance estimate. Source spheres wholly behind the camera are rejected;
+off-screen lamps remain eligible because their volumes can enter the image.
+This is not an exact visible-contribution estimator. Invalid, disabled, replaced
+and out-of-range sources are rejected. Native lamp range is never enlarged.
+
+The spatial query refreshes every 0.25 seconds or on movement of 4 m / a camera
+turn. It inspects at most 512 returned entries. If unavailable, a read-only
+incremental class scan processes 24–128 entries per update, with a soft 2 ms
+limit above the first 24; the fallback can take longer to find a new location.
+Status identifies this route, pending checks and the bounded candidate cache.
+No new discovery occurs merely by opening the tuner or while haze is disabled.
+
+The v003 haze shader extends view integration from 50 m to 160 m and supports
+eight lamps, retaining eight deterministic integration samples per intersected
+lamp. Its maximum sampling cost is higher than v002; no FPS improvement is
+claimed. Scene-preserving output and zero-contribution bypass remain intact.
+This provides wider local coverage as the camera travels, not simultaneous
+whole-world rendering. It remains an opt-in, unshadowed approximation: unseen
+blockers can leak. Point lights, vehicle props and emissive surfaces are still
+unsupported. Disable-all, captures, lifecycle changes and inactive rendering
+stop haze and clear its detector; it does not restart shadow requests.
+
+No Coherent material response, reflection strength, roughness, resolution or ray
+count changed here. The material investigation confirms native per-pixel
+roughness/normals are already used; a complete duplicate material/texture library
+is not needed just to consume those properties. A material-specific reflectance
+handoff and composition audit remain separate work; material-name guesses are
+not silently applied to native materials.
+
+CPU tests cover independent read-only discovery, wider shadow priority, camera
+movement/turns, invalid/deleted/recycled lamps, bounded fallback/cache and haze
+lifecycle. The v003 shader compiles offline in both stages. These are not proof
+of live GPU appearance, shadow visibility, frame time or HDR-handoff correctness.
+
+## v0.122.2 — combined restart recovery
+
+Combined startup now recreates PTGI's nested PostEffect graph after safe teardown,
+as well as Coherent's graph. Previously only Coherent was recreated; PTGI reused
+its child passes and cached target/shader-requirement state after being disabled
+and moved between stages. This recovery removes that retained state without
+rebuilding ShaderData, native lights, materials or geometry, or changing saved
+settings. GI/reflection tuning is retained. Repeated enable on an already-active
+pair does not rebuild it. Failed cleanup/construction leaves rendering stopped
+and permits a retry rather than reporting a partially enabled pair as ready.
+
+The optional haze pass now uses beauty in input slot zero and explicitly writes
+scene plus scattering to `$backBuffer`, with blending disabled. A native
+passthrough must preserve the scene, not show the raw normals that previously
+occupied slot zero or add the scene to itself. The cache-busted v002 shader uses
+the depth slot's own UV transform. Haze is still optional, unshadowed and off
+at combined startup; no reduction of ray count, resolution or reflection reach.
+
+CPU regression tests use the actual PTGI child-pass constructors and exercise
+repeated combined off/on, slider edits, retained-child contamination and failed
+restart/retry in Lua 5.1 and LuaJIT. Offline haze VS/PS compilation also passes.
+These checks do not establish the exact native GPU cause or verify the in-game
+fix. Reload BeamRT once, test combined off/on with baseline source and haze off,
+then enable haze and repeat. The named HDR source remains experimental.
+
+## v0.122.1 — combined beauty recovery and source isolation
 
 The user reports that v0.122 can claim both renderers are active while reflections
 are not visibly working. CPU-enabled objects alone do not validate the GPU image.
@@ -51,9 +189,9 @@ lamp shadows and nearby priority enabled. It reads up to four selected native
 SpotLights (color, brightness, cone, range and transform), without changing them.
 A separate HDR pass after Coherent integrates an optically thin scattering
 approximation with eight deterministic midpoint samples per lamp, up to 50 m
-and the visible surface depth. It adds only scattering radiance with One/One
-blending to the live destination, without sampling/copying scene color or
-overwriting the GI/SSR result. No animated noise, accumulation or global fog
+and the visible surface depth. The original v001 added scattering with One/One
+blending; v0.122.2 supersedes that output path with a scene-preserving replacement
+composition. No animated noise, accumulation or global fog
 edits; it stays outside GI/SSR histories and is not itself reflected by SSR.
 It adds GPU work when active and disables its pass when no supported lamp is
 available or brightness/density is zero. Point lights, vehicle props, emissive

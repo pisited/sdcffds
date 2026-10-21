@@ -28,7 +28,7 @@ PROGRESSIVE={rendererCompatibility=require('ge/extensions/beamrt/rendererCompati
  reflectionColor={halfEffectName='Half',atlasEffectName='Atlas',configured=function()return true end},
  waterPreview={enabled=true,effectName='WaterPreview',provider={getStatus=function()return {available=true}end},
    applyConsts=function()return true end},voxel={effectName='Voxel'},reflectionReconstruction={}}
-CLEAN_RADIANCE={};MODE_IDS={diffusegi=6,lighting=6,reflections=7,bufferdiag=8,voxeldda=9}
+CLEAN_RADIANCE={bindings={}};MODE_IDS={diffusegi=6,lighting=6,reflections=7,bufferdiag=8,voxeldda=9}
 modeName='lighting';debugMode=6;enabledRequested=false;giSourceMode=1;reflectionOverlayEnabled=true
 giResets=0;reflectionResets=0;giStrength=.9;surfels={};bufferDiagnosticSource='raw'
 BUFFER_DIAGNOSTIC_SOURCES={raw={effectName='Raw'}}
@@ -49,6 +49,19 @@ function object(name,priority)
  o:setField('shader',0,'BeamRT_TestShader');o.renderPriority=priority or 0
  return o
 end
+giRenderScale=.5
+PROGRESSIVE.svgf.effectName='Moments'
+PROGRESSIVE.svgf.copyEffectName='MomentsCopy'
+PROGRESSIVE.svgf.atrousEffectNames={'Atrous1','Atrous2','Atrous3'}
+PROGRESSIVE.svgf.shaderName='BeamRT_TestShader'
+PROGRESSIVE.svgf.atrousShaderName='BeamRT_TestShader'
+PROGRESSIVE.inputPrep.imageSize='1152 1030'
+PROGRESSIVE.inputPrep.receiverShaderName='BeamRT_TestShader'
+PROGRESSIVE.inputPrep.auxiliaryShaderName='BeamRT_TestShader'
+PROGRESSIVE.inputPrep.receiverTarget='#BeamRT_ReceiverResponse'
+PROGRESSIVE.inputPrep.auxiliaryTarget='#BeamRT_Auxiliary'
+M.noiseSourcePolicy={atlasBinding=function()return 'noise.png'end,nativeTexture='native.png'}
+function deleteObject(name)local o=findObject(name);if o then o:delete()end end
 '''
 
 class PtgiCoherent(unittest.TestCase):
@@ -63,6 +76,12 @@ class PtgiCoherent(unittest.TestCase):
             lua.execute("for _,n in ipairs({'Aux','HitInputs','HitCopy','Half','Atlas','Voxel','Raw','WaterPreview'})do object(n)end")
             lua.execute("object('BeamRT_SurfelCacheFx',10004);object('BeamRT_ReceiverResponseFx',10003);object('BeamRT_GIFx',10002)")
             lua.execute("objects.BeamRT_ComposeFx:setField('target',0,'$backBuffer')")
+            # Actual PTGI constructors and restart helper, including nested children.
+            for name in ('createSurfelCacheEffect','createGIEffect'):
+                body=re.search(r'^local function '+name+r'\(\).*?\nend',MAIN,re.M|re.S).group()
+                lua.execute(body.replace('local function ','function ',1))
+            lua.execute(re.search(r'^function PROGRESSIVE.inputPrep.createEffects\(\).*?\nend',MAIN,re.M|re.S).group())
+            lua.execute(method('_rebuildPtgiPassGraph'))
             start=MAIN.index('local function effectIsEnabled(')
             section=MAIN[start:MAIN.index('local function setNormalBeamRTEffectsEnabled(',start)]
             for name in ('effectIsEnabled','setEffectEnabled','syncEffectEnablement'):
@@ -124,6 +143,53 @@ class PtgiCoherent(unittest.TestCase):
             self.assertFalse(api.setRayHitDiagnostic('hits'))
             self.assert_started(lua,api)
 
+    def test_off_on_recreates_ptgi_children_and_keeps_quality_across_cycles(self):
+        for named in (False,True):
+            for lua,renderer,api in self.runtimes(named=named):
+                renderer.setParameter('stochasticRayCount',8)
+                renderer.setParameter('nativeMaterialResponse',True)
+                before=dict(renderer.getOptions().items())
+                for cycle in range(8):
+                    lua.execute('oldGI=objects.BeamRT_GIFx;oldCompose=objects.BeamRT_ComposeFx')
+                    self.assertIs(api.setPtgiCoherentEnabled(True),True)
+                    self.assert_started(lua,api)
+                    self.assertTrue(renderer.getStatus().materialResponseActive)
+                    self.assertEqual(lua.eval('objects.BeamRTCoherentPostEffectApplyPass:getField("texture",5)'), '#prepass[RT1]')
+                    self.assertTrue(lua.eval('objects.BeamRT_GIFx~=oldGI and objects.BeamRT_ComposeFx~=oldCompose'))
+                    lua.execute('currentGI=objects.BeamRT_GIFx;currentCompose=objects.BeamRT_ComposeFx')
+                    self.assertIs(api.setPtgiCoherentEnabled(True),True)
+                    self.assertTrue(lua.eval('currentGI==objects.BeamRT_GIFx and currentCompose==objects.BeamRT_ComposeFx'))
+                    self.assertTrue(api.setCoherentSsrParameter('temporalStrength',.95 if cycle%2 else .98))
+                    self.assertTrue(api.setCoherentSsrParameter('stochasticRayCount',6 if cycle%2 else 8))
+                    for _ in range(12):api.onPreRender(.016,.016,.016)
+                    self.assert_started(lua,api)
+                    self.assertTrue(renderer.getStatus().accumulationReady)
+                    # A contaminated cached child must not survive the next restart.
+                    lua.execute("objects.BeamRT_ComposeFx:setField('skip',0,'1')")
+                    self.assertTrue(api.setPtgiCoherentEnabled(False))
+                    self.assertFalse(renderer.getStatus().requested)
+                    self.assertFalse(api.getPtgiCoherentStatus().requested)
+                self.assertIs(api.setPtgiCoherentEnabled(True),True)
+                self.assertEqual(lua.eval('objects.BeamRT_ComposeFx:getField("skip",0)'), '')
+                for key,value in before.items():
+                    if key not in ('temporalStrength','stochasticRayCount'):
+                        self.assertEqual(renderer.getOptions()[key],value,key)
+                self.assertEqual(lua.globals().giStrength,.9)
+
+    def test_restart_failure_leaves_both_off_and_can_retry_without_reload(self):
+        for lua,renderer,api in self.runtimes():
+            self.assertIs(api.setPtgiCoherentEnabled(True),True)
+            self.assertTrue(api.disable())
+            for flag in ('failDelete','failCreate'):
+                lua.globals()[flag]=True
+                self.assertFalse(api.setPtgiCoherentEnabled(True)[0])
+                self.assertFalse(renderer.getStatus().requested)
+                self.assertFalse(api.getPtgiCoherentStatus().requested)
+                self.assertFalse(lua.eval('objects.BeamRT_GIFx and objects.BeamRT_GIFx:isEnabled() or false'))
+                lua.globals()[flag]=False
+                self.assertIs(api.setPtgiCoherentEnabled(True),True)
+                self.assert_started(lua,api)
+                self.assertTrue(api.disable())
     def test_named_source_survives_routing_updates_then_restores_standalone_source(self):
         for lua,renderer,api in self.runtimes(named=True):
             self.assertTrue(api.setPtgiCoherentEnabled(True))
@@ -232,12 +298,17 @@ class PtgiCoherent(unittest.TestCase):
     def test_partial_stage_setup_rolls_back_before_rendering(self):
         for lua,renderer,api in self.runtimes():
             lua.execute("""
-            local o=objects.BeamRT_ReceiverResponseFx
-            local original=o.setField
-            rawset(o,'setField',function(self,k,i,v)
-              if k=='renderBin' and v=='AfterPostFX' then error('stage setup refused')end
-              return original(self,k,i,v)
-            end)
+            local originalCreate=createObject
+            function createObject(class)
+              local o=originalCreate(class);local original=o.setField
+              rawset(o,'setField',function(self,k,i,v)
+                if self==objects.BeamRT_ReceiverResponseFx and k=='renderBin' and v=='AfterPostFX' then
+                  error('stage setup refused')
+                end
+                return original(self,k,i,v)
+              end)
+              return o
+            end
             """)
             self.assertFalse(api.setPtgiCoherentEnabled(True)[0])
             self.assertFalse(renderer.getStatus().requested)

@@ -51,6 +51,7 @@ uniform_sampler2D(terrainTex, 5);
 
 cbuffer perDraw : register(b0)
 {
+    uniform float4 rtParams5;
     uniform float uAmount;
     uniform float uSamplingMode;
     uniform float uReferenceTrace;
@@ -68,6 +69,7 @@ cbuffer perDraw : register(b0)
     uniform float uRoughnessPower;
     uniform float uFresnelPower;
     uniform float uFresnelStrength;
+    uniform float uNativeMaterialResponse;
     uniform float uFacingFade;
 
     uniform float uEdgeFadePixels;

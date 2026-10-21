@@ -14,6 +14,18 @@ LIGHTS=r'''
 sampleLight={id=1,position={0,10,5},direction={0,0,-1},range=20,
  color={1,.8,.5},brightness=2,inner=.95,outer=.8}
 provider={getVolumetricLights=function()return {sampleLight}end}
+camera={x=0,y=0,z=0}
+core_camera={getPosition=function()return camera end,getForward=function()return {x=0,y=1,z=0}end}
+nativeLamp={id=1,fields={isEnabled='1',range='20',brightness='2',color='1 .8 .5',innerAngle='20',outerAngle='50'}}
+function nativeLamp:getClassName()return 'SpotLight'end
+function nativeLamp:getID()return self.id end
+function nativeLamp:getFields()return self.fields end
+function nativeLamp:getField(k,i)return self.fields[k]end
+function nativeLamp:getPosition()return {x=0,y=10,z=5}end
+function nativeLamp:getTransform()return {getColumn=function()return {x=0,y=0,z=-1}end}end
+function nativeLamp:setField()error('Haze must not write a lamp')end
+objects[1]=nativeLamp
+scenetree.findClassObjects=function(class)return class=='SpotLight' and {1} or {} end
 '''
 
 class LocalVolumes(unittest.TestCase):
@@ -27,18 +39,23 @@ class LocalVolumes(unittest.TestCase):
     def test_import_and_status_are_non_mutating_and_start_waits_for_supported_lights(self):
         for lua,api in self.runtimes():
             self.assertFalse(api.getStatus().requested)
-            self.assertEqual(lua.eval('(function()local n=0;for _ in pairs(objects)do n=n+1 end;return n end)()'),1)
+            self.assertEqual(lua.eval('(function()local n=0;for _ in pairs(objects)do n=n+1 end;return n end)()'),2)
+            lua.execute("nativeLamp.fields.isEnabled='0'")
             self.assertTrue(api.enable())
             self.assertFalse(lua.eval('objects.BeamRT_LocalVolumeFx:isEnabled()'))
             api.update(.016,lua.table())
             self.assertTrue(api.getStatus().requested)
             self.assertFalse(api.getStatus().active)
+            lua.execute("nativeLamp.fields.isEnabled='1'")
             api.update(.25,lua.globals().provider)
             self.assertTrue(api.getStatus().active)
             self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeFx._const["$volumeCount"]'),1)
             self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeState:getField("blendSrc",0)'),'GFXBlendOne')
-            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeState:getField("blendDest",0)'),'GFXBlendOne')
-            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeFx:getField("texture",0)'),'#prepass[RT0]')
+            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeState:getField("blendDest",0)'),'GFXBlendZero')
+            self.assertFalse(lua.eval('objects.BeamRT_LocalVolumeState.blendEnable'))
+            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeFx:getField("texture",0)'),'$backBuffer')
+            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeFx:getField("target",0)'),'$backBuffer')
+            self.assertEqual(lua.eval('objects.BeamRT_LocalVolumeFx:getField("texture",2)'),'#prepass[Depth]')
             self.assertFalse(api.getStatus().nativeShadowVisibility)
             self.assertFalse(api.getStatus().gpuExecutionVerified)
             self.assertTrue(api.disable()[0])
@@ -144,14 +161,17 @@ class LocalVolumes(unittest.TestCase):
             self.assertEqual(len(api.getVolumetricLights()),0)
 
     def test_shader_has_fixed_deterministic_depth_limited_integration_and_no_shadow_claim(self):
-        source=(ROOT/'shaders/beamrt/beamrtLocalVolumeP_v001.hlsl').read_text()
+        source=(ROOT/'shaders/beamrt/beamrtLocalVolumeP_v004.hlsl').read_text()
         self.assertIn('i<8',source)
-        self.assertIn('min(50,rayLength*saturate(depth))',source)
+        self.assertIn('min(volumeDistance,rayLength*saturate(depth))',source)
+        self.assertIn('if(volumeCount>7.5)',source)
         self.assertNotIn('random',source)
         self.assertNotIn('shadowAtlas',source)
-        self.assertNotIn('tex2D(scene',source)
+        self.assertIn('if((volumeCount<.5 && emitterCount<.5) || volumeStrength<=0 || volumeDensity<=0) return scene;',source)
+        self.assertIn('uniform_sampler2D(sceneTex,0)',source)
+        self.assertIn('tex2D(depthTex,IN.uv2)',source)
         self.assertIn('dot(direction,-ray)',source)
-        self.assertIn('float4(hdrEncode(scatter*volumeDensity*volumeStrength),0)',source)
+        self.assertIn('float4(hdrEncode(hdrDecode(scene.rgb)+scatter*volumeDensity*volumeStrength),scene.a)',source)
         for forbidden in ('settings.setValue','setPosition(', 'jsonWriteFile(', 'loadExtension('):
             self.assertNotIn(forbidden,SOURCE)
 

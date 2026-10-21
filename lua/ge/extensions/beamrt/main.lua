@@ -1,4 +1,4 @@
--- BeamRT v0.122.2: rebuild both sides of combined restart; isolate haze output.
+-- BeamRT v0.124: opt-in native material response and prepared emissive area haze.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -86,7 +86,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.122.2"
+local VERSION = "0.124"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -3217,6 +3217,7 @@ function M.setLocalVolumesEnabled(value)
   return M._localVolumes.enable()
 end
 function M.setLocalVolumeParameter(key,value) return M._localVolumes.setParameter(key,value) end
+function M.setEmissiveVolumesEnabled(value) return M._localVolumes.setEmissiveEnabled(value) end
 
 function M.setPtgiCoherentEnabled(value)
   if type(value) ~= 'boolean' then return false, 'Combined rendering enabled must be boolean.' end
@@ -8197,7 +8198,7 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
       or (M._coherentRenderer and M._coherentRenderer.getStatus().active and not M._coherentRenderer.getOptions().hdrComposite)
       or (not effectIsEnabled(GI_EFFECT_NAME) and not (M._coherentRenderer and M._coherentRenderer.getStatus().active)) then
       M._localVolumes.disable('Local haze stopped for capture or inactive rendering; re-enable explicitly.')
-    else M._localVolumes.update(frameDelta,M._nearbyLampShadows) end
+    else M._localVolumes.update(frameDelta) end
   end
   PROGRESSIVE.reflectionReconstruction.frameDelta = math.min(math.max(frameDelta, 1 / 240), 1 / 15)
   -- Timing belongs to the current render. Shader/UI callbacks only read it;

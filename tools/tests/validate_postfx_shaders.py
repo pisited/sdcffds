@@ -38,7 +38,7 @@ def main():
                          (ROOT / 'shaders/beamrt/coherent').glob('*pass*_p.hlsl'))
         entries.append('shaders/beamrt/coherent/beamrt_coherent_v.hlsl')
     if args.volumes:
-        entries = ['shaders/beamrt/beamrtLocalVolumeP_v001.hlsl']
+        entries = ['shaders/beamrt/beamrtLocalVolumeP_v004.hlsl']
     if not entries:
         raise RuntimeError('No literal BeamRT shader entries found.')
     output = ROOT / '.beamrt-validation' / ('postfx-compile-' + uuid.uuid4().hex)

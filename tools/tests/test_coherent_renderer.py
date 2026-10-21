@@ -23,8 +23,12 @@ function methods:setShaderConst(key,value)self._const[key]=value end
 function methods:enable()self._fields.enabled=true end
 function methods:disable()self._fields.enabled=false end
 function methods:isEnabled()return self._fields.enabled==true end
+function methods:add(child)
+ self._children=self._children or {};table.insert(self._children,child)
+end
 function methods:delete()
  if failDelete then error('Deletion refused')end
+ for _,child in ipairs(self._children or {})do child:delete()end
  objects[self._fields.name]=nil
 end
 function createObject(class)

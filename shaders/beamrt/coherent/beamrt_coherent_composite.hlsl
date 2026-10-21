@@ -529,7 +529,9 @@ float4 CompositeSSR(PFXVertToPix IN, float2 uv, float4 projectionParams)
             preparedHit=BrtcHistoryEncodeDistance(length(reflectedPoint-resolveWorldPos));
             preparedConfidence=lerp(preparedConfidence,31.0,rebuildWeight*fade);
             preparedState=1.0;
-            float response=roughMask*FresnelMask(-surfaceToEye,normalWS)*FacingFade(rebuildDir,normalWS);
+            float receiverFresnel=(waterMask>0.001 || puddleMask>0.001)
+                ? FresnelMask(-surfaceToEye,normalWS) : BrtcOrdinaryFresnelMask(-surfaceToEye,normalWS);
+            float response=roughMask*receiverFresnel*FacingFade(rebuildDir,normalWS);
             response*=fade*DistanceFade(length(reflectedPoint-resolveWorldPos));
             float3 hn=LoadDebugDataPoint(rebuiltUV).b>0.5 ? float3(0,0,1) : DecodePrepassNormal(LoadPrepass(rebuiltUV));
             response*=smoothstep(-0.2,max(uBackfaceFade,0.001),dot(hn,-rebuildDir));
@@ -582,7 +584,9 @@ float4 CompositeSSR(PFXVertToPix IN, float2 uv, float4 projectionParams)
 
     float3 viewToSurface = -surfaceToEye;
     float3 skyReflectDir = normalize(reflect(viewToSurface, normalWS));
-    float fresnelMask = FresnelMask(viewToSurface, normalWS);
+    float fresnelMask = (waterMask > 0.001 || puddleMask > 0.001)
+        ? FresnelMask(viewToSurface, normalWS) : BrtcOrdinaryFresnelMask(viewToSurface, normalWS);
+    float waterFresnelMask = FresnelMask(viewToSurface, normalWS);
     float facingMask = FacingFade(skyReflectDir, normalWS);
     float skyStrength = saturate(uSkyReflectionFallback);
     float waterSkyStrength = saturate(uWaterSkyFallback);
@@ -604,7 +608,7 @@ float4 CompositeSSR(PFXVertToPix IN, float2 uv, float4 projectionParams)
     float glossySky = validSurface * glossyRoughMask * fresnelMask * facingMask * upwardRay *
                       upwardSurface * ordinaryMask * skyStrength * environmentOcclusion;
     float waterSky = validSurface * waterMask * saturate(uWaterSSRStrength) * waterInfo.angleMask *
-                     max(fresnelMask, 0.35) * max(facingMask, 0.45) * upwardRay * waterSkyStrength;
+                     max(waterFresnelMask, 0.35) * max(facingMask, 0.45) * upwardRay * waterSkyStrength;
 
     float puddleCoatResponse = validSurface * puddleResolveMask * facingMask * upwardRay;
     float puddleEnvironmentCoverage = saturate(uPuddleEnvironmentStrength) *
@@ -671,7 +675,8 @@ float4 CompositeSSR(PFXVertToPix IN, float2 uv, float4 projectionParams)
                        (1.0 - saturate(waterMask)) * (1.0 - saturate(puddleMask));
     float3 sceneBase = sceneColor;
     [branch]
-    if (detailKeep > 0.001 && alpha > 0.001)
+    if (detailKeep > 0.001 && alpha > 0.001 &&
+        (uNativeMaterialResponse <= 0.5 || waterMask >= 0.001 || puddleMask >= 0.001))
     {
         float2 o = 1.5 / max(gSourceSize, float2(1.0, 1.0));
         float3 low = 0.25 * (tex2Dlod(sourceTex, float4(uv + float2( o.x,  o.y), 0.0, 0.0)).rgb +
@@ -682,6 +687,35 @@ float4 CompositeSSR(PFXVertToPix IN, float2 uv, float4 projectionParams)
     }
     float3 reflected = max(sceneColor + (combinedReflectionColor - sceneBase) *
                            saturate(alpha * uIntensity), 0.0);
+
+    if (uNativeMaterialResponse > 0.5 && waterMask < 0.001 && puddleMask < 0.001 && validSurface > 0.5)
+    {
+        reflected=sceneColor; // invalid/unavailable material data must not replace native beauty
+        // Slot 5 is native RT1 ONLY in this explicit mode (terrain masking is
+        // mutually exclusive). Compatibility requires integrated SSR OFF:
+        // native SSR can reuse this attachment for a different meaning.
+        uint mw,mh; terrainTexTex.GetDimensions(mw,mh);
+        if (mw>0 && mh>0)
+        {
+        float2 viewportUV=(uv-rtParams0.xy)/max(rtParams0.zw,float2(1e-6,1e-6));
+        float2 materialUV=viewportCoordToRenderTarget(viewportUV,rtParams5);
+        int2 materialPixel=clamp(int2(materialUV*float2(mw,mh)),int2(0,0),int2(mw,mh)-1);
+        float3 f0=terrainTexTex.Load(int3(materialPixel,0)).rgb;
+        if (all(isfinite(f0)) && all(f0>=0.0) && all(f0<=1.0))
+        {
+            float NoV=saturate(dot(normalWS,surfaceToEye));
+            float grazing=pow(1.0-NoV,5.0);
+            // Match native specularF's low-reflectance grazing guard. In
+            // particular, a zero-specular material must not become a mirror.
+            float f90=saturate(50.0*max(f0.r,max(f0.g,f0.b)));
+            float3 F=f0+(f90-f0)*grazing;
+            // Preserve native direct/diffuse/GI. No full-beauty subtraction.
+            // Native probe lighting is NOT isolated here: this is a bounded
+            // material-weighted supplement, not exact probe replacement.
+            reflected=sceneColor+max(combinedReflectionColor,0.0)*F*saturate(alpha*uIntensity);
+        }
+        }
+    }
 
     reflected = BrtcApplyAddedWaterTint(reflected, waterMask, waterInfo.angleMask);
 

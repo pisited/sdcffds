@@ -409,7 +409,8 @@ float4 BrtcTraceReceiver(PFXVertToPix IN, float2 uv, float4 projectionParams)
     float3 reflectDirPre = normalize(reflect(viewToSurfacePre, normalWS));
     float effectiveRoughnessPre;
     float roughMaskPre = RoughnessMask(roughness, normalWS, effectiveRoughnessPre);
-    float fresnelMaskPre = FresnelMask(viewToSurfacePre, normalWS);
+    float fresnelMaskPre = puddleMask > 0.001 ? FresnelMask(viewToSurfacePre, normalWS)
+        : BrtcOrdinaryFresnelMask(viewToSurfacePre, normalWS);
     float facingMaskPre = FacingFade(reflectDirPre, normalWS);
     float preBaseMask = roughMaskPre * fresnelMaskPre * facingMaskPre;
 

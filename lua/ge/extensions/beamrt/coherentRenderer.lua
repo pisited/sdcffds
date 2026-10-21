@@ -62,7 +62,8 @@ function M.getStatus()
     waterMapAvailable = runtime.waterMapAvailable == true,
     waterMapReason = runtime.waterMapReason,
     nativeSettingsChanged = false, gameAppearanceVerified = false,
-    gpuExecutionVerified = false, sceneColorSource = runtime.sceneColorSource, options = M.getOptions()}
+    gpuExecutionVerified = false, sceneColorSource = runtime.sceneColorSource,
+    materialResponseActive=requested and runtime.materialResponseActive==true,options = M.getOptions()}
 end
 
 function M.setSceneColorSource(source)
@@ -106,6 +107,10 @@ function M.setParameter(id, value)
   local parameter = type(id) == 'string' and pipeline.parameters[id]
   if not parameter or id == 'qualityPreset' or id == 'fillEngineVelocityHole' then
     return false, 'Unknown or managed Coherent SSR parameter.'
+  end
+  if (id=='nativeMaterialResponse' and value==true and (not options.hdrComposite or options.terrainMaskEnable))
+    or (options.nativeMaterialResponse and ((id=='hdrComposite' and value==false) or (id=='terrainMaskEnable' and value==true))) then
+    return false,'Native material response needs HDR composition and the terrain mask disabled (shared six-slot budget).'
   end
   if parameter.type == 'bool' then
     if type(value) ~= 'boolean' then return false, 'Expected boolean.' end
