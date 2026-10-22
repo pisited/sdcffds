@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--volumes', action='store_true', help='Compile the opt-in local spotlight haze shader instead.')
     parser.add_argument('--glass-sun', action='store_true', help='Compile the paused-vehicle sunlight transmission producer.')
     parser.add_argument('--light-visibility', action='store_true', help='Compile the selected-light diagnostic display.')
+    parser.add_argument('--native-shadows', action='store_true', help='Compile native frame-tag producer and visibility display.')
     parser.add_argument('--shader-model', choices=('5_0', '6_0'), default='5_0', help='Use 6_0 with installed DXC for wave branches.')
     args = parser.parse_args()
     game = Path(args.game_root).resolve()
@@ -44,7 +45,11 @@ def main():
     if args.glass_sun:
         entries = ['shaders/beamrt/beamrtGlassSunP_v001.hlsl']
     if args.light_visibility:
-        entries = ['shaders/beamrt/beamrtLightVisibilityP_v001.hlsl']
+        entries = ['shaders/beamrt/beamrtLightVisibilityP_v003.hlsl']
+    if args.native_shadows:
+        entries = ['shaders/beamrt/beamrtNativeShadowFrameP_v002.hlsl',
+                   'shaders/beamrt/beamrtNativeShadowCaptureP_v001.hlsl',
+                   'shaders/beamrt/beamrtNativeShadowViewP_v003.hlsl']
     if not entries:
         raise RuntimeError('No literal BeamRT shader entries found.')
     output = ROOT / '.beamrt-validation' / ('postfx-compile-' + uuid.uuid4().hex)

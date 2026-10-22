@@ -1,4 +1,7 @@
-"""Real Lua acquisition/lifecycle tests, not game GPU output verification."""
+"""Actual Lua lifecycle plus receiver-frame numerical references/source contracts.
+
+The numerical reference checks analytic geometry, not game GPU execution.
+"""
 from pathlib import Path
 import math
 import re
@@ -9,7 +12,7 @@ from lupa.luajit21 import LuaRuntime as LuaJIT
 ROOT=Path(__file__).resolve().parents[2]
 SOURCE=(ROOT/'lua/ge/extensions/beamrt/lightVisibilityDiagnostic.lua').read_text()
 PROVIDER=(ROOT/'lua/ge/extensions/beamrt/providers/lightProvider.lua').read_text()
-SHADER=(ROOT/'shaders/beamrt/beamrtLightVisibilityP_v001.hlsl').read_text()
+SHADER=(ROOT/'shaders/beamrt/beamrtLightVisibilityP_v003.hlsl').read_text()
 FIXTURE=r'''
 package.path='lua/?.lua;'..package.path
 objects={};enumerations=0;writes=0;deletes={}
@@ -143,5 +146,153 @@ class Diagnostic(unittest.TestCase):
         self.assertIn('any(abs(rtParams1-rtParams2)>1e-6)',SHADER)
         self.assertIn('sampleDepth-surface.w',SHADER)
         self.assertNotIn('tex2D(sceneTex',SHADER[SHADER.index('bool screenBlocker'):SHADER.index('float4 mainP')])
+
+    def test_geometric_bias_and_centre_reconstruction_are_wired_to_the_probe(self):
+        self.assertIn('visibilityReceiverFrame(receiver,ray,du,dv,uv,size,normal,normalBias,planeTolerance)',SHADER)
+        self.assertIn('receiver+normal*normalBias',SHADER)
+        self.assertIn('sampleUv=(floor(sampleUv*size)+.5)/size',SHADER)
+        self.assertIn('candidate=eyePosWorld+sampleRay*surface.w',SHADER)
+        self.assertIn('visibilitySeparateReceiver(receiver,candidate,normal,planeTolerance)',SHADER)
+        self.assertIn('dot(candidate-receiver,normal)>tolerance',SHADER)
+        self.assertIn('normalBias=clamp(.004+.1*footprint,.005,.025)',SHADER)
+        self.assertIn('planeTolerance=clamp(.002+.05*footprint,.003,.015)',SHADER)
+        self.assertNotIn('normal*.035',SHADER)
+        self.assertNotIn('screenBlocker(world,receiver.xyz',SHADER)
+        for lua,m in self.runtimes():
+            self.assertIn('geometric frame',m.getStatus().receiverBias)
+            m.enable(1,'visibility')
+            fx_shader=lua.globals().objects.BeamRT_LightVisibilityShader
+            self.assertTrue(fx_shader.DXPixelShaderFile.endswith('_v003.hlsl'))
+
+    def test_crossing_refinement_is_wired_without_the_old_isolated_hit_band(self):
+        self.assertIn('previousValid&&visibilityCrossed(previousGap,gap)',SHADER)
+        self.assertIn('refine<6',SHADER)
+        self.assertIn('refinements>=2',SHADER)
+        self.assertIn('abs(gap)<=.02&&visibilitySeparateReceiver',SHADER)
+        self.assertIn('if(!valid){previousValid=false;continue;}',SHADER)
+        self.assertNotIn('gap>.015&&gap<.12',SHADER)
+        for lua,m in self.runtimes():
+            self.assertIn('crossing refinements',m.getStatus().rayPolicy)
+
+
+def subtract(a,b):return tuple(x-y for x,y in zip(a,b))
+def dot(a,b):return sum(x*y for x,y in zip(a,b))
+def length(a):return math.sqrt(dot(a,a))
+def cross(a,b):return(a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])
+def frame(receiver,ray,neighbours,expected):
+    """Numerical reference for the shader's frame, bounds and plane test."""
+    tangents=[]
+    for previous,following in ((neighbours[0],neighbours[1]),(neighbours[2],neighbours[3])):
+        candidates=[]
+        if previous is not None:candidates.append(subtract(receiver,previous))
+        if following is not None:candidates.append(subtract(following,receiver))
+        if not candidates:return None
+        tangents.append(min(candidates,key=length))
+    tx,ty=tangents;lx,ly=dot(tx,tx),dot(ty,ty)
+    if min(lx,ly)<1e-12 or max(lx,ly)>max(.25,expected*8)**2:return None
+    normal=cross(tx,ty);area=dot(normal,normal)
+    if area<lx*ly*1e-6:return None
+    normal=tuple(x/math.sqrt(area)for x in normal)
+    if dot(normal,tuple(-x for x in ray))<0:normal=tuple(-x for x in normal)
+    footprint=math.sqrt(min(lx,ly))
+    bias=min(.025,max(.005,.004+.1*footprint))
+    tolerance=min(.015,max(.003,.002+.05*footprint))
+    return normal,bias,tolerance
+
+
+class ReceiverGeometryReference(unittest.TestCase):
+    def test_flat_and_sloped_receivers_reject_their_own_plane(self):
+        for ax,ay in ((0,0),(.7,0),(0,-.9),(.4,.6)):
+            centre=(0,0,0)
+            n,bias,tolerance=frame(centre,(0,0,-10),
+                ((-.01,0,-ax*.01),(.01,0,ax*.01),(0,-.01,-ay*.01),(0,.01,ay*.01)),.01)
+            for x,y in ((0,0),(.2,.3),(4,-2),(-3,1)):
+                self.assertLessEqual(dot((x,y,ax*x+ay*y),n),tolerance)
+            self.assertGreaterEqual(bias,.005);self.assertLessEqual(bias,.025)
+
+    def test_separate_parallel_blockers_and_nearby_contacts_remain_eligible(self):
+        for footprint in (.005,.02,.2):
+            n,bias,tolerance=frame((0,0,0),(0,0,-10),
+                ((-footprint,0,0),(footprint,0,0),(0,-footprint,0),(0,footprint,0)),footprint)
+            self.assertLessEqual(tolerance,.015)
+            # Same normal is NOT enough to reject a distinct parallel blocker.
+            self.assertGreater(dot((.1,0,.02),n),tolerance)
+            self.assertGreater(dot((.03,0,.04),n),tolerance)
+            self.assertLessEqual(dot((.1,0,-.1),n),tolerance)
+
+    def test_silhouette_prefers_near_depth_and_missing_geometry_is_unknown(self):
+        n,_,_=frame((0,0,0),(0,0,-10),((-.01,0,0),(10,0,20),(0,-.01,0),(0,.01,0)),.01)
+        self.assertAlmostEqual(n[2],1)
+        self.assertIsNone(frame((0,0,0),(0,0,-10),(None,None,(0,-.01,0),(0,.01,0)),.01))
+        self.assertIsNone(frame((0,0,0),(0,0,-10),((-10,0,20),(10,0,20),(0,-10,20),(0,10,20)),.01))
+        self.assertIsNone(frame((0,0,0),(0,0,-10),((-.01,0,0),(.01,0,0),(-.02,0,0),(.02,0,0)),.01))
+
+    def test_texel_centre_ray_avoids_inventing_a_sloped_surface_offset(self):
+        # Plane z=10+.5*x, perspective ray=(u,0,1). Depth is sampled at
+        # the texel centre .105, not at the continuous ray's requested .110.
+        centre_u,requested_u=.105,.110
+        sampled_depth=10/(1-.5*centre_u)
+        wrong=(requested_u*sampled_depth,0,sampled_depth)
+        correct=(centre_u*sampled_depth,0,sampled_depth)
+        def plane_error(p):return p[2]-10-.5*p[0]
+        self.assertGreater(abs(plane_error(wrong)),.015)
+        self.assertAlmostEqual(plane_error(correct),0,places=12)
+
+
+def crossing(a,b):return a<=0<=b or b<=0<=a
+def refined_hit(sample):
+    """Numerical reference: sample returns (signed gap, separate receiver) or None.
+
+    Mirrors v003's 32 samples / two 6-step brackets, not GPU integration.
+    """
+    previous=None;refinements=0
+    for i in range(32):
+        travel=.06+(12-.06)*i/31
+        value=sample(travel)
+        if value is None:previous=None;continue
+        if previous is not None and crossing(previous[1][0],value[0])and(previous[1][1]or value[1]):
+            refinements+=1;low,lo=previous;high,hi=travel,value;valid=True
+            for _ in range(6):
+                mid=.5*(low+high);test=sample(mid)
+                if test is None:valid=False;break
+                if crossing(lo[0],test[0]):high,hi=mid,test
+                else:low,lo=mid,test
+            best=lo if abs(lo[0])<abs(hi[0])else hi
+            if valid and abs(best[0])<=.02 and best[1]:return True
+            if refinements>=2:return False
+        previous=travel,value
+    return False
+
+
+class CrossingReference(unittest.TestCase):
+    def test_old_hit_band_stripes_across_phase_new_refinement_finds_the_plane(self):
+        old_hits=0
+        for phase in range(100):
+            hit_distance=2+(phase+.5)/100*(12-.06)/31
+            old_hits+=any(.015<t-hit_distance<.12 for t in(.06+(12-.06)*(i+.5)/32 for i in range(32)))
+            self.assertTrue(refined_hit(lambda t:(t-hit_distance,True)))
+        self.assertGreater(old_hits,0);self.assertLess(old_hits,60)
+
+    def test_either_crossing_direction_can_find_a_separate_opaque_surface(self):
+        for slope in (-1,1):
+            for distance in (.12,1,4,8,11.8):
+                self.assertTrue(refined_hit(lambda t:(slope*(t-distance),True)))
+
+    def test_depth_step_does_not_become_a_surface_without_convergence(self):
+        self.assertFalse(refined_hit(lambda t:(-1 if t<2 else 1,True)))
+
+    def test_sky_resets_bracket_and_receiver_plane_is_not_an_occluder(self):
+        self.assertFalse(refined_hit(lambda t:None if 1<t<3 else(-1 if t<=1 else 1,True)))
+        self.assertFalse(refined_hit(lambda t:(t-2,False)))
+        self.assertFalse(refined_hit(lambda t:(0,False)))
+
+    def test_no_hit_does_not_prove_clear_and_work_is_bounded(self):
+        calls=[]
+        def sample(t):
+            calls.append(t)
+            # Two discontinuous sign flips, neither converges to visible depth.
+            return (-1 if t<1 or t>2 else 1,True)
+        self.assertFalse(refined_hit(sample));self.assertLessEqual(len(calls),44)
+        self.assertFalse(refined_hit(lambda t:(-1,True)))
 
 if __name__=='__main__':unittest.main()

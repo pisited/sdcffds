@@ -137,7 +137,7 @@ function M.enable(id,view)
   mode=view or 'visibility'
   local ok,err=pcall(function()
     local o,name=own('ShaderData','Shader')
-    o.DXVertexShaderFile='shaders/beamrt/beamrtLightVisibilityP_v001.hlsl'
+    o.DXVertexShaderFile='shaders/beamrt/beamrtLightVisibilityP_v003.hlsl'
     o.DXPixelShaderFile=o.DXVertexShaderFile;o.pixVersion=5
     for i,s in ipairs({'sceneTex','normalTex','depthTex'})do o:setField('samplerNames',i-1,s)end
     o:registerObject(name);registered[name]=true
@@ -184,6 +184,8 @@ end
 function M.getStatus()
   return {enabled=active,mode=mode,light=latest,reason=reason,pendingCleanup=next(owned)~=nil and not active,
     nativeVisibilityAvailable=false,screenVisibility='approximate hit or unknown, never proven clear',
+    receiverBias='depth-neighbour geometric frame, 5-25 mm offset, 3-15 mm receiver-plane rejection',
+    rayPolicy='32 coarse samples, at most two 6-step crossing refinements; 2 cm depth residual; misses remain unknown',
     geometryVisibilityAvailable=false,feedsGI=false,appliesShadowAttenuation=false,
     clusteredBackendExposed=ClusteredShading~=nil,gpuExecutionVerified=false}
 end

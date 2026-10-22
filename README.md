@@ -1,4 +1,129 @@
-# BeamRT v0.129 — separate light visibility diagnostic
+# BeamRT v0.130.2 — experimental native per-light visibility relay
+
+This is a **different diagnostic**, not another revision of the camera-depth
+tracer. It instruments the installed native point/spot shader **after its real
+light-space shadow calculation**, before optional lightmap adjustments. Native
+projection, shadow texture, filter, bias, cookies, irradiance and RGB BRDF formulas
+are retained. No additional shadow attenuation is applied to beauty or GI.
+
+The confirmed `Advanced Lighting 1.5` build writes zero to specular/lightinfo RT1
+alpha, and its inspected lighting consumer reads only RT1 RGB. The experiment
+temporarily leases one native light-kind shader plus one extra sampler. It puts
+quantized native visibility in that otherwise-unused alpha and displays it in a
+separate PostFX. The tag and snapshot use owned `PFXTexGenOnDemand` child targets,
+explicitly scheduled before/after `AL_LightBin` every frame. The late display
+reads only our early snapshot, never the transient native lightinfo target.
+Installed game files and native light/material parameters are
+not changed. Actual dispatch, RT1 binding/format and visible output are still
+**unverified until tested in-game**. Other mods consuming RT1 alpha are unsupported.
+
+At night, while the intended scene lamp is enabled, run in **GE Lua**:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.startNativeShadowDiagnostic("SpotLight_11011175112730191")
+```
+
+Startup first checks CPU readiness, then stops BeamRT custom rendering/captures
+before installing the native diagnostic. It does not change time, native SSR,
+shadow quality, lamp brightness/color/casting flags or physics. Do not enable
+PTGI/Coherent or the screen-depth diagnostic during this comparison.
+
+- Green: native sampled visibility near 1; red: near 0; intermediate colors:
+  native filtered partial visibility, quantized to 16 display levels.
+- Transport failures retain a faint scene and show numbered white bars along
+  the top. Count the bars: 1 = wrong frame texture size; 2 = nonfinite frame data;
+  3 = missing frame signature; 4 = stale frame epoch; 5 = incompatible lightinfo
+  dimensions; 6 = nonfinite native alpha; 7 = matching draw reports unavailable
+  shadow data (`NO_SHADOW`/invalid map). These are **not** shadow visibility.
+  Snapshot failures use 8 = absent texture, 9 = invalid signature, 10 = stale
+  epoch, 11 = invalid status, 13 = early capture not scheduled this epoch.
+  Version 0.130 used the same magenta for every one of these failures; a solid
+  magenta screenshot from that version cannot distinguish them.
+- Dark gray: no matching current-frame native sample. Could be outside coverage,
+  an unused legacy path, a missing RT1/alpha relay or a selector mismatch; **not lit**.
+
+Compare an off-screen caster by moving the camera while keeping the lamp and
+receiver fixed. Native map caster selection, range and shadow budgets still apply;
+this does not create complete world coverage or new BVH geometry.
+
+The binary16 relay has **1,919 non-repeating frame tags per controller lifetime**
+(about 32 seconds at 60 FPS, less at higher FPS), after which it automatically
+restores native shader ownership. This bound prevents tag wrapping from accepting
+old data. Manual stops/restarts do not reset its budget; reload for another test.
+Freshness after a full reload still relies on the native light-buffer clear and
+same-frame producer order and therefore remains part of live verification.
+
+```lua
+extensions.beamrt_main.getNativeShadowDiagnosticStatus()
+extensions.beamrt_main.stopNativeShadowDiagnostic()
+```
+
+`inspectNativeShadowInputs(nameOrID)` is a read-only readiness report. It requires
+the confirmed manager, unmodified native material/shader/shadow alias, a uniquely
+resolved static scene point/spot light and pinned installed source dependencies.
+Exposed clustered dispatches, coincident selectors, disabled/moving lights and
+other native shader hooks are refused. Native dispatch does not supply a scene
+object ID in this legacy constant layout: the match uses the unique light
+position/range and spot direction/outer cone, not a guessed persistent ID.
+Status includes pass callback counts and reported output sizes; callback counts
+prove only CPU processing, not valid GPU output. The v0.130.1 live screenshot
+showed stage 1 (tag input not 1x1), before any native visibility was read.
+
+Only owned fields/objects are restored; foreign replacements are not overwritten.
+Failed restoration retains the lease and neutralizes the relay/display for retry.
+Mission/settings/source changes, captures, custom rendering and changed selection
+stop the test. This does **not** feed native visibility into PTGI or change its GI
+source. See [integration notes](docs/light-visibility-diagnostic.md).
+
+Private shaders can be prepared again against the current installation with:
+
+```powershell
+.\.beamrt-validation\python-tests\Scripts\python.exe -I -B tools/beamrt_native_shadow_diagnostic.py --game-root E:/SteamLibrary/steamapps/common/BeamNG.drive
+```
+
+## v0.129.2 — depth-crossing refinement for the visibility diagnostic
+
+The repeated offset outlines remaining in v0.129.1 exposed a separate sampling
+problem: 32 steps across 12 m can skip the old 1.5–12 cm accepted depth band,
+turning continuous blockers into phase-dependent strips. The v003 shader now
+brackets signed depth crossings and refines up to two brackets with six bisections
+each. A candidate must converge to within 2 cm of sampled depth and still pass
+the geometric receiver-plane rejection. Both crossing directions are supported.
+Missing/sky samples reset the bracket; a discontinuous depth sign flip alone is
+not accepted. This remains single-layer depth evidence, not complete geometry.
+
+The base budget remains 32 coarse samples / 12 m reach, plus at most 12 refinement
+samples. Bias, native shadows, GI and beauty rendering are unchanged. Missed thin
+occluders and exhausted/invalid brackets remain amber/unknown, never proven clear.
+At night, reload and reselect the same lamp by name using the command below.
+Live reduction of the repeated bands still needs verification in the game.
+
+## v0.129.1 — receiver-plane rejection for the visibility diagnostic
+
+This diagnostic-only update targets receiver self-intersection (red acne).
+It reconstructs geometric normals from the nearer valid depth neighbour on each
+axis, offsets by a bounded 5–25 mm, and rejects candidates on/behind the receiver
+plane (3–15 mm tolerance). Point depth samples now reconstruct the actual texel
+centre's world ray. Missing/degenerate/discontinuous receiver frames remain
+unknown rather than fabricate a shadow. Very small blockers within that plane
+tolerance can still be missed; this is not a complete geometry visibility system.
+The 32-step/12 m probe and 12 cm hit-thickness assumption otherwise remain.
+No shadow-map/cascade settings, native lamps, GI or beauty equations change.
+
+At night, reload and select the same lamp by its scene name for comparison:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.setLightVisibilityDiagnostic("visibility", "SpotLight_11011175112730191")
+```
+
+Reload stops BeamRT rendering. The diagnostic alone does not restart PTGI or
+Coherent; compare it before enabling beauty rendering again. This revision uses
+a new shader path to avoid reusing the old compiled variant. Compilation/tests
+do not establish in-game acne reduction or preserved shadow contact.
+
+## v0.129 — separate light visibility diagnostic
 
 The latest glass report names `character_glass`: the controlled object was the
 walking avatar, not the parked car. Glass startup now refuses the native
