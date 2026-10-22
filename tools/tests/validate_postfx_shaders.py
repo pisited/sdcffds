@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--compiler', required=True)
     parser.add_argument('--coherent', action='store_true', help='Compile the opt-in Coherent SSR pass graph instead.')
     parser.add_argument('--volumes', action='store_true', help='Compile the opt-in local spotlight haze shader instead.')
+    parser.add_argument('--glass-sun', action='store_true', help='Compile the paused-vehicle sunlight transmission producer.')
     parser.add_argument('--shader-model', choices=('5_0', '6_0'), default='5_0', help='Use 6_0 with installed DXC for wave branches.')
     args = parser.parse_args()
     game = Path(args.game_root).resolve()
@@ -38,7 +39,9 @@ def main():
                          (ROOT / 'shaders/beamrt/coherent').glob('*pass*_p.hlsl'))
         entries.append('shaders/beamrt/coherent/beamrt_coherent_v.hlsl')
     if args.volumes:
-        entries = ['shaders/beamrt/beamrtLocalVolumeP_v004.hlsl']
+        entries = ['shaders/beamrt/beamrtLocalVolumeP_v006.hlsl']
+    if args.glass_sun:
+        entries = ['shaders/beamrt/beamrtGlassSunP_v001.hlsl']
     if not entries:
         raise RuntimeError('No literal BeamRT shader entries found.')
     output = ROOT / '.beamrt-validation' / ('postfx-compile-' + uuid.uuid4().hex)

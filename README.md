@@ -1,4 +1,145 @@
-# BeamRT v0.124 — material-aware reflection and prepared LED haze experiments
+# BeamRT v0.127 — native window shadow probe
+
+Lighting & GI → Mesh visibility and shadows (experimental) now offers **Try
+native window shadows** and **Restore window shadows**. This is a deliberately
+limited A/B probe, NOT lighter/tinted transmission rendering. Test a stationary
+vehicle in sunlight or beside an existing shadow-casting lamp. Native shadow
+submission may ignore translucent casters or make them solid; neither outcome
+is reported as working transmission. Please compare the ground/interior shadow
+through a window opening, not the appearance of the glass itself.
+
+The probe inspects the selected player vehicle's live material names and only
+requests `castShadows` for narrowly identified, non-emissive, single-layer,
+non-alpha-tested translucent window Materials from vehicle material files.
+Unsupported materials are left alone. Opacity/maps, blending, body/interior
+materials, GI, Coherent, native shaders and files are not changed. Native
+Materials are shared, so other vehicles using the same Material also inherit
+the temporary request. This does not add window reflections or RGB shadows.
+
+Default OFF; no automatic activation. Restore, disable-all, reload, vehicle
+switch, material changes, settings changes and mission lifecycle release the
+owned values. A failed restore retains its lease and exposes a retry button;
+replacement materials and subsequent edits are not overwritten. Inspection is
+read-only and lists the actual accepted material names. CPU tests establish
+selection, rollback and ownership only; live shadow opacity remains unverified.
+
+## v0.126 — compact continuous vehicle haze and rear-light fairness
+
+Vehicle haze no longer borrows the lamp sphere integrator. Its v006 shader
+intersects each view ray with the finite positive cone (or the real point-light
+sphere), then integrates sixteen deterministic samples inside only that segment.
+Depth still limits the result. This avoids the sparse eight-samples-across-the-
+whole-sphere pattern that produced stepped/sliced headlight volumes. The original
+eight-sample streetlamp kernel is unchanged, as are reflections, GI and shadows.
+This is still an unshadowed cone approximation, not native beam-cookie rendering.
+
+Vehicle haze now has independent defaults: 20 m beam reach and 0.35 beam gain,
+3 m point/red-light reach and 1.0 halo gain. All reaches are capped by the
+authored light range, never written back to native lights. The tuner exposes
+four separately labelled vehicle brightness/reach controls. These are artistic
+haze bounds, not a claim of calibrated atmospheric scattering or shorter native
+headlight illumination. Increasing samples can cost GPU time; the shorter
+footprint and cone clipping may offset it, but no FPS improvement is claimed.
+
+Both telemetry and the four-source selector now retain active red/orange light
+props instead of allowing bright headlights to occupy every slot. Up to two
+red-dominant sources are reserved, with the remaining slots importance-ranked.
+The colour threshold excludes ordinary warm halogen headlights; it is source
+classification, not a guess of a physical rear position. Nearly coincident,
+same-vehicle, same-kind, same-colour and aligned props are merged for haze
+(strongest retained, not summed). The existing four-source GPU budget remains.
+The panel shows reported/eligible/red-selected/merged counts. An emissive-only
+tail texture is still not a native light prop, so missing native sources are
+reported rather than fabricated. Very weak real tail lighting can remain subtle.
+
+The on-demand VL sampler is protocol-versioned and refreshed on mismatch, so an
+extension reload does not silently keep the old first-32-props sampling policy.
+CPU tests cover red-source starvation, telemetry fairness, compact bounds,
+overlapping props, retained native ranges and lifecycle. Numerical cone tests
+check randomized support, positive/backward cones, parallel/tangent/point/depth
+cases and continuity against a dense reference. Shader compilation and CPU tests
+do not prove the in-game visual result; reload once and compare from the same
+camera with vehicle lights on and off.
+
+### Glass investigation (not implemented by this haze patch)
+
+Inspected installed shader paths: `common/material/shadergen/permutations.h.hlsl`
+has a distinct forward glass-lighting path, with cube reflection behind
+`MFT_CubeMap`. Its dedicated native SSR surface capture also has a separate
+reflection/transmission receiver route. Coherent currently reads the ordinary
+prepass; it has no independent transparent-window receiver depth, normal,
+coverage and material layer. Underlying opaque depth/material data cannot
+reliably substitute for that glass surface. Increasing global SSR intensity or
+making glass opaque would not be a correct window-reflection fix.
+
+The installed native sun/vehicle shadow lookup (`calcShadowPSSM` /
+`calcShadowVehicle` in `common/lighting/shadowMap/shadowMapPSSM.hlsl`) returns
+scalar depth visibility, not RGB glass transmittance. The inspected stock
+`pickup_glass` declarations in `common.zip` already request `dynamicCubemap=true`,
+declare `translucent=true`, and set `castShadows=false`. Those examples establish
+native reflection support, not proof of the cause on every live vehicle.
+Proper lighter/tinted glass shadows require a transmission-aware light-space
+layer, preserving opaque body/interior occlusion. This patch does not toggle
+glass shadow flags, alter opacity/materials, edit installed shaders, or claim
+that glass reflection/transmission is now implemented.
+
+## v0.125 — LED discovery repair and vehicle-light haze
+
+Prepared LED discovery no longer relies on numeric scene mask `256`. It uses
+the native `SOTStaticShape` constant when available, plus a read-only TSStatic
+class scan that continues past the first 128 results. The incremental scan
+inspects up to 128 entries per update with a soft 2 ms budget after the first
+24, refreshes no more often than five seconds, and caches at most 64 matching
+prepared-asset instances. It does not rescan arbitrary material contents.
+This fixes the first-batch starvation path; it is not proof of the exact live
+rejection behind the earlier 0/2 screenshot.
+
+The tuner now shows inspected/matched/pending counts and rejection stages:
+hidden or render-disabled geometry, source integrity, placement, material fields,
+instance-emission tint, native API errors, duplicate native haze or view distance.
+Material booleans accept native numeric as well as string/boolean forms. Live
+`instanceColor` is honored where `instanceEmissive` is enabled; night/day control
+is not overridden. Coincident same-material emitters are deduplicated. The map
+contains duplicate night-only LED layers, including authored render-disabled
+instances; hidden sources are not forced on to make the counter nonzero.
+The same two prepared LED assets remain supported, with visual alignment and
+photometry still unverified.
+
+Local haze now includes **Vehicle light haze**, enabled when local haze starts
+unless deselected for this session. It uses a separate budget of four light
+sources from up to four nearby vehicles, preserving the existing eight lamp
+spotlights. Spot- and point-light JBeam props are supported, including headlights,
+tail/brake/fog/reverse/indicator lights when authored as actual light props.
+Purely glowing textures and custom lights outside the standard prop path are
+not inferred from body brightness or material names.
+
+The GE helper reads `getProp(pid):getLiveTransformWorld()` each render update,
+adding vehicle translation and using the prop's +Y axis for spot direction,
+following BeamNG's shipped vehicle light debugger. A small on-demand VL helper
+reads the live prop disabled/hidden flags, its exact electrics function and
+authored light settings. It mirrors the shipped props scaling and JBeam
+candela/lumen conversions; it does not change electrics, props or native lights.
+This is a derived approximation, not a readback of final native light radiance.
+Native cookies, shadows, custom controller overrides and flare optics are not
+sampled. Point props use the same eight-sample integration without a cone.
+
+Nearby vehicle selection refreshes every 0.5 s and considers at most 64 registry
+entries. Read-only VL requests are bounded to 10 Hz per tracked vehicle with one
+pending request each; samples expire after 0.35 s. Prop poses update every frame
+so beams do not wait for the lamp detector's 0.25 s upload cadence. Generation
+tokens, monotonic sequence numbers and vehicle identity checks reject stale
+replies, including reset/replacement/disable cases. The VL helper has no update
+hook; disabling haze removes the owned GE callback and stops further requests.
+All vehicle haze is unshadowed, depth-limited scattering and adds GPU/CPU work.
+No native shadow budget, reflection/GI tuning or global fog settings are changed.
+
+Reload once, enable local haze, and check **Active vehicle haze sources** while
+switching car lights on/off and moving. For the LED experiment, enable its own
+checkbox and inspect the new LED rejection status if the count stays zero.
+Offline tests and v005 shader compilation validate CPU/math/lifecycle contracts,
+not live game appearance or frame time.
+
+## v0.124 — material-aware reflection and prepared LED haze experiments
 
 Two independent A/B options are added; both default OFF. Existing ray counts,
 roughness cutoff, reflection strength, PTGI tuning and native materials/lights

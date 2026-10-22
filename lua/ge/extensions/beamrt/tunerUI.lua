@@ -195,7 +195,7 @@ function M.localVolumes(im,api)
     if not ok and type(log)=='function' then log('W','BeamRT',tostring(reason)) end
   end
   im.TextWrapped(status.reason)
-  im.TextWrapped('Two-tier coverage: shadow discovery/priority within 100 m; independent read-only haze detection within 180 m, up to eight spotlights and 160 m view distance. 8 integration samples per lamp. Haze does not request shadows or require shadow priority. Stops at visible depth, but does NOT use native lamp shadows; unseen blockers can leak. No general point, emissive or vehicle light coverage. Adds GPU work; disabled by default.')
+  im.TextWrapped('Two-tier coverage: shadow priority within 100 m; independent read-only haze detection within 180 m, up to eight lamp spotlights plus four vehicle lights, 160 m view distance. Lamps use 8 integration samples; vehicle lights use 16 cone-clipped samples with separate compact reach. Haze stops at visible depth but does NOT use native shadow maps; unseen blockers can leak. No general scene point-light or arbitrary emissive coverage. Adds GPU work; haze disabled by default.')
   if status.pendingCleanup and im.Button('Retry haze cleanup##BeamRTVolumes') then api.setLocalVolumesEnabled(false) end
   im.TextUnformatted('Supported spotlights: '..tostring(status.lightCount or 0))
   if status.discovery then
@@ -210,6 +210,30 @@ function M.localVolumes(im,api)
       api.setLocalVolumeParameter(control[1],pointer[0])
     end
   end
+  if status.vehicle and api.setVehicleVolumesEnabled then
+    local pointer=im.BoolPtr(status.vehicleEnabled)
+    if im.Checkbox('Vehicle light haze##BeamRTVehicleVolumes',pointer) then
+      local ok,why=api.setVehicleVolumesEnabled(pointer[0])
+      if not ok and type(log)=='function' then log('W','BeamRT',tostring(why)) end
+    end
+    im.TextUnformatted('Active vehicle haze sources: '..tostring(status.vehicle.count or 0)..' / 4')
+    im.TextWrapped(status.vehicle.reason)
+    local counts=status.vehicle.counts or {}
+    im.TextUnformatted(string.format('Vehicle telemetry: %d active | %d red/orange | %d red/orange selected | %d overlapping props merged',
+      counts.reported or 0,counts.redReported or 0,counts.redSelected or 0,counts.merged or 0))
+    if status.vehicle.requested and (counts.redReported or 0)==0 then
+      im.TextWrapped('No active red/orange light props reported. Emissive-only taillight textures do not supply a haze source; brake/tail state must be active.')
+    end
+    for _,control in ipairs({{'vehicleBeamGain','Vehicle beam haze brightness',status.vehicleBeamGain or .35,0,4},
+      {'vehicleBeamReach','Vehicle beam haze reach (m)',status.vehicle.beamReach or 20,5,50},
+      {'vehicleHaloGain','Vehicle point / red-light haze brightness',status.vehicleHaloGain or 1,0,4},
+      {'vehicleHaloReach','Vehicle point / red-light haze reach (m)',status.vehicle.haloReach or 3,.5,8}}) do
+      im.TextUnformatted(control[2])
+      local value=im.FloatPtr(control[3])
+      if im.SliderFloat('##BeamRTVolume'..control[1],value,control[4],control[5],'%.2f') then api.setLocalVolumeParameter(control[1],value[0]) end
+    end
+    im.TextWrapped('Spot/point light props on up to four nearby vehicles, using live prop transforms and on-demand props/electrics telemetry (10 Hz, stale data expires). No guessed lamp positions, body glow or new vehicle lights. Approximate scattering; native beam cookies and shadows are not sampled.')
+  end
   if status.emissive and api.setEmissiveVolumesEnabled then
     local pointer=im.BoolPtr(status.emissive.requested)
     if im.Checkbox('Prepared LED emissive haze (experimental)##BeamRTEmissive',pointer) then
@@ -218,6 +242,16 @@ function M.localVolumes(im,api)
     end
     im.TextWrapped(status.emissive.reason)
     im.TextUnformatted('Prepared LED emitters: '..tostring(status.emissive.count or 0)..' / 2')
+    local discovery=status.emissive.discovery
+    if discovery then
+      im.TextWrapped(discovery.lookup or '')
+      im.TextUnformatted(string.format('LED scan: %d inspected | %d matched | %d pending',
+        discovery.inspected or 0,discovery.matched or 0,discovery.pending or 0))
+      for _,stage in ipairs({'hidden','integrity','placement','material','instanceColor','duplicate','distance','native API'}) do
+        local count=(discovery.rejected or {})[stage] or 0
+        if count>0 then im.TextUnformatted('LED rejected - '..stage..': '..count) end
+      end
+    end
     im.TextWrapped('Only the two separate Polish Roads Owlen LED meshes, not signs or arbitrary glowing pixels. Uses geometry, live emissive colour/nits and instance transforms; four area samples per mesh, 12 m local reach. Haze only: no surface lighting or native shadow visibility. Alignment and brightness are unverified; experimental gain is not calibrated. Off by default and after haze restart.')
     im.TextUnformatted('Emissive haze gain')
     local gain=im.FloatPtr(status.emissiveGain or 1)

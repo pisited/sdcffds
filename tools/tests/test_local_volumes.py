@@ -161,13 +161,13 @@ class LocalVolumes(unittest.TestCase):
             self.assertEqual(len(api.getVolumetricLights()),0)
 
     def test_shader_has_fixed_deterministic_depth_limited_integration_and_no_shadow_claim(self):
-        source=(ROOT/'shaders/beamrt/beamrtLocalVolumeP_v004.hlsl').read_text()
+        source=(ROOT/'shaders/beamrt/beamrtLocalVolumeP_v006.hlsl').read_text()
         self.assertIn('i<8',source)
         self.assertIn('min(volumeDistance,rayLength*saturate(depth))',source)
         self.assertIn('if(volumeCount>7.5)',source)
         self.assertNotIn('random',source)
         self.assertNotIn('shadowAtlas',source)
-        self.assertIn('if((volumeCount<.5 && emitterCount<.5) || volumeStrength<=0 || volumeDensity<=0) return scene;',source)
+        self.assertIn('if((volumeCount<.5 && emitterCount<.5 && vehicleCount<.5) || volumeStrength<=0 || volumeDensity<=0) return scene;',source)
         self.assertIn('uniform_sampler2D(sceneTex,0)',source)
         self.assertIn('tex2D(depthTex,IN.uv2)',source)
         self.assertIn('dot(direction,-ray)',source)

@@ -1,4 +1,4 @@
--- BeamRT v0.124: opt-in native material response and prepared emissive area haze.
+-- BeamRT v0.128: paused-vehicle opacity-map sunlight transmission experiment.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -18,6 +18,28 @@ package.loaded["ge/extensions/beamrt/reflectionLab"] = nil
 package.loaded["ge/extensions/beamrt/tunerUI"] = nil
 M._tunerUI = require("ge/extensions/beamrt/tunerUI")
 M._automaticLampShadows = true -- session preference; renderer startup opts in
+do
+  local key='ge/extensions/beamrt/glassShadowProbe'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._glassShadowProbe=require(key)
+end
+do
+  local key='ge/extensions/beamrt/glassSunShadow'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then
+      package.loaded[key]=nil
+      package.loaded['ge/extensions/beamrt/glassGeometry']=nil
+      package.loaded['ge/extensions/beamrt/providers/vehicleProvider']=nil
+    end
+  end
+  M._glassSunShadow=require(key)
+end
 do
   local key='ge/extensions/beamrt/localVolumes'
   local previous=package.loaded[key]
@@ -86,7 +108,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.124"
+local VERSION = "0.128"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -3202,6 +3224,51 @@ function M.logPtgiCoherentStatus()
 end
 
 function M.getLocalVolumeStatus() return M._localVolumes.getStatus() end
+function M.getGlassShadowProbeStatus() return M._glassShadowProbe.getStatus() end
+function M.getGlassSunShadowStatus() return M._glassSunShadow.getStatus() end
+function M.setGlassSunShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._glassSunShadow.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before capturing window shadows.' end
+  local restored,why=M._glassShadowProbe.disable()
+  if not restored then return false,why end
+  return M._glassSunShadow.enable()
+end
+function M.setGlassSunShadowStrength(value) return M._glassSunShadow.setStrength(value) end
+function M.startGlassTest()
+  if not simTimeAuthority or not simTimeAuthority.getPause() then
+    return false,'Park in sunlight and pause physics with J, then run startGlassTest() again.'
+  end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before starting the glass test.' end
+  local compatibility=PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then return false,compatibility.reason end
+  if not M.disable() then return false,'Previous render ownership could not be restored.' end
+  local ok,why=M.setPtgiNamedHandoffEnabled(false);if not ok then return false,why end
+  for _,setting in ipairs({{'hdrComposite',true},{'terrainMaskEnable',false},{'nativeMaterialResponse',true},
+    {'debugView',0},{'stochasticSSR',true},{'stochasticRayCount',8},{'temporalDenoising',true}}) do
+    ok,why=M.setCoherentSsrParameter(setting[1],setting[2]);if not ok then return false,why end
+  end
+  ok,why=M.setPtgiCoherentEnabled(true);if not ok then return false,why end
+  ok,why=M.setAutomaticLampShadowsEnabled(true);if not ok then return false,why end
+  M._glassSunShadow.setStrength(1)
+  ok,why=M.setGlassSunShadowsEnabled(true)
+  if not ok then beamrtLog('W','Glass test: '..tostring(why));return false,why end
+  beamrtLog('I','Glass test: PTGI + Coherent, native material response, 8 reflection rays, temporal accumulation, automatic lamp shadows. Haze/debug/named HDR off. GI tuning retained. '..tostring(why))
+  M.openTuner();return true,why
+end
+function M.inspectGlassShadowMaterials() return M._glassShadowProbe.inspect() end
+function M.setGlassShadowProbeEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._glassShadowProbe.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before trying window shadows.' end
+  return M._glassShadowProbe.enable()
+end
 function M.setLocalVolumesEnabled(value)
   if type(value)~='boolean' then return false,'Expected boolean.' end
   if not value then return M._localVolumes.disable() end
@@ -3218,6 +3285,7 @@ function M.setLocalVolumesEnabled(value)
 end
 function M.setLocalVolumeParameter(key,value) return M._localVolumes.setParameter(key,value) end
 function M.setEmissiveVolumesEnabled(value) return M._localVolumes.setEmissiveEnabled(value) end
+function M.setVehicleVolumesEnabled(value) return M._localVolumes.setVehicleEnabled(value) end
 
 function M.setPtgiCoherentEnabled(value)
   if type(value) ~= 'boolean' then return false, 'Combined rendering enabled must be boolean.' end
@@ -7153,6 +7221,42 @@ function M._tunerPanels.lighting()
 
   if im.CollapsingHeader1("Mesh visibility and shadows (experimental)") then
     im.PushItemWidth(-1)
+    do
+      local glass=M.getGlassSunShadowStatus()
+      if im.Button('Start glass sunlight test preset##BeamRTGlassSun') then
+        local ok,why=M.startGlassTest();if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if im.Button(glass.requested and 'Disable glass sunlight transmission##BeamRTGlassSun' or 'Capture paused window sunlight##BeamRTGlassSun') then
+        local ok,why=M.setGlassSunShadowsEnabled(not glass.requested);if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if glass.pendingRestore and im.Button('Retry sunlight restoration##BeamRTGlassSun') then M.setGlassSunShadowsEnabled(false) end
+      im.TextWrapped('Pause physics with J first. Actual exterior window triangles + opacity maps, including _glass_tint. Sunlight only; neutral attenuation, not RGB tint or new window reflections. Resume/switch/reset/material changes stop the snapshot. GPU appearance unverified.')
+      im.TextWrapped(glass.reason)
+      if glass.enabled then
+        local strength=im.FloatPtr(glass.strength)
+        im.TextUnformatted('Window extinction (0 = native baseline, 1 = opacity-map transmission)')
+        if im.SliderFloat('##BeamRTGlassSunStrength',strength,0,1,'%.2f') then M.setGlassSunShadowStrength(strength[0]) end
+        for _,name in ipairs(glass.materials) do im.TextUnformatted('  '..name) end
+      end
+    end
+    do
+      local glass=M.getGlassShadowProbeStatus()
+      if im.Button(glass.enabled and 'Restore window shadows##BeamRTGlass' or 'Try native window shadows##BeamRTGlass') then
+        local ok,why=M.setGlassShadowProbeEnabled(not glass.enabled)
+        if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if glass.pendingRestore>0 then
+        if im.Button('Retry window restoration##BeamRTGlass') then M.setGlassShadowProbeEnabled(false) end
+      elseif not glass.enabled then
+        im.SameLine()
+        if im.Button('Inspect window materials##BeamRTGlass') then M.inspectGlassShadowMaterials() end
+      end
+      im.TextWrapped('Native window shadow PROBE, not tinted/partial transmission. Try beside a shadow-casting light or in sunlight. If the windows cast solid shadows, restore them; a separate transmission pass is needed.')
+      im.TextWrapped('Only castShadows changes. Glass opacity, textures, reflections and body materials stay untouched. Materials are shared: other vehicles using the same window material are also affected. Default OFF; session-only.')
+      im.TextWrapped(glass.reason)
+      im.TextUnformatted(string.format('Window materials: %d | changed: %d | pending restore: %d',#glass.candidates,glass.owned,glass.pendingRestore))
+      for _,name in ipairs(glass.candidates) do im.TextUnformatted('  '..name) end
+    end
     if im.Button(M.sharedMeshGI.enabled and "Full-mesh GI visibility ON" or "Full-mesh GI visibility OFF") then
       local ok,why=M.setSharedMeshVisibilityEnabled(not M.sharedMeshGI.enabled)
       if not ok then beamrtLog('E',tostring(why)) end
@@ -7768,6 +7872,8 @@ function M.start()
 end
 
 function M.disable()
+  local glassSunRestored=not M._glassSunShadow or M._glassSunShadow.disable('BeamRT disabled')
+  local glassRestored=not M._glassShadowProbe or M._glassShadowProbe.disable('BeamRT disabled')
   local volumesStopped=not M._localVolumes or M._localVolumes.disable('BeamRT disabled')
   local lampsRestored = not M._nearbyLampShadows or M._nearbyLampShadows.disable('BeamRT disabled')
   local captureStopped = not M._planarCapture or M._planarCapture.stop("BeamRT disabled")
@@ -7780,7 +7886,7 @@ function M.disable()
   syncEffectEnablement()
   local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped
+  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped and glassRestored and glassSunRestored
 end
 
 function M.toggle()
@@ -8165,6 +8271,7 @@ local function validateCleanRadianceLifetimes()
 end
 
 function M.onPreRender(dtReal, dtSim, dtRaw)
+  if M._glassSunShadow then M._glassSunShadow.update(dtReal) end
   if M._nearbyLampShadows and not materialCachePublication and not CLEAN_RADIANCE.build
     and not CLEAN_RADIANCE.materialBatch
     and (not PROGRESSIVE.lightingAudit.getStatus or not PROGRESSIVE.lightingAudit.getStatus().active)
@@ -8209,6 +8316,7 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
 end
 
 function M.onUpdate(dtReal, dtSim, dtRaw)
+  if M._glassShadowProbe then M._glassShadowProbe.update() end
   processMaterialCachePublication()
   validateMaterialCachePublisherLifetimes()
   CLEAN_RADIANCE.processBuild()
@@ -8221,6 +8329,8 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._glassSunShadow then M._glassSunShadow.disable('Graphics/settings changed') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Graphics/settings changed') end
   if M._localVolumes then M._localVolumes.disable('Graphics/settings changed') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Graphics/settings changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
@@ -8249,6 +8359,8 @@ function M.onFileChanged(filename, changeType)
   end
   local lowerName = string.lower(filename)
   if lowerName:match("%.hlsl$") or lowerName:match("%.materials?%.json$") then
+    if M._glassSunShadow then M._glassSunShadow.disable('Shader/material source changed') end
+    if M._glassShadowProbe then M._glassShadowProbe.disable('Shader/material source changed') end
     PROGRESSIVE.lightingAudit.cancel(M, "shader/material changed during audit")
     if materialCachePublication then
       finishMaterialCachePublication("shader/material changed during capture", false)
@@ -8273,6 +8385,8 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._glassSunShadow then M._glassSunShadow.disable('Mission changed') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Mission changed') end
   if M._localVolumes then M._localVolumes.disable('Mission changed') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission changed') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
@@ -8313,6 +8427,8 @@ function M.onClientStartMission()
 end
 
 function M.onClientEndMission()
+  if M._glassSunShadow then M._glassSunShadow.disable('Mission ended') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Mission ended') end
   if M._localVolumes then M._localVolumes.disable('Mission ended') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission ended') end
   if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
@@ -8322,6 +8438,8 @@ function M.onClientEndMission()
 end
 
 function M.onExtensionUnloaded()
+  if M._glassSunShadow then M._glassSunShadow.disable('BeamRT unloaded') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('BeamRT unloaded') end
   if M._localVolumes then M._localVolumes.disable('BeamRT unloaded') end
   if M._nearbyLampShadows then M._nearbyLampShadows.disable('BeamRT unloaded') end
   if M._ptgiCoherent then M.disable() end

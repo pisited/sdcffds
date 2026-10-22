@@ -1,10 +1,13 @@
 -- Opt-in thin-medium spotlight scattering, not a native shadow-atlas consumer.
 -- No settings/material/light writes, no external renderer or global fog edits.
-local M={requested=false,reason='Local lamp haze is off.',strength=1,density=.025,emissiveGain=1}
+local M={requested=false,reason='Local lamp haze is off.',strength=1,density=.025,emissiveGain=1,
+  vehicleEnabled=true,vehicleBeamGain=.35,vehicleHaloGain=1}
 package.loaded['ge/extensions/beamrt/volumeLights']=nil
 local sources=require('ge/extensions/beamrt/volumeLights')
 package.loaded['ge/extensions/beamrt/emissiveVolumes']=nil
 local emitters=require('ge/extensions/beamrt/emissiveVolumes')
+package.loaded['ge/extensions/beamrt/vehicleVolumes']=nil
+local vehicles=require('ge/extensions/beamrt/vehicleVolumes')
 local owned={}
 local registered={}
 local elapsed=1
@@ -28,6 +31,7 @@ function M.disable(why)
   M.requested=false
   sources.disable()
   emitters.disable()
+  vehicles.disable()
   local clean=true
   -- Pass must stop before any of its shader/state dependencies are deleted.
   for _,name in ipairs({'BeamRT_LocalVolumeFx','BeamRT_LocalVolumeShader','BeamRT_LocalVolumeState'}) do
@@ -51,8 +55,8 @@ function M.enable()
   if not M.disable() then return false,M.reason end
   local ok,why=pcall(function()
     local shader=own('ShaderData','BeamRT_LocalVolumeShader')
-    shader.DXVertexShaderFile='shaders/beamrt/beamrtLocalVolumeP_v004.hlsl'
-    shader.DXPixelShaderFile='shaders/beamrt/beamrtLocalVolumeP_v004.hlsl'
+    shader.DXVertexShaderFile='shaders/beamrt/beamrtLocalVolumeP_v006.hlsl'
+    shader.DXPixelShaderFile='shaders/beamrt/beamrtLocalVolumeP_v006.hlsl'
     for i,name in ipairs({'sceneTex','normalTex','depthTex'}) do shader:setField('samplerNames',i-1,name) end
     shader.pixVersion=5
     shader:registerObject('BeamRT_LocalVolumeShader');registered.BeamRT_LocalVolumeShader=true
@@ -78,17 +82,22 @@ function M.enable()
     pass:registerObject('BeamRT_LocalVolumeFx');registered.BeamRT_LocalVolumeFx=true
     upload(pass,'$volumeCount',0);upload(pass,'$volumeStrength',M.strength);upload(pass,'$volumeDensity',M.density)
     upload(pass,'$volumeDistance',sources.maxDistance)
+    upload(pass,'$vehicleCount',0)
     upload(pass,'$emitterCount',0);upload(pass,'$emissiveRange',emitters.range)
     upload(pass,'$emissiveGain',M.emissiveGain*.001) -- experimental nits -> working radiance scale, not calibrated
     pass:disable() -- no full-screen copy until a supported lamp is available
   end)
   if not ok then M.disable('Local haze startup failed: '..tostring(why));return false,M.reason end
   sources.enable();M.requested=true;elapsed=1
+  if M.vehicleEnabled then vehicles.enable() end
   M.reason='Local spotlight haze requested; unshadowed approximation, GPU appearance unverified.'
   return true
 end
 function M.setParameter(key,value)
-  if key~='strength' and key~='density' and key~='emissiveGain' then return false end
+  if key=='vehicleBeamReach' or key=='vehicleHaloReach' then
+    elapsed=1;return vehicles.setParameter(key=='vehicleBeamReach' and 'beamReach' or 'haloReach',value)
+  end
+  if key~='strength' and key~='density' and key~='emissiveGain' and key~='vehicleBeamGain' and key~='vehicleHaloGain' then return false end
   if type(value)~='number' or value~=value or value<0 or value>(key=='density' and .1 or 4) then return false end
   M[key]=value;elapsed=1;return true
 end
@@ -98,6 +107,13 @@ function M.setEmissiveEnabled(value)
   elapsed=1
   if value then return emitters.enable() end
   return emitters.disable()
+end
+function M.setVehicleEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if value and not M.requested then return false,'Enable local haze first.' end
+  M.vehicleEnabled=value;elapsed=1
+  if value then return vehicles.enable() end
+  return vehicles.disable()
 end
 function M.update(dt)
   if not M.requested then return end
@@ -116,10 +132,11 @@ function M.update(dt)
     if step~=step then step=0 end
     elapsed=elapsed+math.max(0,math.min(step,1))
     sources.update(step)
+    vehicles.update(step)
     local lights=sources.getVolumetricLights()
     emitters.update(step,lights)
     local discovery=sources.getStatus()
-    if elapsed<.25 and discovery.revision==sourceRevision then return end
+    if elapsed<.25 and discovery.revision==sourceRevision and not vehicles.getStatus().requested then return end
     sourceRevision=discovery.revision
     elapsed=0
     lightCount=math.min(sources.maxLights,#lights)
@@ -132,6 +149,15 @@ function M.update(dt)
       upload(pass,'$volumeInner'..(i-1),l.inner)
     end
     upload(pass,'$volumeCount',lightCount)
+    local carLights=vehicles.getLights()
+    for i=1,math.min(vehicles.maxLights,#carLights) do
+      local l=carLights[i];local suffix=i-1
+      upload(pass,'$vehiclePosition'..suffix,vector(l.position,l.range))
+      upload(pass,'$vehicleDirection'..suffix,vector(l.direction,l.outer))
+      upload(pass,'$vehicleColor'..suffix,vector(l.color,l.brightness*(l.halo and M.vehicleHaloGain or M.vehicleBeamGain)))
+      upload(pass,'$vehicleInner'..suffix,l.inner)
+    end
+    upload(pass,'$vehicleCount',#carLights)
     local areaLights=emitters.getEmitters()
     upload(pass,'$emissiveGain',M.emissiveGain*.001)
     for i=1,math.min(emitters.maxEmitters,#areaLights) do
@@ -145,20 +171,25 @@ function M.update(dt)
       end
     end
     upload(pass,'$emitterCount',#areaLights)
-    local shouldDraw=(lightCount>0 or (#areaLights>0 and M.emissiveGain>0)) and M.strength>0 and M.density>0
+    local vehicleDraw=false
+    for _,l in ipairs(carLights) do if (l.halo and M.vehicleHaloGain or M.vehicleBeamGain)>0 then vehicleDraw=true;break end end
+    local shouldDraw=(lightCount>0 or vehicleDraw or (#areaLights>0 and M.emissiveGain>0)) and M.strength>0 and M.density>0
     if shouldDraw~=drawing then
       if shouldDraw then pass:enable() else pass:disable() end
       drawing=shouldDraw
     end
     M.reason=lightCount>0 and 'Wide spotlight haze: independent read-only detection; unshadowed approximation, GPU appearance unverified.'
+      or (#carLights>0 and 'Vehicle light haze active; unshadowed approximation, GPU appearance unverified.'
       or (#areaLights>0 and 'Prepared LED haze active; unshadowed approximation, GPU appearance unverified.'
-      or 'No supported spotlights in haze range yet. Shadow priority is not required; point/vehicle lights are not covered.')
+      or 'No supported active haze sources in range yet.'))
   end)
   if not ok then M.disable('Local haze stopped: '..tostring(why)) end
 end
 function M.getStatus()
   return {requested=M.requested,active=drawing,reason=M.reason,strength=M.strength,density=M.density,lightCount=lightCount,
     pendingCleanup=not M.requested and next(owned)~=nil,gpuExecutionVerified=false,nativeShadowVisibility=false,
-    discovery=sources.getStatus(),emissive=emitters.getStatus(),emissiveGain=M.emissiveGain}
+    discovery=sources.getStatus(),emissive=emitters.getStatus(),emissiveGain=M.emissiveGain,
+    vehicle=vehicles.getStatus(),vehicleEnabled=M.vehicleEnabled,
+    vehicleBeamGain=M.vehicleBeamGain,vehicleHaloGain=M.vehicleHaloGain}
 end
 return M

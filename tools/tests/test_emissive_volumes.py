@@ -14,7 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import beamrt_emissive_prepare as prepare
 
 FIXTURE=r'''
-queries=0;reads=0;camera={x=0,y=0,z=3};source='abc'
+queries=0;reads=0;camera={x=0,y=0,z=3};source='abc';SOTStaticShape=2048
 core_camera={getPosition=function()return camera end}
 function vec3(x,y,z)return {x=x,y=y,z=z}end
 function Box3F()return {setExtents=function()end,setCenter=function()end}end
@@ -51,7 +51,8 @@ function instance(id,x)
  objects[id]=o;return o
 end
 hits={instance(101,0)}
-function findObjectList(box,mask)queries=queries+1;return hits end
+function findObjectList(box,mask)assert(mask==SOTStaticShape);queries=queries+1;return hits end
+scenetree.findClassObjects=function(class)return class=='TSStatic' and hits or {} end
 '''
 
 
@@ -105,11 +106,46 @@ class PreparedEmitters(unittest.TestCase):
             self.assertEqual(m.getEmitters()[1].id,101)
             # Near matching red native source suppresses this geometry contribution.
             lua.execute('hits={instance(101,0)};native={{position={1/3,1/3,0},color={1,0,0}}}')
+            m.disable();m.enable()
             m.update(.5,lua.globals().native);self.assertEqual(m.getStatus().count,0)
             lua.execute('native[1].color={0,1,0}')
             m.update(.5,lua.globals().native);self.assertEqual(m.getStatus().count,1)
             lua.execute('camera.x=1000')
             m.update(.01,lua.table());self.assertEqual(m.getStatus().count,0)
+
+    def test_incremental_scan_finds_led_after_first_128_even_without_spatial_api(self):
+        for lua,m in self.runtimes():
+            lua.execute('''
+            findObjectList=nil;SOTStaticShape=nil;hits={}
+            for i=1,300 do local o=instance(100+i,i);o.shapeName='/unknown.dae';hits[i]=o end
+            hits[301]=instance(999,0)
+            ''')
+            m.enable();m.update(.016,lua.table())
+            self.assertEqual(m.getStatus().count,0)
+            self.assertGreater(m.getStatus().discovery.pending,0)
+            for _ in range(20):m.update(.016,lua.table())
+            self.assertEqual(m.getStatus().count,1,m.getStatus().reason)
+            self.assertGreaterEqual(m.getStatus().discovery.inspected,301)
+            self.assertEqual(m.getStatus().discovery.pending,0)
+
+    def test_rejection_diagnostics_visibility_and_live_instance_emission(self):
+        for lua,m in self.runtimes():
+            lua.execute('''
+            material.fields.emissive=1;material.fields.alphaTest=0;material.fields.translucent=0
+            material.fields.instanceEmissive='1';hits[1].instanceColor='0 0 0 1'
+            ''')
+            m.enable();m.update(.5,lua.table())
+            self.assertEqual(m.getStatus().count,0)
+            self.assertEqual(m.getStatus().discovery.rejected.instanceColor,1)
+            lua.execute("hits[1].instanceColor='.5 1 1 1'")
+            m.update(.5,lua.table());self.assertEqual(m.getStatus().count,1)
+            self.assertEqual(m.getEmitters()[1].color[1],1500)
+            lua.execute('hits[1].isRenderEnabled=function()return false end')
+            m.update(.5,lua.table());self.assertEqual(m.getStatus().count,0)
+            self.assertEqual(m.getStatus().discovery.rejected.hidden,1)
+            lua.execute("hits[1].isRenderEnabled=nil;material.fields.alphaTest=1")
+            m.update(.5,lua.table());self.assertEqual(m.getStatus().discovery.rejected.material,1)
+            self.assertIn('alphaTest=1',m.getStatus().reason)
 
     def test_local_volume_integration_resets_on_restart_and_supports_emitters_without_spots(self):
         for lua,_ in self.runtimes():

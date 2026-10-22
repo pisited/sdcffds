@@ -149,14 +149,17 @@ local function captureSubmeshes(mesh, accessorName, countName, materialNames, in
   return result, errors
 end
 
-function M.capture(vehicleId)
+-- readyMesh is an optional caller-owned asynchronous readback handle. The
+-- caller must wait for readiness and free it; no second readback is acquired.
+function M.capture(vehicleId, readyMesh)
   vehicleId = tonumber(vehicleId)
-  if not vehicleId or not GPUMesh or type(GPUMesh.bng_getGPUMesh) ~= "function" then
+  if not vehicleId or (not readyMesh and (not GPUMesh or type(GPUMesh.bng_getGPUMesh) ~= "function")) then
     return nil, "GPUMesh.bng_getGPUMesh is unavailable"
   end
   if not ffiOk then return nil, "LuaJIT FFI is unavailable" end
 
-  local ok, mesh = safeCall(GPUMesh.bng_getGPUMesh, vehicleId)
+  local ok, mesh = true, readyMesh
+  if not mesh then ok,mesh=safeCall(GPUMesh.bng_getGPUMesh, vehicleId) end
   if not ok or not mesh then return nil, "vehicle GPUMesh is unavailable" end
 
   local ready = readMember(mesh, "dataIsReady")
