@@ -335,5 +335,20 @@ function M.isValid() return valid end
 function M.getRecords() return records end
 function M.getById(id) return id ~= nil and (byId[tonumber(id)] or byId[tostring(id)]) or nil end
 function M.getStats() return lastStats end
+-- Fresh, read-only single-object sampling. No rebuild or shared cache changes.
+function M.readObject(object) return normalizedRecord(object) end
+function M.queryScene()
+  local tokens,why=collectTokens({all=true})
+  if not tokens then return nil,why end
+  local result,seen={},{}
+  for _,token in ipairs(tokens)do
+    local object=resolveObject(token)
+    if object and not seen[object]then
+      seen[object]=true;local record=normalizedRecord(object)
+      if record then result[#result+1]=record end
+    end
+  end
+  return result
+end
 
 return M

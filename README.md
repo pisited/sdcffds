@@ -1,4 +1,146 @@
-# BeamRT v0.127 — native window shadow probe
+# BeamRT v0.129 — separate light visibility diagnostic
+
+The latest glass report names `character_glass`: the controlled object was the
+walking avatar, not the parked car. Glass startup now refuses the native
+`unicycle` walking-character identity **before changing the test preset or
+requesting GPU geometry**. Enter the intended car first; free camera is fine
+afterward. No caster/opacity guard was removed. This does not yet prove that
+the car's glass capture or sunlight transmission works.
+
+The next milestone is diagnostic, not another beauty preset. Native scene
+PointLight/SpotLight declarations now feed an opt-in **one-selected-light**
+display, separate from indirect GI. In GE Lua, reload once, then list nearby
+candidates (one explicit enumeration, nearest 16 reported):
+
+```lua
+extensions.reload("beamrt_main"); extensions.beamrt_main.listLightVisibilityCandidates()
+```
+
+Use an actual ID from that report in place of `123`:
+
+```lua
+print(extensions.beamrt_main.setLightVisibilityDiagnostic("visibility", 123))
+```
+
+It works without enabling PTGI/Coherent and does not start either renderer.
+The selected light is re-read each frame, without rescanning the map or touching
+shared provider caches. The status report identifies its ID/name, source position,
+axis/cone/range, brightness, enabled-state certainty and requested shadow policy.
+`castShadows` is a request, **not proof of an allocated or sampled shadow map**.
+Unknown enabled state is explicitly unavailable, never silently assumed on.
+
+| View | Meaning |
+| --- | --- |
+| `influence` | Relative unoccluded potential: normal, distance, spot cone, declared brightness/color and windowed inverse-square falloff. Fixed log display gain, not calibrated engine photometry. |
+| `direction` | World-space receiver-to-selected-light direction encoded as `0.5 * direction + 0.5` RGB. |
+| `visibility` | Red: plausible screen-depth blocker; amber: unknown, **not proven clear**. Dark gray: disabled/outside potential influence/back-facing. Magenta: enabled state unavailable. |
+| `native` | Magenta: native per-light visibility unavailable to this diagnostic. No atlas/view binding is guessed. |
+
+Switch views without rescanning/restarting, inspect status, then turn it off:
+
+```lua
+extensions.beamrt_main.setLightVisibilityDiagnostic("direction")
+extensions.beamrt_main.getLightVisibilityDiagnosticStatus()
+extensions.beamrt_main.setLightVisibilityDiagnostic("off")
+```
+
+Only the explicit diagnostic replaces the display, after renderer histories and
+haze; stopping removes it. It does not modify native light/material fields,
+graphics settings, GI transport, beauty brightness or shadow attenuation.
+Captures, source/settings changes, mission changes, unload and lost object
+ownership stop it. Shader compilation and Lua tests are not live GPU proof.
+
+The screen probe has 32 fixed samples and at most 12 m reach. It cannot establish
+off-screen visibility, thin/transparent geometry or complete chassis coverage;
+its 12 cm depth-hit tolerance is approximate. Scene lights only for now: no sun,
+vehicle-prop telemetry, emissive sources, cookies, calibrated intensity conversion
+or full geometry visibility integration. See [the visibility integration
+notes](docs/light-visibility-diagnostic.md) for native resource findings and the
+direct/indirect ownership boundary.
+
+## v0.128.1 — explicit glass rejection diagnostics
+
+The reported `No supported exterior window triangles` failure happens before
+the sunlight hook is installed. Strength 0/1 cannot compare glass shadows when
+that capture has failed. No renderer success is inferred from that message.
+
+The glass panel now has **Explain glass material rejection**, or after reloading
+BeamRT run this GE Lua command:
+
+```lua
+extensions.beamrt_main.inspectGlassSunMaterials()
+```
+
+This is a read-only scan of the current player vehicle's glass-like material
+names and live declarations; it does not capture GPU geometry, enable rendering,
+change material fields, pause physics or change settings. It logs each material's
+first rejected contract plus raw checked fields. Failed captures also include
+up to four exterior rejection reasons in their status. The report distinguishes
+empty/missing opacity maps, caster flags, source/version/layer declarations,
+alpha/instance opacity and UV limitations. It is not proof of native GPU behavior.
+No selection guard, GI math, source policy or shadow equation was relaxed.
+
+## v0.128 — paused-vehicle glass sunlight transmission experiment
+
+Park in sunlight and pause physics with **J**, then run this in the **GE Lua**
+console (BeamNG integrated SSR must already be off):
+
+```lua
+extensions.reload("beamrt_main"); print(extensions.beamrt_main.startGlassTest())
+```
+
+The public preset starts baseline PTGI + Coherent, native material response,
+eight reflection rays, temporal accumulation and automatic lamp shadows, then
+requests the glass snapshot. It preserves existing GI/brightness tuning.
+Named HDR handoff, local haze, the old glass-caster probe and diagnostic views
+are off. It never changes native graphics settings, sun/time, window opacity
+or physics pause itself. Status reports asynchronous readiness/failure; a CPU
+"scheduled" message is NOT proof of GPU output. Inspect Lighting & GI → Mesh
+visibility and shadows for the actual exterior material names and triangle count.
+
+This is a separate **deferred sunlight** experiment, not the v0.127 caster flag.
+It reads the player's actual native flexmesh triangles and UV0, including
+`_glass_tint`, excludes duplicate interior glass, builds a bounded BVH, and
+publishes an R16 geometry cache in `settings/beamrt/glass_snapshots`. Native
+opacity maps and opacity factors determine scalar transmission at each ray
+intersection. Coplanar seam hits merge; separate panes multiply transmission.
+`T = 1 - opacity` is an appearance-driven extinction approximation, not
+calibrated absorption, refractive/Fresnel transport or measured window tint.
+Maximum eight crossings, three exterior materials and 4096 triangles. Unsupported
+or incomplete captures fail explicitly; there is no geometry truncation or
+guessed window-plane replacement. Native world-vs-origin-relative coordinates
+must pass the live vehicle OBB bounds check, otherwise activation is refused.
+
+A full-resolution receiver-identified mask is produced before native direct
+sunlight, and a private copy of the installed sunlight shader multiplies its
+existing visibility by window transmission. Body/scene/cloud shadows remain
+native, never brightened. No final-image darkening, native installation edits
+or material remapping. This uses six producer texture inputs and one extra
+native sun input. Other native sun hooks must be disabled first. The installed
+source-specific shader can be prepared again using:
+
+```powershell
+.\.beamrt-validation\python-tests\Scripts\python.exe -I -B tools/beamrt_glass_sun_prepare.py --game-root E:/SteamLibrary/steamapps/common/BeamNG.drive
+```
+
+Compare without recompiling or changing the lighting:
+
+```lua
+extensions.beamrt_main.setGlassSunShadowStrength(0) -- native baseline
+extensions.beamrt_main.setGlassSunShadowStrength(1) -- opacity-map extinction
+extensions.beamrt_main.setGlassSunShadowsEnabled(false) -- restore native sunlight
+```
+
+**Limits:** physics must remain paused. Resume, vehicle/pose/material changes,
+captures, settings, reload, mission transitions or disable-all stop/release the
+snapshot. Readback is asynchronous and times out after five seconds. Up to eight
+snapshots per module session bound cache churn. No moving/deforming cars, window
+prop transforms, damaged/alpha-tested glass, animated UVs, RGB transmission,
+local-lamp/headlight glass shadows or new window reflections yet. This does not
+repair the separate late-GI/transparent-composition limitation. Offline shader
+compilation and CPU tests are not live appearance or performance proof.
+
+## v0.127 — native window shadow probe
 
 Lighting & GI → Mesh visibility and shadows (experimental) now offers **Try
 native window shadows** and **Restore window shadows**. This is a deliberately

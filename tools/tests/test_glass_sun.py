@@ -65,6 +65,7 @@ GPUMesh={bng_getGPUMesh=function(id)assert(id==41);captures=captures+1;return me
 snapshot={materials={{name='car_glass_tint',path='/vehicles/car/opacity.data.png',factor=.7}},
   triangles={{}},nodes={{}},pose={},lo={99,-1,1},extent={2,2,.1},uvLo={0,0},uvExtent={1,1},coordinateMode='vehicle-origin-relative'}
 package.loaded['ge/extensions/beamrt/glassGeometry']={width=256,pose=function()return {}end,
+ checkTarget=function()if walking then return false,'Enter the car first'end;return true end,
  samePose=function()return valid end,valid=function()return paused and valid end,
  capture=function(v,m)assert(v==vehicle and m==mesh);if failGeometry then return nil,'bad geometry'end;return snapshot end,
  texels=function(d,tag)return {45678,1,tag,1,1,0,0,0}end}
@@ -97,6 +98,47 @@ class Geometry(unittest.TestCase):
             self.assertEqual(lua.globals().released,1)
             self.assertEqual(lua.globals().invalidated,1)
             self.assertTrue(m.valid(d));lua.globals().paused=False;self.assertFalse(m.valid(d))
+
+    def test_walking_character_is_not_silently_captured_as_the_car(self):
+        for lua,m in self.runtimes():
+            lua.execute("function vehicle:getJBeamFilename()return 'unicycle'end")
+            ok,why=m.checkTarget(lua.globals().vehicle)
+            self.assertFalse(ok);self.assertIn('walking character',why)
+            result,why=m.capture(lua.globals().vehicle)
+            self.assertIsNone(result);self.assertIn('Enter the car',why)
+            self.assertEqual(lua.globals().released,0)
+            lua.execute("function vehicle:getJBeamFilename()return 'fullsize'end")
+            self.assertTrue(m.checkTarget(lua.globals().vehicle))
+
+    def test_inspection_names_and_reasons_are_read_only_no_gpu_readback(self):
+        for lua,m in self.runtimes():
+            lua.execute('''
+            function vehicle:getMeshMaterialNames()return {'car_glass','car_glass_tint','car_glass_int','car_glass'}end
+            objects.car_glass.fields.castShadows='true'
+            objects.car_glass_tint.fields.opacityMap=''
+            ''')
+            report=m.inspect(lua.globals().vehicle)
+            self.assertEqual(report.accepted,0);self.assertEqual(report.rejected,3)
+            rows={r.name:r for r in report.materials.values()}
+            self.assertIn('castShadows=true',rows['car_glass'].reason)
+            self.assertIn('opacityMap is empty',rows['car_glass_tint'].reason)
+            self.assertIn('interior',rows['car_glass_int'].reason)
+            self.assertEqual(rows['car_glass'].fields.castShadows,'true')
+            self.assertEqual(lua.globals().objects.car_glass.fields.castShadows,'true')
+            self.assertEqual(lua.globals().released,0);self.assertEqual(lua.globals().invalidated,0)
+
+    def test_capture_failure_explains_exact_guard_instead_of_generic_no_triangles(self):
+        for lua,m in self.runtimes():
+            lua.execute("objects.car_glass_tint.fields.activeLayers='4'")
+            result=m.capture(lua.globals().vehicle)
+            self.assertIsNone(result[0]);self.assertIn('car_glass_tint: unsupported activeLayers=4',result[1])
+            self.assertEqual(lua.globals().released,1)
+
+    def test_inspection_handles_no_vehicle_and_missing_name_api_without_writes(self):
+        for lua,m in self.runtimes():
+            self.assertEqual(m.inspect(None).reason,'No player vehicle.')
+            self.assertIn('names unavailable',m.inspect(lua.globals().vehicle).reason)
+            self.assertEqual(lua.globals().released,0)
 
     def test_world_frame_accepted_only_inside_live_native_bounds(self):
         for lua,m in self.runtimes():
@@ -162,6 +204,11 @@ class Controller(unittest.TestCase):
         self.assertTrue(m.enable()[0]);lua.globals().mesh.dataIsReady=True;m.update(.1)
         self.assertTrue(m.getStatus().enabled,m.getStatus().reason)
 
+    def test_walking_character_rejected_before_gpu_readback(self):
+        for lua,m in self.runtimes():
+            lua.globals().walking=True
+            self.assertFalse(m.enable()[0]);self.assertEqual(lua.globals().captures,0)
+
     def test_async_capture_waits_does_not_reacquire_then_native_sun_binding(self):
         for lua,m in self.runtimes():
             self.assertFalse(m.getStatus().enabled);self.assertTrue(m.enable()[0]);m.update(.1)
@@ -213,7 +260,25 @@ class Controller(unittest.TestCase):
         for lua,m in self.runtimes():
             self.activate(lua,m);lua.execute('objects.AL_VectorLightMaterial.failReload=true')
             self.assertFalse(m.disable()[0]);self.assertTrue(m.getStatus().pendingRestore)
+            self.assertEqual(lua.globals().objects.BeamRT_GlassSunTraceFx.consts['$glassStrength'],0)
             self.assertFalse(m.enable()[0]);self.assertTrue(m.disable()[0]);self.activate(lua,m)
+
+    def test_rejected_native_restore_keeps_neutral_producer_and_retry(self):
+        for lua,m in self.runtimes():
+            self.activate(lua,m)
+            lua.execute('''
+            local mat=objects.AL_VectorLightMaterial;oldSetter=mat.setField
+            mat.setField=function(self,key,index,value)
+              if key=='shader'and value=='AL_VectorLightShader'then return end
+              return oldSetter(self,key,index,value)
+            end
+            ''')
+            self.assertFalse(m.disable()[0]);self.assertTrue(m.getStatus().pendingRestore)
+            fx=lua.globals().objects.BeamRT_GlassSunTraceFx
+            self.assertTrue(fx.enabled);self.assertEqual(fx.consts['$glassStrength'],0)
+            self.assertEqual(lua.globals().objects.AL_VectorLightMaterial.fields.sampler.beamrtGlassSunVisibility,'')
+            lua.execute('objects.AL_VectorLightMaterial.setField=oldSetter')
+            self.assertTrue(m.disable()[0])
 
     def test_foreign_hook_stale_source_and_snapshot_change_before_install(self):
         for mutation in ("objects.AL_VectorLightMaterial:setField('shader',0,'ForeignShader')",
@@ -224,6 +289,18 @@ class Controller(unittest.TestCase):
             m.enable();lua.execute("objects.AL_VectorLightMaterial:setField('shader',0,'ForeignShader');mesh.dataIsReady=true")
             m.update(.1);self.assertFalse(m.getStatus().enabled)
             self.assertEqual(lua.globals().objects.AL_VectorLightMaterial.fields.shader[0],'ForeignShader')
+
+    def test_replaced_producer_and_callback_are_not_deleted_or_overwritten(self):
+        for lua,m in self.runtimes():
+            self.activate(lua,m)
+            lua.execute('''
+            replacement=createObject('PostEffect');replacement:registerObject('BeamRT_GlassSunTraceFx')
+            foreignCallbacks={};BeamRT_GlassSunTraceFxCallbacks=foreignCallbacks
+            ''')
+            m.update(.1);self.assertFalse(m.getStatus().requested)
+            self.assertTrue(lua.eval('objects.BeamRT_GlassSunTraceFx==replacement'))
+            self.assertTrue(lua.eval('BeamRT_GlassSunTraceFxCallbacks==foreignCallbacks'))
+            self.assertEqual(lua.globals().objects.AL_VectorLightMaterial.fields.shader[0],'AL_VectorLightShader')
 
 
 class PrivateHook(unittest.TestCase):
@@ -277,5 +354,46 @@ class PrivateHook(unittest.TestCase):
             self.assertIn(value,body)
         self.assertNotIn('setLocalVolumesEnabled(true)',body)
         self.assertNotIn('setValue(',body)
+
+    def test_actual_preset_startup_order_pause_guard_and_failure_propagation(self):
+        body=re.search(r'^function M.startGlassTest\(\).*?\nend',MAIN,re.M|re.S).group()
+        for cls in (Lua51,LuaJIT):
+            lua=cls(unpack_returned_tuples=True)
+            lua.execute('''
+            M={};events={};paused=false;safe=true;CLEAN_RADIANCE={}
+            simTimeAuthority={getPause=function()return paused end}
+            PROGRESSIVE={lightingAudit={getStatus=function()return {active=false}end},
+              reflectionSampling={isFrozen=function()return false end},
+              rendererCompatibility={check=function()return {safe=safe,reason='unsafe'}end}}
+            function event(s)events[#events+1]=s end
+            function beamrtLog()end
+            function M.disable()event('disable');return true end
+            function M.setPtgiNamedHandoffEnabled(v)assert(v==false);event('baseline');return true end
+            function M.setCoherentSsrParameter(k,v)
+              event(k..'='..tostring(v));if failParameter then return false,'parameter rejected'end;return true
+            end
+            function M.setPtgiCoherentEnabled(v)assert(v);event('combined');return true end
+            function M.setAutomaticLampShadowsEnabled(v)assert(v);event('lamps');return true end
+            M._glassSunShadow={checkTarget=function()return not walking,'Enter the car first'end,
+              setStrength=function(v)assert(v==1);event('strength')end}
+            function M.setGlassSunShadowsEnabled(v)assert(v);event('glass');return true,'waiting' end
+            function M.openTuner()event('tuner')end
+            ''')
+            lua.execute(body)
+            self.assertFalse(lua.globals().M.startGlassTest()[0]);self.assertEqual(len(lua.globals().events),0)
+            lua.execute('paused=true;safe=false')
+            self.assertFalse(lua.globals().M.startGlassTest()[0]);self.assertEqual(len(lua.globals().events),0)
+            lua.execute('safe=true')
+            lua.execute('walking=true')
+            self.assertFalse(lua.globals().M.startGlassTest()[0]);self.assertEqual(len(lua.globals().events),0)
+            lua.execute('walking=false')
+            self.assertTrue(lua.globals().M.startGlassTest()[0])
+            events=list(lua.globals().events.values())
+            self.assertEqual(events[:2],['disable','baseline'])
+            self.assertLess(events.index('stochasticRayCount=8'),events.index('combined'))
+            self.assertEqual(events[-4:],['lamps','strength','glass','tuner'])
+            lua.execute('events={};failParameter=true')
+            self.assertFalse(lua.globals().M.startGlassTest()[0])
+            self.assertNotIn('combined',list(lua.globals().events.values()))
 
 if __name__=='__main__':unittest.main()

@@ -7,6 +7,7 @@ local target='#BeamRT_GlassSunVisibility'
 local owned={}
 local requested,active=false,false
 local pending,data,original,nativeMaterial,nativeShader,manifest,shaderName
+local producer,callbacks
 local serial=0
 local reason='Glass sunlight transmission is off.'
 local strength,sunSign=1,-1
@@ -16,7 +17,7 @@ local function normalize(s)return type(s)=='string'and s:gsub('\r\n','\n')or s e
 local function logStatus()if log then log('I','BeamRT.GlassSun',reason)end end
 local function register(o,suffix)
   local name=prefix..suffix;assert(not find(name),'Glass object name already occupied')
-  o:registerObject(name);owned[#owned+1]=name;return o
+  o:registerObject(name);owned[#owned+1]={name=name,object=o};return o
 end
 local function freePending()
   if pending and pending.mesh then pcall(function()pending.mesh:free()end)end
@@ -38,19 +39,22 @@ local function compatible()
 end
 function M.disable(message)
   requested=false;active=false;freePending()
-  local fx=find(prefix..'TraceFx');if fx then pcall(fx.disable,fx)end
+  local fx=find(prefix..'TraceFx')==producer and producer or nil
+  -- If native restoration fails, keep a neutral producer rather than leaving
+  -- a frozen attenuating mask bound to the still-owned sunlight shader.
+  if fx then pcall(fx.setShaderConst,fx,'$glassStrength',0)end
   if original then
     local lease=original
     local ok=pcall(function()
       if find('AL_VectorLightMaterial')==nativeMaterial then
         local changed=false
-        if field(nativeMaterial,'shader')==shaderName then
-          nativeMaterial:setField('shader',0,lease.shader);changed=true
-          assert(field(nativeMaterial,'shader')==lease.shader,'Sunlight shader restoration rejected')
-        end
         if field(nativeMaterial,'sampler','beamrtGlassSunVisibility')==target then
           nativeMaterial:setField('sampler','beamrtGlassSunVisibility',lease.sampler);changed=true
           assert(field(nativeMaterial,'sampler','beamrtGlassSunVisibility')==lease.sampler,'Sunlight sampler restoration rejected')
+        end
+        if field(nativeMaterial,'shader')==shaderName then
+          nativeMaterial:setField('shader',0,lease.shader);changed=true
+          assert(field(nativeMaterial,'shader')==lease.shader,'Sunlight shader restoration rejected')
         end
         -- Retry a failed reload even when fields were already restored.
         if changed or lease.retry then
@@ -61,20 +65,24 @@ function M.disable(message)
     if not ok then reason='Glass sunlight restore failed; retry Disable. Ownership retained.';logStatus();return false,reason end
     original=nil
   end
+  if fx then pcall(fx.disable,fx)end
   data=nil
   local remaining={}
   for i=#owned,1,-1 do
-    local o=find(owned[i]);if o and not pcall(o.delete,o)then remaining[#remaining+1]=owned[i]end
+    local entry=owned[i];local o=find(entry.name)
+    if o==entry.object and not pcall(o.delete,o)then remaining[#remaining+1]=entry end
   end
   owned=remaining
   if #owned>0 then reason='Glass effect cleanup failed; retry Disable.';return false,reason end
   shaderName=nil
-  rawset(_G,prefix..'TraceFxCallbacks',nil)
+  producer=nil
+  if rawget(_G,prefix..'TraceFxCallbacks')==callbacks then rawset(_G,prefix..'TraceFxCallbacks',nil)end
+  callbacks=nil
   reason=message or 'Native sunlight restored; glass transmission off.';logStatus();return true,reason
 end
 local function apply()
   if not active or not data then return end
-  local fx=find(prefix..'TraceFx');if not fx then return end
+  local fx=find(prefix..'TraceFx');if not fx or fx~=producer then return end
   fx:setShaderConst('$glassStrength',strength);fx:setShaderConst('$glassSunSign',sunSign)
 end
 local function install(snapshot)
@@ -116,6 +124,7 @@ local function install(snapshot)
   fx:setField('target',0,target);fx:setField('targetFormat',0,'GFXFormatR32G32B32A32F')
   fx:setField('targetScale',0,'1 1');fx:setField('targetClear',0,'PFXTargetClear_OnDraw');fx:setField('targetClearColor',0,'0 0 0 0')
   register(fx,'TraceFx')
+  producer=fx
   local function vec(v)return table.concat(v,' ')end
   fx:setShaderConst('$glassMin',vec(snapshot.lo));fx:setShaderConst('$glassExtent',vec(snapshot.extent))
   fx:setShaderConst('$glassUVMin',vec(snapshot.uvLo));fx:setShaderConst('$glassUVExtent',vec(snapshot.uvExtent))
@@ -139,7 +148,9 @@ local function install(snapshot)
   shaderName=prefix..'NativeShader';register(native,'NativeShader')
   original={shader=field(nativeMaterial,'shader'),sampler=field(nativeMaterial,'sampler','beamrtGlassSunVisibility')or''}
   data=snapshot;active=true;apply()
-  rawset(_G,prefix..'TraceFxCallbacks',{onEnabled=function()return true end,setShaderConsts=apply})
+  callbacks={onEnabled=function()return true end,setShaderConsts=apply}
+  assert(rawget(_G,prefix..'TraceFxCallbacks')==nil,'Glass shader callback already occupied')
+  rawset(_G,prefix..'TraceFxCallbacks',callbacks)
   fx:enable();nativeMaterial:setField('sampler','beamrtGlassSunVisibility',target)
   nativeMaterial:setField('shader',0,shaderName);nativeMaterial:reload()
   assert(field(nativeMaterial,'shader')==shaderName and field(nativeMaterial,'sampler','beamrtGlassSunVisibility')==target,
@@ -157,7 +168,7 @@ function M.enable()
     assert(field(nativeShader,'DXPixelShaderFile')==manifest.nativePath and field(nativeMaterial,'shader')=='AL_VectorLightShader',
       'Another native sunlight hook is active; disable it first')
     assert((field(nativeMaterial,'sampler','beamrtGlassSunVisibility')or'')=='','Glass sampler already occupied')
-    local vehicle=be:getPlayerVehicle(0);assert(vehicle,'No player vehicle')
+    local vehicle=be:getPlayerVehicle(0);local targetOK,targetWhy=M.checkTarget();assert(targetOK,targetWhy)
     assert(GPUMesh and type(GPUMesh.bng_getGPUMesh)=='function','Native vehicle GPUMesh unavailable')
     pending={vehicle=vehicle,pose=geometry.pose(vehicle),elapsed=0}
     pending.mesh=GPUMesh.bng_getGPUMesh(vehicle:getID());assert(pending.mesh,'Native GPU readback request failed')
@@ -178,6 +189,7 @@ function M.update(dt)
       freePending();install(snapshot)
     elseif active then
       assert(data and geometry.valid(data),'Physics resumed or vehicle/material changed; recapture paused windows')
+      assert(find(prefix..'TraceFx')==producer,'Glass visibility producer replaced or removed')
       assert(find('AL_VectorLightMaterial')==nativeMaterial and field(nativeMaterial,'shader')==shaderName
         and field(nativeMaterial,'sampler','beamrtGlassSunVisibility')==target,'Glass sunlight shader ownership changed')
     end
@@ -188,15 +200,18 @@ function M.setStrength(value)
   if type(value)~='number'or value~=value or value<0 or value>1 then return false,'Expected strength 0..1'end
   strength=value;apply();return true
 end
+function M.inspectMaterials()return geometry.inspect(be:getPlayerVehicle(0))end
+function M.checkTarget()return geometry.checkTarget(be:getPlayerVehicle(0))end
 function M.setSunDirection(value)
   if value~='normal'and value~='reversed'then return false end
   sunSign=value=='normal'and 1 or -1;apply();return true
 end
 function M.getStatus()
   local materials={};if data then for i,m in ipairs(data.materials)do materials[i]=m.name end end
-  return {requested=requested,enabled=active,pending=pending~=nil,pendingRestore=original~=nil and not active,
+  return {requested=requested,enabled=active,pending=pending~=nil,pendingRestore=(original~=nil or #owned>0)and not active,
     reason=reason,triangles=data and #data.triangles or 0,nodes=data and #data.nodes or 0,materials=materials,
     strength=strength,sunDirection=sunSign==-1 and 'reversed'or'normal',nativeBodyShadowsPreserved=true,
+    materialInspection=geometry.getInspection and geometry.getInspection()or nil,
     finalImageMultiplied=false,materialOpacityChanged=false,scope='paused player vehicle; deferred sunlight only',
     rgbTransmission=false,windowReflectionsAdded=false,gpuExecutionVerified=false}
 end

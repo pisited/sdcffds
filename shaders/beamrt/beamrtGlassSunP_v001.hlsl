@@ -124,6 +124,12 @@ float glassTrace(float3 origin,float3 direction)
 float4 mainP(PFXVertToPix IN):SV_Target0
 {
     uint w,h;glassGeometryTexTex.GetDimensions(w,h);
+    if(!all(isfinite(glassMin))||!all(isfinite(glassExtent))||any(glassExtent<=0)
+        ||!all(isfinite(glassUVMin))||!all(isfinite(glassUVExtent))||any(glassUVExtent<=0)
+        ||!all(isfinite(glassAtlasSize))||!all(isfinite(glassOpacityFactor))
+        ||any(glassOpacityFactor<0)||any(glassOpacityFactor>1)
+        ||!isfinite(glassStrength)||!isfinite(glassTag)||!isfinite(glassSunSign)
+        ||!isfinite(glassTriangles)||!isfinite(glassNodes)||!isfinite(glassMaterials))return 0;
     if(w!=(uint)glassAtlasSize.x||h!=(uint)glassAtlasSize.y||w==0||glassMaterials<1||glassMaterials>3
         ||glassTriangles<1||glassTriangles>4096||glassNodes<1||glassNodes>1023)return 0;
     if(glassUInt(0)!=45678||glassUInt(1)!=(uint)glassTriangles||glassUInt(2)!=(uint)glassTag

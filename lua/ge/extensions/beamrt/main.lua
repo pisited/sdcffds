@@ -1,4 +1,4 @@
--- BeamRT v0.128: paused-vehicle opacity-map sunlight transmission experiment.
+-- BeamRT v0.129: selected-light visibility diagnostic; walking-avatar glass guard.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -19,6 +19,18 @@ package.loaded["ge/extensions/beamrt/tunerUI"] = nil
 M._tunerUI = require("ge/extensions/beamrt/tunerUI")
 M._automaticLampShadows = true -- session preference; renderer startup opts in
 do
+  local key='ge/extensions/beamrt/lightVisibilityDiagnostic'
+  local previous=package.loaded[key]
+  if previous then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  -- Refresh this module's read-only acquisition API on an extension reload.
+  -- Existing scene-database provider references keep their own cached records.
+  package.loaded['ge/extensions/beamrt/providers/lightProvider']=nil
+  M._lightVisibilityDiagnostic=require(key)
+end
+do
   local key='ge/extensions/beamrt/glassShadowProbe'
   local previous=package.loaded[key]
   if previous and previous.disable then
@@ -30,13 +42,15 @@ end
 do
   local key='ge/extensions/beamrt/glassSunShadow'
   local previous=package.loaded[key]
+  local refresh=not previous
   if previous and previous.disable then
     local ok,restored=pcall(previous.disable,'BeamRT reloaded')
-    if ok and restored then
-      package.loaded[key]=nil
-      package.loaded['ge/extensions/beamrt/glassGeometry']=nil
-      package.loaded['ge/extensions/beamrt/providers/vehicleProvider']=nil
-    end
+    refresh=ok and restored
+  end
+  if refresh then
+    package.loaded[key]=nil
+    package.loaded['ge/extensions/beamrt/glassGeometry']=nil
+    package.loaded['ge/extensions/beamrt/providers/vehicleProvider']=nil
   end
   M._glassSunShadow=require(key)
 end
@@ -108,7 +122,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.128"
+local VERSION = "0.129"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -3226,6 +3240,40 @@ end
 function M.getLocalVolumeStatus() return M._localVolumes.getStatus() end
 function M.getGlassShadowProbeStatus() return M._glassShadowProbe.getStatus() end
 function M.getGlassSunShadowStatus() return M._glassSunShadow.getStatus() end
+function M.listLightVisibilityCandidates()
+  local report,why=M._lightVisibilityDiagnostic.list()
+  if report then
+    beamrtLog('I','Light visibility: '..report.total..' scene lights; nearest '..#report.lights..' listed. '..report.scope)
+    for _,row in ipairs(report.lights)do
+      beamrtLog('I','ID '..tostring(row.id)..' | '..tostring(row.name)..' | '..(row.rejected or
+        (tostring(row.type)..' | '..string.format('%.1f m',row.distance or 0)..' | enabled='..tostring(row.enabled)
+        ..' | shadow requested='..tostring(row.castShadows))))
+    end
+  else beamrtLog('W','Light visibility candidates: '..tostring(why))end
+  return report,why
+end
+function M.setLightVisibilityDiagnostic(view,id)
+  if view=='off'then return M._lightVisibilityDiagnostic.disable()end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen() then
+    return false,'Finish captures before starting the light visibility diagnostic.'
+  end
+  if id~=nil then return M._lightVisibilityDiagnostic.enable(id,view)end
+  if not M._lightVisibilityDiagnostic.getStatus().enabled then return false,'Choose an explicit native light ID first.'end
+  return M._lightVisibilityDiagnostic.setMode(view)
+end
+function M.getLightVisibilityDiagnosticStatus()
+  local report=M._lightVisibilityDiagnostic.getStatus()
+  beamrtLog('I','Light visibility diagnostic: '..jsonEncode(report));return report
+end
+function M.inspectGlassSunMaterials()
+  local report=M._glassSunShadow.inspectMaterials()
+  beamrtLog('I','Window material inspection: '..report.reason)
+  for _,row in ipairs(report.materials) do
+    beamrtLog('I',row.name..': '..tostring(row.reason)..' | live fields '..jsonEncode(row.fields))
+  end
+  return report
+end
 function M.setGlassSunShadowsEnabled(value)
   if type(value)~='boolean' then return false,'Expected boolean.' end
   if not value then return M._glassSunShadow.disable() end
@@ -3238,6 +3286,8 @@ function M.setGlassSunShadowsEnabled(value)
 end
 function M.setGlassSunShadowStrength(value) return M._glassSunShadow.setStrength(value) end
 function M.startGlassTest()
+  local targetOK,targetWhy=M._glassSunShadow.checkTarget()
+  if not targetOK then return false,targetWhy end
   if not simTimeAuthority or not simTimeAuthority.getPause() then
     return false,'Park in sunlight and pause physics with J, then run startGlassTest() again.'
   end
@@ -7226,12 +7276,18 @@ function M._tunerPanels.lighting()
       if im.Button('Start glass sunlight test preset##BeamRTGlassSun') then
         local ok,why=M.startGlassTest();if not ok then beamrtLog('W',tostring(why)) end
       end
+      if im.Button('Explain glass material rejection##BeamRTGlassSun') then M.inspectGlassSunMaterials() end
       if im.Button(glass.requested and 'Disable glass sunlight transmission##BeamRTGlassSun' or 'Capture paused window sunlight##BeamRTGlassSun') then
         local ok,why=M.setGlassSunShadowsEnabled(not glass.requested);if not ok then beamrtLog('W',tostring(why)) end
       end
       if glass.pendingRestore and im.Button('Retry sunlight restoration##BeamRTGlassSun') then M.setGlassSunShadowsEnabled(false) end
       im.TextWrapped('Pause physics with J first. Actual exterior window triangles + opacity maps, including _glass_tint. Sunlight only; neutral attenuation, not RGB tint or new window reflections. Resume/switch/reset/material changes stop the snapshot. GPU appearance unverified.')
       im.TextWrapped(glass.reason)
+      if not glass.enabled and glass.materialInspection then
+        for _,row in ipairs(glass.materialInspection.materials) do
+          im.TextWrapped(row.name..': '..tostring(row.reason))
+        end
+      end
       if glass.enabled then
         local strength=im.FloatPtr(glass.strength)
         im.TextUnformatted('Window extinction (0 = native baseline, 1 = opacity-map transmission)')
@@ -7872,6 +7928,7 @@ function M.start()
 end
 
 function M.disable()
+  local visibilityStopped=not M._lightVisibilityDiagnostic or M._lightVisibilityDiagnostic.disable('BeamRT disabled')
   local glassSunRestored=not M._glassSunShadow or M._glassSunShadow.disable('BeamRT disabled')
   local glassRestored=not M._glassShadowProbe or M._glassShadowProbe.disable('BeamRT disabled')
   local volumesStopped=not M._localVolumes or M._localVolumes.disable('BeamRT disabled')
@@ -7886,7 +7943,7 @@ function M.disable()
   syncEffectEnablement()
   local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped and glassRestored and glassSunRestored
+  return visibilityStopped and nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped and glassRestored and glassSunRestored
 end
 
 function M.toggle()
@@ -8271,7 +8328,19 @@ local function validateCleanRadianceLifetimes()
 end
 
 function M.onPreRender(dtReal, dtSim, dtRaw)
-  if M._glassSunShadow then M._glassSunShadow.update(dtReal) end
+  if M._lightVisibilityDiagnostic then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen() then
+      if M._lightVisibilityDiagnostic.getStatus().enabled then M._lightVisibilityDiagnostic.disable('Capture started')end
+    else M._lightVisibilityDiagnostic.update()end
+  end
+  if M._glassSunShadow then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+      or PROGRESSIVE.reflectionSampling.isFrozen() then
+      if M._glassSunShadow.getStatus().requested then M._glassSunShadow.disable('Glass sunlight stopped for capture') end
+    else M._glassSunShadow.update(dtReal) end
+  end
   if M._nearbyLampShadows and not materialCachePublication and not CLEAN_RADIANCE.build
     and not CLEAN_RADIANCE.materialBatch
     and (not PROGRESSIVE.lightingAudit.getStatus or not PROGRESSIVE.lightingAudit.getStatus().active)
@@ -8329,6 +8398,7 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Graphics/settings changed')end
   if M._glassSunShadow then M._glassSunShadow.disable('Graphics/settings changed') end
   if M._glassShadowProbe then M._glassShadowProbe.disable('Graphics/settings changed') end
   if M._localVolumes then M._localVolumes.disable('Graphics/settings changed') end
@@ -8359,6 +8429,7 @@ function M.onFileChanged(filename, changeType)
   end
   local lowerName = string.lower(filename)
   if lowerName:match("%.hlsl$") or lowerName:match("%.materials?%.json$") then
+    if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Shader/material source changed')end
     if M._glassSunShadow then M._glassSunShadow.disable('Shader/material source changed') end
     if M._glassShadowProbe then M._glassShadowProbe.disable('Shader/material source changed') end
     PROGRESSIVE.lightingAudit.cancel(M, "shader/material changed during audit")
@@ -8385,6 +8456,7 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Mission changed')end
   if M._glassSunShadow then M._glassSunShadow.disable('Mission changed') end
   if M._glassShadowProbe then M._glassShadowProbe.disable('Mission changed') end
   if M._localVolumes then M._localVolumes.disable('Mission changed') end
@@ -8427,6 +8499,7 @@ function M.onClientStartMission()
 end
 
 function M.onClientEndMission()
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Mission ended')end
   if M._glassSunShadow then M._glassSunShadow.disable('Mission ended') end
   if M._glassShadowProbe then M._glassShadowProbe.disable('Mission ended') end
   if M._localVolumes then M._localVolumes.disable('Mission ended') end
@@ -8438,6 +8511,7 @@ function M.onClientEndMission()
 end
 
 function M.onExtensionUnloaded()
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('BeamRT unloaded')end
   if M._glassSunShadow then M._glassSunShadow.disable('BeamRT unloaded') end
   if M._glassShadowProbe then M._glassShadowProbe.disable('BeamRT unloaded') end
   if M._localVolumes then M._localVolumes.disable('BeamRT unloaded') end

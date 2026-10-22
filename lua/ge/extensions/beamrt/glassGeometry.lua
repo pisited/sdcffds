@@ -20,42 +20,99 @@ local function exterior(name)
 end
 local materialFields={'mapTo','version','translucent','alphaTest','castShadows','activeLayers',
   'opacityMap','opacityFactor','opacityMapUseUV','opacityDetailMap','instanceOpacity','emissive',
-  'baseColorFactor','diffuseColor','translucentBlendOp'}
+  'baseColorFactor','diffuseColor','translucentBlendOp','animFlags','opacityMapUV1'}
+local lastInspection={materials={},accepted=0,rejected=0,reason='Window materials have not been inspected.'}
 local function signature(o)
   local values={o:getFilename()}
   for _,key in ipairs(materialFields)do values[#values+1]=field(o,key)end
   return table.concat(values,'|')
 end
 local function material(name)
-  if not exterior(name)then return end
+  if not exterior(name)then return nil,'outside supported exterior window identity (interior/damaged/lens variants excluded)'end
   local o=scenetree.findObject(name)
-  if not o then return end
+  if not o then return nil,'live Material not resolved'end
   local class=o.___type
-  if class and class~=''then if class~='class<Material>'then return end
-  elseif o:getClassName()~='Material'then return end
+  if class and class~=''then if class~='class<Material>'then return nil,'unsupported class '..tostring(class)end
+  elseif o:getClassName()~='Material'then return nil,'object is not a native Material'end
   local path=tostring(o:getFilename()):gsub('\\','/'):lower()
-  if not ('/'..path):find('/vehicles/',1,true)or field(o,'mapTo')~=name then return end
-  if tonumber(field(o,'version'))~=1.5 or not truth(field(o,'translucent'))
-    or truth(field(o,'alphaTest'))or truth(field(o,'castShadows'))then return end
-  local layers=field(o,'activeLayers');if layers~=''and tonumber(layers)~=1 then return end
-  if truth(field(o,'emissive'))or truth(field(o,'instanceOpacity'))then return end
-  if field(o,'opacityDetailMap')~=''then return end
-  local uv=field(o,'opacityMapUseUV');if uv~=''and uv~='0'then return end
+  if not ('/'..path):find('/vehicles/',1,true)then return nil,'source is not a vehicle material file: '..path end
+  if field(o,'mapTo')~=name then return nil,'mapTo mismatch: '..field(o,'mapTo')end
+  if tonumber(field(o,'version'))~=1.5 then return nil,'unsupported live version='..field(o,'version')end
+  if not truth(field(o,'translucent'))then return nil,'live translucent='..field(o,'translucent')end
+  if truth(field(o,'alphaTest'))then return nil,'alpha-tested glass needs an unsupported coverage contract'end
+  if truth(field(o,'castShadows'))then return nil,'live castShadows='..field(o,'castShadows')..'; native caster already requested, additional extinction refused'end
+  local layers=field(o,'activeLayers');if layers~=''and tonumber(layers)~=1 then return nil,'unsupported activeLayers='..layers end
+  if truth(field(o,'emissive'))then return nil,'emissive material excluded'end
+  if truth(field(o,'instanceOpacity'))then return nil,'instance-dependent opacity is not captured'end
+  if field(o,'opacityDetailMap')~=''then return nil,'opacity detail map requires unsupported sampling'end
+  local animation=field(o,'animFlags');if animation~=''and tonumber(animation)~=0 then return nil,'animated UV flags='..animation end
+  local uv=field(o,'opacityMapUseUV');if uv~=''and uv~='0'then return nil,'unsupported opacityMapUseUV='..uv end
   local map=field(o,'opacityMap'):gsub('\\','/')
-  if map==''or map:find('..',1,true)then return end
+  if map==''then return nil,'live opacityMap is empty'end
+  if map:find('..',1,true)then return nil,'opacity path rejected'end
   if map:sub(1,1)~='/'then map='/'..map end
-  if not map:match('^/vehicles/')then return end
-  local available=FS:fileExists(map)or FS:fileExists(map:gsub('%.png$','.dds'))
-  if not available then return end
+  if not map:match('^/vehicles/')then return nil,'opacity map is outside vehicle assets: '..map end
+  local available=FS:fileExists(map)or FS:fileExists((map:gsub('%.png$','.dds')))
+  if not available then return nil,'opacity PNG/DDS not found through VFS: '..map end
   local factor=field(o,'opacityFactor');factor=factor==''and 1 or tonumber(factor)
-  if not finite(factor)or factor<0 or factor>1 then return end
+  if not finite(factor)or factor<0 or factor>1 then return nil,'unsupported opacityFactor='..field(o,'opacityFactor')end
   local tint=field(o,'baseColorFactor')
   local components={};for n in tint:gmatch('[-+%d.eE]+')do components[#components+1]=tonumber(n)end
   if #components==4 then
-    if not finite(components[4])or components[4]<0 or components[4]>1 then return end
-    factor=factor*components[4]
+    if not finite(components[4])or components[4]<0 or components[4]>1 then return nil,'invalid baseColorFactor alpha'end
+    -- OpacityFactor is the native scalar. Nontrivial base-colour alpha needs
+    -- a separately verified native layer contract, not another guessed factor.
+    if components[4]~=1 then return nil,'nontrivial baseColorFactor alpha='..components[4]..' requires native layer validation'end
   end
   return {name=name,object=o,path=map,factor=factor,signature=signature(o)}
+end
+-- Read-only material contract report. No readback, shader, material or setting writes.
+function M.inspect(vehicle,names)
+  local report={materials={},accepted=0,rejected=0,reason='No player vehicle.'}
+  lastInspection=report
+  if not vehicle then return report end
+  if not names then
+    local ok,value=pcall(vehicle.getMeshMaterialNames,vehicle)
+    if not ok or type(value)~='table'then report.reason='Native vehicle material names unavailable.';return report end
+    names=value
+  end
+  local seen={}
+  for _,name in pairs(names)do
+    if type(name)=='string'and not seen[name]then
+      seen[name]=true;local lower=name:lower()
+      if lower:find('glass',1,true)or lower:find('windshield',1,true)or lower:find('windscreen',1,true)then
+        if #report.materials>=64 then report.reason='Inspection limited to 64 glass-like identities.';return report end
+        local ok,candidate,why=pcall(material,name)
+        local row={name=name,accepted=ok and candidate~=nil,reason=ok and (candidate and 'supported exterior opacity contract'or why)or tostring(candidate),fields={}}
+        local object=scenetree.findObject(name)
+        if object then
+          local got,path=pcall(object.getFilename,object);if got then row.filename=tostring(path)end
+          for _,key in ipairs(materialFields)do
+            local readable,value=pcall(field,object,key)
+            row.fields[key]=readable and value or '<read failed>'
+          end
+        end
+        report.materials[#report.materials+1]=row
+        if row.accepted then report.accepted=report.accepted+1 else report.rejected=report.rejected+1 end
+      end
+    end
+  end
+  table.sort(report.materials,function(a,b)return a.name<b.name end)
+  report.reason=string.format('%d supported / %d rejected live glass-like materials; read-only CPU declarations, not GPU proof.',report.accepted,report.rejected)
+  return report
+end
+function M.getInspection()return lastInspection end
+function M.checkTarget(vehicle)
+  if not vehicle then return false,'No controlled vehicle. Enter the car before capturing its windows.' end
+  if type(vehicle.getJBeamFilename)=='function' then
+    local ok,name=pcall(vehicle.getJBeamFilename,vehicle)
+    if not ok then return false,'Controlled vehicle identity unavailable.' end
+    name=tostring(name):lower():gsub('\\','/')
+    if name=='unicycle' or name:match('/unicycle$') then
+      return false,'The controlled object is the walking character, not the car. Enter the car first; free camera is fine afterward.'
+    end
+  end
+  return true
 end
 function M.pose(vehicle)
   local box=vehicle:getSpawnWorldOOBB()
@@ -101,6 +158,7 @@ local function prepare(record,vehicle)
   for _,mesh in ipairs(record.flexmeshes)do
     for _,prim in ipairs(mesh.primitives)do
       local name=prim.materialName
+      assert(type(name)=='string','Unresolved native primitive material identity')
       if byName[name]==nil then byName[name]=material(name)or false end
       local mat=byName[name]
       if mat then
@@ -120,7 +178,13 @@ local function prepare(record,vehicle)
       end
     end
   end
-  assert(#triangles>0,'No supported exterior window triangles (including _glass_tint); inspect material/UV declarations')
+  if #triangles==0 then
+    local failures={}
+    for _,row in ipairs(lastInspection.materials)do
+      if exterior(row.name)and not row.accepted and #failures<4 then failures[#failures+1]=row.name..': '..tostring(row.reason)end
+    end
+    error('No supported exterior window triangles; '..(#failures>0 and table.concat(failures,'; ')or lastInspection.reason))
+  end
   -- Shared prop meshes use their own transforms and are not guessed here.
   for _,mesh in ipairs(record.propmeshes or{})do for _,p in ipairs(mesh.primitives)do
     assert(not exterior(p.materialName),'Window prop mesh requires a separate verified transform')
@@ -163,9 +227,17 @@ local function prepare(record,vehicle)
     lo=lo,extent=extent,uvLo=uvLo,uvExtent=uvExtent,vehicle=vehicle}
 end
 function M.capture(vehicle,readyMesh)
+  local targetOK,targetWhy=M.checkTarget(vehicle);if not targetOK then return nil,targetWhy end
   local id=vehicle:getID();local record,why=provider.capture(id,readyMesh)
   if not record then return nil,why end
-  local ok,result=pcall(prepare,record,vehicle)
+  local names=record.materialNames
+  if not names then
+    names={};for _,mesh in ipairs(record.flexmeshes or{})do for _,p in ipairs(mesh.primitives or{})do names[#names+1]=p.materialName end end
+  end
+  local ok,result=pcall(function()
+    M.inspect(vehicle,names)
+    return prepare(record,vehicle)
+  end)
   -- The readback is needed only once; never retain native GPU mesh resources.
   if not readyMesh and record.mesh and record.mesh.free then pcall(record.mesh.free,record.mesh)end
   provider.invalidate(id)
