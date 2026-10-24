@@ -8,11 +8,66 @@ local target='#BeamRT_NativeShadowEpoch'
 local snapshot='#BeamRT_NativeShadowSnapshot'
 local owned,registered={},{}
 local callbacks,processCalls={},{}
+local drawCalls,authorizedEpoch,lastPasses={},{},nil
 local lease,selection,manifest,kind
 local active,epoch=false,31
+local probeMode=0
+local probeModes={visibility=0,dispatch=1,selector=2}
 local reason='Native shadow diagnostic is off.'
+local lastAttachmentFailure
+local lastValidationFailure
 local function find(name)return scenetree.findObject(name)end
-local function field(o,key,index)return o:getField(key,index or 0)or''end
+local function field(o,key,index)
+  local value=o:getField(key,index or 0);if value==nil then return''end;return value
+end
+local function nativeBoolean(value)
+  if value==true or value==1 or value=='1'or value=='true'then return true end
+  if value==false or value==0 or value=='0'or value=='false'then return false end
+end
+local function validateScheduler(pass)
+  local fx=owned[prefix..pass..'ScheduleFx']
+  local function expect(key,actual,expected)
+    if actual~=expected then
+      lastValidationFailure={pass=pass,field=key,actual=tostring(actual),actualType=type(actual),expected=tostring(expected)}
+      error('Native '..pass..' scheduler '..key..': expected '..tostring(expected)
+        ..', got '..tostring(actual)..' ('..type(actual)..')')
+    end
+  end
+  expect('enabled',fx:isEnabled(),true)
+  -- Read the native bool field explicitly, not Lua userdata property truthiness.
+  local skip=field(fx,'skipDraw')
+  expect('skipDraw',nativeBoolean(skip),false)
+  expect('renderBin',field(fx,'renderBin'),selection.bin.name)
+  expect('renderTime',field(fx,'renderTime'),pass=='Frame'and'PFXBeforeBin'or'PFXAfterBin')
+  expect('renderPriority',tonumber(fx.renderPriority),10010)
+  expect('target',field(fx,'target'),'$outTex')
+  expect('targetSize',field(fx,'targetSize'),'1 1')
+  expect('targetFormat',field(fx,'targetFormat'),'GFXFormatR32G32B32A32F')
+  expect('shader',field(fx,'shader'),prefix..'FrameShader')
+  expect('stateBlock',field(fx,'stateBlock'),prefix..'State')
+  expect('texture0',field(fx,'texture',0),'#prepass[RT0]')
+end
+local function objectId(o)
+  if not o then return nil end
+  local ok,id=pcall(function()
+    if type(o.getID)=='function'then return tonumber(o:getID())end
+    if type(o.getId)=='function'then return tonumber(o:getId())end
+  end)
+  if ok and id and id>0 and id%1==0 then return id end
+end
+local function checkChild(pass)
+  local parent,child=owned[prefix..pass..'ScheduleFx'],owned[prefix..pass..'Fx']
+  local count=tonumber(parent:getCount())
+  local reported=count==1 and parent:getObject(0)or nil
+  -- getObject() can return a base SimObject wrapper, not the derived PostEffect
+  -- userdata retained in owned. Native identity is its registered engine ID.
+  local expectedId,reportedId=objectId(child),objectId(reported)
+  if count~=1 or not expectedId or expectedId~=reportedId then
+    lastAttachmentFailure={pass=pass,count=count,expectedId=expectedId,reportedId=reportedId}
+    error('Native diagnostic '..pass..' child attachment mismatch: count='..tostring(count)
+      ..', expectedID='..tostring(expectedId)..', reportedID='..tostring(reportedId))
+  end
+end
 local function normalize(s)return type(s)=='string'and s:gsub('\r\n','\n')or s end
 local function manager()
   if type(getActiveLightManager)~='function'then return nil end
@@ -51,9 +106,22 @@ local function collision(a,b)
   end
   return true
 end
+local function lightingBin()
+  -- PFX timing keys the registered render-manager NAME, not its bin-type label.
+  -- This installed build names its AdvancedLightBinManager AL_LightBinMgr.
+  local object=find('AL_LightBinMgr')
+  assert(object and objectId(object),'Registered AL_LightBinMgr is unavailable; no guessed render timing')
+  assert(object:getName()=='AL_LightBinMgr'and object:getClassName()=='AdvancedLightBinManager',
+    'AL_LightBinMgr is not the inspected native lighting manager class')
+  return {object=object,id=objectId(object),name=object:getName(),class=object:getClassName()}
+end
 local function preflight(token)
   assert(manager()=='Advanced Lighting 1.5','Native diagnostic requires confirmed Advanced Lighting 1.5')
-  assert(ClusteredShading==nil,'Exposed clustered dispatch is not integrated; native lighting retained')
+  -- Installed core/settings/clusteredQuality.lua uses ClusterShading (not
+  -- ClusteredShading). Keep the older name as a conservative compatibility gate.
+  assert(ClusterShading==nil and ClusteredShading==nil,
+    'Exposed clustered dispatch is not integrated; native lighting retained')
+  local bin=lightingBin()
   assert(token~=nil,'Choose a scene light name or ID')
   local object=find(tonumber(token)or token)
   local row,why=inputs.sample(object);assert(row,why)
@@ -73,13 +141,14 @@ local function preflight(token)
   assert(field(material,'target')=='lightinfo'and field(material,'sampler','shadowMap')=='$dynamiclight',
     'Native per-draw shadow/lightinfo binding differs from inspected contract')
   assert(field(material,'sampler','beamrtNativeFrame')=='','Native diagnostic sampler already occupied')
-  return {row=row,object=object,kind=k,data=data,material=material,shader=shader}
+  return {row=row,object=object,kind=k,data=data,material=material,shader=shader,bin=bin}
 end
 function M.inspect(token)
   local ok,value=pcall(preflight,token)
   return {canStart=ok,reason=ok and 'CPU contract compatible; actual native dispatch/RT1 alpha still unverified.'or tostring(value),
-    manager=manager(),clusteredBackendExposed=ClusteredShading~=nil,shadowVizAPI=type(setShadowVizLight),
+    manager=manager(),clusteredBackendExposed=ClusterShading~=nil or ClusteredShading~=nil,shadowVizAPI=type(setShadowVizLight),
     light=ok and value.row or nil,shadowTextureAlias=ok and field(value.material,'sampler','shadowMap')or nil,
+    nativeBin=ok and {name=value.bin.name,id=value.bin.id,class=value.bin.class}or nil,
     matrixSource='native per-draw LightDataAdv.worldToLightProj, not Lua-reconstructed',
     gpuExecutionVerified=false}
 end
@@ -89,21 +158,48 @@ local function own(class,suffix)
   return o,name
 end
 local function register(o,name)o:registerObject(name);registered[name]=true end
+local function collectPasses()
+  local passes={}
+  for _,suffix in ipairs({'FrameScheduleFx','FrameFx','CaptureScheduleFx','CaptureFx','ViewFx'})do
+    local name=prefix..suffix;local o=owned[name]
+    if o and find(name)==o then
+      local ok,size=pcall(function()return o:getRenderTargetSize()end)
+      passes[suffix]={processCalls=processCalls[name]or 0,drawCalls=drawCalls[name]or 0,
+        renderTime=field(o,'renderTime'),bin=field(o,'renderBin'),target=field(o,'target'),
+        configuredSize=field(o,'targetSize'),format=field(o,'targetFormat'),
+        shader=field(o,'shader'),stateBlock=field(o,'stateBlock'),priority=tonumber(o.renderPriority),
+        skipDrawNative=field(o,'skipDraw'),skipDrawProperty=tostring(o.skipDraw),enabled=o:isEnabled(),
+        targetWidth=ok and size and tonumber(size.x)or nil,targetHeight=ok and size and tonumber(size.y)or nil}
+    end
+  end
+  return passes
+end
 local function watchProcess(name)
   local key=name..'Callbacks';assert(rawget(_G,key)==nil,'Native callback namespace occupied: '..key)
-  local cb={preProcess=function()
+  local cb={onEnabled=function()return true end,preProcess=function()
     processCalls[name]=(processCalls[name]or 0)+1
+  end,setShaderConsts=function()
+    if not active then return end
+    drawCalls[name]=(drawCalls[name]or 0)+1
+    local fx=owned[name]
+    fx:setShaderConst('$nativeShadowEpoch',epoch)
+    if name==prefix..'CaptureFx'or name==prefix..'ViewFx'then fx:setShaderConst('$nativeProbeMode',probeMode)end
     -- A lazy request at the late display must not authorize an early capture.
     -- Only the explicit bin-timed parent can authorize its child this epoch.
     for _,pass in ipairs({'Frame','Capture'})do
-      if name==prefix..pass..'ScheduleFx'and active then
+      if name==prefix..pass..'ScheduleFx'then
+        authorizedEpoch[pass]=epoch
+        fx:setShaderConst('$nativeScheduledEpoch',epoch)
         owned[prefix..pass..'Fx']:setShaderConst('$nativeScheduledEpoch',epoch)
+      elseif name==prefix..pass..'Fx'then
+        fx:setShaderConst('$nativeScheduledEpoch',authorizedEpoch[pass]or 0)
       end
     end
   end}
   callbacks[key]=cb;rawset(_G,key,cb)
 end
 function M.disable(message)
+  if active then lastPasses=collectPasses()end
   active=false
   -- Neutralize packets and display BEFORE restoration; retain leases on failure.
   for _,suffix in ipairs({'FrameFx','CaptureFx','ViewFx'})do
@@ -148,21 +244,25 @@ function M.disable(message)
   return true,reason
 end
 local function publish()
+  authorizedEpoch={}
   owned[prefix..'FrameFx']:setShaderConst('$nativeShadowEpoch',epoch)
   owned[prefix..'CaptureFx']:setShaderConst('$nativeShadowEpoch',epoch)
   owned[prefix..'ViewFx']:setShaderConst('$nativeShadowEpoch',epoch)
   owned[prefix..'FrameFx']:setShaderConst('$nativeScheduledEpoch',0)
   owned[prefix..'CaptureFx']:setShaderConst('$nativeScheduledEpoch',0)
+  owned[prefix..'CaptureFx']:setShaderConst('$nativeProbeMode',probeMode)
+  owned[prefix..'ViewFx']:setShaderConst('$nativeProbeMode',probeMode)
 end
 local function advanceEpoch()
   epoch=epoch+1;if epoch==480 then epoch=481 end;if epoch==992 then epoch=1056 end
   assert(epoch<=2015,'Frame-tag budget complete; native shaders restored. Reload BeamRT for another bounded test.')
 end
-function M.enable(token)
+function M.enable(token,probe)
+  if probe~=nil and probeModes[probe]==nil then return false,'Use visibility, dispatch or selector probe.'end
   local ok,ready=pcall(preflight,token);if not ok then return false,tostring(ready)end
   if not M.disable()then return false,reason end
   local result,why=pcall(function()
-    advanceEpoch();selection=ready;kind=ready.kind;manifest=ready.data
+    advanceEpoch();selection=ready;kind=ready.kind;manifest=ready.data;probeMode=probeModes[probe or'visibility']
     local o,name=own('ShaderData','NativeShader')
     o:setField('DXVertexShaderFile',0,field(ready.shader,'DXVertexShaderFile'))
     o:setField('DXPixelShaderFile',0,manifest.lights[kind].shaderPath)
@@ -178,15 +278,15 @@ function M.enable(token)
     local r=ready.row
     o:setField('defines',0,field(ready.shader,'defines')..';BEAMRT_NATIVE_POSITION='..v3(r.position)
       ..';BEAMRT_NATIVE_DIRECTION='..v3(r.direction)..';BEAMRT_NATIVE_RANGE='..string.format('%.12g',r.range)
-      ..';BEAMRT_NATIVE_OUTER='..string.format('%.12g',r.outer))
+      ..';BEAMRT_NATIVE_OUTER='..string.format('%.12g',r.outer)..';BEAMRT_NATIVE_PROBE='..probeMode)
     register(o,name)
     o,name=own('GFXStateBlockData','State');local parent=find('PFX_DefaultStateBlock');assert(parent,'PostFX state unavailable')
     o:inheritParentFields(parent);o.zDefined=true;o.zEnable=false;o.zWriteEnable=false;o.blendDefined=true;o.blendEnable=false
     o.samplersDefined=true;for i=0,2 do o:setField('samplerStates',i,'SamplerClampPoint')end;register(o,name)
-    processCalls={}
+    processCalls={};drawCalls={};authorizedEpoch={};lastPasses=nil;lastAttachmentFailure=nil;lastValidationFailure=nil
     for _,pass in ipairs({'Frame','Capture','View'})do
       o,name=own('ShaderData',pass..'Shader')
-      o.DXVertexShaderFile='shaders/beamrt/beamrtNativeShadow'..pass..(pass=='View'and'P_v003.hlsl'or pass=='Frame'and'P_v002.hlsl'or'P_v001.hlsl');o.DXPixelShaderFile=o.DXVertexShaderFile;o.pixVersion=5
+      o.DXVertexShaderFile='shaders/beamrt/beamrtNativeShadow'..pass..(pass=='View'and'P_v004.hlsl'or'P_v002.hlsl');o.DXPixelShaderFile=o.DXVertexShaderFile;o.pixVersion=5
       o:setField('samplerNames',0,pass=='Capture'and'receiverTex'or'sceneTex')
       if pass=='Capture'then o:setField('samplerNames',1,'nativeSpecTex');o:setField('samplerNames',2,'nativeFrameTex')end
       if pass=='View'then o:setField('samplerNames',1,'nativeSnapshotTex')end
@@ -215,18 +315,25 @@ function M.enable(token)
     -- Normal PostFX targets are frame-local. On-demand children own allocations;
     -- explicit parents execute them in chain order EVERY frame (not lazy-once).
     for _,pass in ipairs({'Frame','Capture'})do
-      o,name=own('PostEffect',pass..'ScheduleFx');o.allowReflectPass=false;o.skipDraw=true
+      -- Real 1x1 private scratch draws ensure setShaderConsts runs every frame;
+      -- a skip-draw parent need not invoke a per-draw constant callback.
+      o,name=own('PostEffect',pass..'ScheduleFx');o.allowReflectPass=false;o:setField('skipDraw',0,'0')
       o:setField('shader',0,prefix..'FrameShader');o:setField('stateBlock',0,prefix..'State')
       o:setField('texture',0,'#prepass[RT0]');o:setField('target',0,'$outTex')
+      o:setField('targetSize',0,'1 1');o:setField('targetFormat',0,'GFXFormatR32G32B32A32F')
       o:setField('renderTime',0,pass=='Frame'and'PFXBeforeBin'or'PFXAfterBin')
-      o:setField('renderBin',0,'AL_LightBin');o.renderPriority=10010
+      o:setField('renderBin',0,selection.bin.name);o.renderPriority=10010
       register(o,name);o:disable();o:add(owned[prefix..pass..'Fx'])
+      checkChild(pass) -- verify BEFORE leasing/changing the native material
       watchProcess(name)
     end
+    publish()
+    -- On-demand children are processed by their scheduled parent, not enabled
+    -- in the global PostEffect manager. enable()/isEnabled() do not apply there.
+    for _,suffix in ipairs({'FrameScheduleFx','CaptureScheduleFx','ViewFx'})do owned[prefix..suffix]:enable()end
+    for _,pass in ipairs({'Frame','Capture'})do validateScheduler(pass)end
     lease={name='AL_'..kind..'LightMaterial',material=ready.material,shader=field(ready.material,'shader'),
       sampler=field(ready.material,'sampler','beamrtNativeFrame')}
-    publish()
-    for _,suffix in ipairs({'FrameFx','CaptureFx','FrameScheduleFx','CaptureScheduleFx','ViewFx'})do owned[prefix..suffix]:enable()end
     ready.material:setField('sampler','beamrtNativeFrame',target)
     ready.material:setField('shader',0,prefix..'NativeShader');ready.material:reload()
     assert(field(ready.material,'shader')==prefix..'NativeShader'
@@ -234,13 +341,15 @@ function M.enable(token)
     active=true
   end)
   if not result then M.disable('Native diagnostic start failed: '..tostring(why));return false,reason end
-  reason='Native visibility instrumentation installed; GPU execution/RT1 alpha relay unverified. Bounded frame-tag test.'
+  reason='Native '..(probe or'visibility')..' instrumentation installed; GPU output unverified. Bounded diagnostic, not final lighting.'
   return true,reason
 end
 function M.update()
   if not active then return end
   local ok,why=pcall(function()
-    assert(manager()=='Advanced Lighting 1.5'and ClusteredShading==nil,'Native lighting backend changed')
+    assert(manager()=='Advanced Lighting 1.5'and ClusterShading==nil and ClusteredShading==nil,'Native lighting backend changed')
+    assert(find(selection.bin.name)==selection.bin.object and objectId(selection.bin.object)==selection.bin.id,
+      'Native lighting bin removed/replaced')
     assert(find(selection.row.id)==selection.object,'Selected native light removed/replaced')
     local row,err=inputs.sample(selection.object);assert(row,err)
     assert(row.enabledKnown and row.enabled and same(row,selection.row),'Light disabled or moved; restart diagnostic')
@@ -250,10 +359,11 @@ function M.update()
     for key,cb in pairs(callbacks)do assert(rawget(_G,key)==cb,'Native diagnostic callback replaced')end
     for _,pass in ipairs({'Frame','Capture','View'})do
       local fx=owned[prefix..pass..'Fx']
-      assert(fx:isEnabled()and field(fx,'texture',0)==(pass=='View'and'$backBuffer'or'#prepass[RT0]')
+      if pass=='View'then assert(fx:isEnabled(),'Native diagnostic View pass stopped')end
+      assert(field(fx,'texture',0)==(pass=='View'and'$backBuffer'or'#prepass[RT0]')
         and field(fx,'stateBlock')==prefix..'State'and field(fx,'shader')==prefix..pass..'Shader'
         and field(fx,'renderTime')==(pass=='View'and'PFXBeforeBin'or'PFXTexGenOnDemand'),
-        'Native diagnostic pass modified')
+        'Native diagnostic '..pass..' pass bindings modified')
       if pass=='Frame'then
         assert(field(fx,'target')==target and field(fx,'targetSize')=='1 1'
           and field(fx,'targetFormat')=='GFXFormatR32G32B32A32F','Native frame producer modified')
@@ -268,40 +378,47 @@ function M.update()
       end
     end
     for _,pass in ipairs({'Frame','Capture'})do
-      local fx=owned[prefix..pass..'ScheduleFx']
-      assert(fx:isEnabled()and fx.skipDraw==true and field(fx,'renderBin')=='AL_LightBin'
-        and field(fx,'renderTime')==(pass=='Frame'and'PFXBeforeBin'or'PFXAfterBin')
-        and tonumber(fx.renderPriority)==10010 and field(fx,'target')=='$outTex'
-        and field(fx,'shader')==prefix..'FrameShader'and field(fx,'stateBlock')==prefix..'State'
-        and field(fx,'texture',0)=='#prepass[RT0]','Native diagnostic scheduler modified')
-      assert(fx:getCount()==1 and fx:getObject(0)==owned[prefix..pass..'Fx'],'Native diagnostic child detached/replaced')
+      validateScheduler(pass)
+      checkChild(pass)
     end
     advanceEpoch()
     publish()
+    if epoch==64 and type(log)=='function'then
+      pcall(log,'I','BeamRT.NativeShadow','CPU per-draw callbacks: frameRoot='..tostring(drawCalls[prefix..'FrameScheduleFx']or 0)
+        ..', captureRoot='..tostring(drawCalls[prefix..'CaptureScheduleFx']or 0)
+        ..', frameChild='..tostring(drawCalls[prefix..'FrameFx']or 0)
+        ..', captureChild='..tostring(drawCalls[prefix..'CaptureFx']or 0)
+        ..', view='..tostring(drawCalls[prefix..'ViewFx']or 0)..'; not GPU verification')
+    end
+    if epoch>=64 then
+      assert((drawCalls[prefix..'FrameScheduleFx']or 0)>0 and(drawCalls[prefix..'CaptureScheduleFx']or 0)>0,
+        'No early CPU draw callbacks for '..selection.bin.name..'; native timing/dispatch unavailable')
+    end
   end)
-  if not ok then M.disable('Native visibility stopped: '..tostring(why))end
+  if not ok then
+    local _,stopReason=M.disable('Native visibility stopped: '..tostring(why))
+    if type(log)=='function'then pcall(log,'W','BeamRT.NativeShadow',stopReason)end
+  end
 end
 function M.getStatus()
-  local passes={}
-  for _,suffix in ipairs({'FrameScheduleFx','FrameFx','CaptureScheduleFx','CaptureFx','ViewFx'})do
-    local name=prefix..suffix;local o=owned[name]
-    if o and find(name)==o then
-      local ok,size=pcall(function()return o:getRenderTargetSize()end)
-      passes[suffix]={processCalls=processCalls[name]or 0,renderTime=field(o,'renderTime'),
-        bin=field(o,'renderBin'),target=field(o,'target'),
-        targetWidth=ok and size and tonumber(size.x)or nil,targetHeight=ok and size and tonumber(size.y)or nil}
-    end
-  end
+  local passes=active and collectPasses()or lastPasses or{}
   return {enabled=active,reason=reason,pendingRestore=lease~=nil and not active,pendingCleanup=next(owned)~=nil and not active,
+    probeMode=probeMode,probeMeaning=probeMode==1 and'any native-kind draw marker, NOT shadows'
+      or probeMode==2 and'selected native tuple marker, NOT shadows'or'quantized native visibility candidate',
     epoch=epoch,light=selection and selection.row or nil,manager=manager(),gpuExecutionVerified=false,
+    clusteredBackendExposed=ClusterShading~=nil or ClusteredShading~=nil,clusteredDispatchIntegrated=false,
     nativeVisibilitySource='native per-draw light matrix/shadow map and existing filter; not camera-depth ray marching',
     transport='early native lightinfo RT1 alpha snapshot; persistent owned child targets; 16-level visibility; unique frame tag',
-    passes=passes,processCountsAreCPUOnly=true,
+    passes=passes,passesAreLastStop=not active and lastPasses~=nil,
+    nativeBin=selection and {name=selection.bin.name,id=selection.bin.id,class=selection.bin.class}or nil,
+    processCountsAreCPUOnly=true,lastAttachmentFailure=lastAttachmentFailure,lastValidationFailure=lastValidationFailure,
     failureBars={'frame texture is not 1x1','frame metadata is nonfinite','frame signature missing/invalid',
       'frame epoch stale/mismatched','lightinfo/prepass texture dimensions incompatible',
       'native alpha is nonfinite','matching native draw reports unavailable shadow map',
       'snapshot texture unavailable','snapshot signature invalid','snapshot epoch stale','snapshot status invalid',
-      'reserved valid-packet status','early capture was not scheduled this epoch'},
+      'reserved valid-packet status','early capture was not scheduled this epoch',
+      'reserved dispatch marker status','reserved absent dispatch status',
+      'reserved selector marker status','reserved absent selector status','unexpected probe alpha pattern'},
     nativeDispatchObserved=false,beautyRGBChanged=false,nativeAttenuationChanged=false,feedsGI=false}
 end
 return M

@@ -1,7 +1,7 @@
 #include "shaders/common/postFx/postFx.h.hlsl"
 uniform_sampler2D(sceneTex,0);
 uniform_sampler2D(nativeSnapshotTex,1);
-cbuffer perDraw:register(b0){float nativeShadowEpoch;float2 sceneColorJitterUV;POSTFX_UNIFORMS};
+cbuffer perDraw:register(b0){float nativeShadowEpoch;float nativeProbeMode;float2 sceneColorJitterUV;POSTFX_UNIFORMS};
 #include "shaders/common/postFx/postFx.hlsl"
 #ifdef SHADER_STAGE_VS
 #define mainV main
@@ -30,6 +30,15 @@ float4 mainP(PFXVertToPix IN):SV_Target0
     float4 payload=tex2D(nativeSnapshotTex,IN.uv1-sceneColorJitterUV*rtParams1.zw);
     if(!all(isfinite(payload))||payload.w!=.625)return nativeRelayFailure(beauty,IN.uv0,9);
     if(payload.y!=nativeShadowEpoch)return nativeRelayFailure(beauty,IN.uv0,10);
+    if(nativeProbeMode==1||nativeProbeMode==2)
+    {
+        float positive=nativeProbeMode==1?14:16;
+        float absent=nativeProbeMode==1?15:17;
+        if(payload.z==positive&&payload.x>=1&&payload.x<=256&&payload.x==floor(payload.x))
+            return float4(lerp(beauty.rgb,nativeProbeMode==1?float3(0,.75,.9):float3(1,.4,.02),.85),beauty.a);
+        if(payload.z==absent&&payload.x==0)return float4(lerp(beauty.rgb,.07,.85),beauty.a);
+        if(payload.z==18)return nativeRelayFailure(beauty,IN.uv0,18);
+    }
     if(payload.z>=1&&payload.z<=7&&payload.z==floor(payload.z))
         return nativeRelayFailure(beauty,IN.uv0,(uint)payload.z);
     if(payload.z==13)return nativeRelayFailure(beauty,IN.uv0,13);

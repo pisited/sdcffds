@@ -32,6 +32,13 @@ def generate(source,kind):
         '#include "'+BASE+'convexGeometry.h.hlsl"\n#include "'+HELPER+'"')
     code='''#ifdef BNG_LIGHTING_1_5
     // RGB and native attenuation stay EXACTLY as the original shader computed.
+#if BEAMRT_NATIVE_PROBE == 1
+    // Negative heartbeat cannot be confused with missing-alpha defaults 0/1.
+    // Diagnostic mode ONLY: any native draw of this light kind, NOT visibility.
+    outData.outB.a = -0.125;
+#elif BEAMRT_NATIVE_PROBE == 2
+    if (beamrtNativeSelected(cb)) outData.outB.a = -0.125;
+#else
     if (beamrtNativeSelected(cb)) {
         bool available = false;
 #ifndef NO_SHADOW
@@ -43,6 +50,7 @@ def generate(source,kind):
 #endif
         outData.outB.a = beamrtNativePacket(beamrtNativeVisibility, available);
     }
+#endif // BEAMRT_NATIVE_PROBE
 #endif
     return outData;'''
     return ('#define BEAMRT_NATIVE_SPOT '+('1'if kind=='Spot'else'0')+'\n'+

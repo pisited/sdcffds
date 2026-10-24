@@ -45,7 +45,7 @@ record={counts={vertices=3,indices=3,uv1=3},buffers={vertices={[0]=-1,0,1,1,0,1,
   flexmeshes={{primitives={{materialName='car_glass_tint',firstIndex=0,indexCount=3}}}},propmeshes={},acquisitionWarnings={},
   mesh={free=function()released=released+1 end}}
 package.loaded['ge/extensions/beamrt/providers/vehicleProvider']={
- capture=function(id,mesh)assert(id==41);return record end,
+ capture=function(id,mesh,profile)assert(id==41 and profile=='glass');return record end,
  invalidate=function(id)invalidated=invalidated+1 end}
 '''
 

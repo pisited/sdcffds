@@ -7,6 +7,7 @@ local boxStore = require("ge/extensions/beamrt/worldBoxCasters")
 local lightProvider = require("ge/extensions/beamrt/providers/lightProvider")
 local materialProvider = require("ge/extensions/beamrt/providers/materialProvider")
 local staticProvider = require("ge/extensions/beamrt/providers/tsStaticProvider")
+local geometryIntersection = require("ge/extensions/beamrt/geometryTriangleIntersection")
 local generation = 0
 local function finite(x)
   x=tonumber(x)
@@ -25,28 +26,9 @@ local function vec(v)
 end
 local function sub(a,b) return {a[1]-b[1],a[2]-b[2],a[3]-b[3]} end
 local function dot(a,b) return a[1]*b[1]+a[2]*b[2]+a[3]*b[3] end
-local function cross(a,b)
-  return {a[2]*b[3]-a[3]*b[2],
-          a[3]*b[1]-a[1]*b[3],
-          a[1]*b[2]-a[2]*b[1]}
-end
 -- Double-sided Moller-Trumbore along normalized finite segment [origin,target].
 local function hitTriangle(origin,dir,far,tri)
-  local a,b,c=tri.a,tri.b,tri.c
-  local e1,e2=sub(b,a),sub(c,a)
-  local p=cross(dir,e2)
-  local det=dot(e1,p)
-  if math.abs(det)<1e-7 then return nil end
-  local inv=1/det
-  local t=sub(origin,a)
-  local u=dot(t,p)*inv
-  if u < 0 or u > 1 then return nil end
-  local q=cross(t,e1)
-  local v=dot(dir,q)*inv
-  if v < 0 or u+v > 1 then return nil end
-  local dist=dot(e2,q)*inv
-  if dist <= 0.08 or dist >= far-0.08 then return nil end
-  return dist,u,v
+  return geometryIntersection.segment(origin,dir,far,tri)
 end
 local function hitBox(origin,dir,far,box)
   local near,exit=-1e30,1e30

@@ -1,4 +1,15 @@
-# BeamRT v0.130.2 — experimental native per-light visibility relay
+# BeamRT v0.130.9 — experimental native per-light visibility relay
+
+**Current integration boundary:** the installed engine's
+`lua/ge/extensions/core/settings/clusteredQuality.lua` uses **`ClusterShading`**.
+Previous guards checked only `ClusteredShading`, so an exposed clustered
+interface was mistakenly allowed through the legacy-material gate. v0.130.9
+recognizes both names in native visibility, local-mesh hooks and status/UI;
+it refuses the unintegrated route before native material writes. Exposure is
+not proof of a particular GPU dispatch. The live dispatch probe remained gray
+and `AL_SpotLightMaterial:dumpInstances()` listed no instances, so neither
+legacy execution nor native visibility has been verified. This is a guard fix,
+not a working clustered shadow export. No engine quality/backend is toggled.
 
 This is a **different diagnostic**, not another revision of the camera-depth
 tracer. It instruments the installed native point/spot shader **after its real
@@ -11,7 +22,8 @@ alpha, and its inspected lighting consumer reads only RT1 RGB. The experiment
 temporarily leases one native light-kind shader plus one extra sampler. It puts
 quantized native visibility in that otherwise-unused alpha and displays it in a
 separate PostFX. The tag and snapshot use owned `PFXTexGenOnDemand` child targets,
-explicitly scheduled before/after `AL_LightBin` every frame. The late display
+explicitly scheduled before/after the registered `AL_LightBinMgr` every frame.
+The late display
 reads only our early snapshot, never the transient native lightinfo target.
 Installed game files and native light/material parameters are
 not changed. Actual dispatch, RT1 binding/format and visible output are still
@@ -23,6 +35,24 @@ At night, while the intended scene lamp is enabled, run in **GE Lua**:
 extensions.reload("beamrt_main")
 extensions.beamrt_main.startNativeShadowDiagnostic("SpotLight_11011175112730191")
 ```
+
+The v0.130.7 live test confirmed synchronized CPU callbacks for all five passes,
+but the view was gray (no matching packet). A read-only engine texture query
+reported `GFXFormatR16G16B16A16F` for `#lightinfo[RT1]`, so alpha storage exists.
+v0.130.8 adds explicit marker probes to isolate the native PS output path:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.startNativeShadowDiagnostic("SpotLight_11011175112730191", "dispatch")
+```
+
+Dispatch probe: cyan = a candidate surviving negative marker from any native
+draw of this light kind, NOT the selected lamp and NOT shadow visibility.
+It bypasses tuple selection and the native frame-tag sampler. Gray = no marker;
+18 white bars = unexpected alpha data. Neither proves why a marker is absent.
+After a cyan result, use `"selector"` instead: orange means the selected native
+parameter tuple's marker reached capture. The default `"visibility"` remains
+the separate frame-tagged shadow diagnostic. Probe results never feed GI.
 
 Startup first checks CPU readiness, then stops BeamRT custom rendering/captures
 before installing the native diagnostic. It does not change time, native SSR,
@@ -66,9 +96,36 @@ Exposed clustered dispatches, coincident selectors, disabled/moving lights and
 other native shader hooks are refused. Native dispatch does not supply a scene
 object ID in this legacy constant layout: the match uses the unique light
 position/range and spot direction/outer cone, not a guessed persistent ID.
-Status includes pass callback counts and reported output sizes; callback counts
-prove only CPU processing, not valid GPU output. The v0.130.1 live screenshot
+Status includes setup and per-draw callback counts and reported output sizes;
+these prove only CPU processing, not valid GPU output. Counters survive stop/
+timeout (`passesAreLastStop=true`), so status can be requested after the bounded
+test. The v0.130.1 live screenshot
 showed stage 1 (tag input not 1x1), before any native visibility was read.
+The v0.130.2 live test stopped at epoch 32 because its guard incorrectly required
+on-demand children to report enabled in the PostFX manager. v0.130.3 checks root
+enable state separately from child ownership/bindings; an on-demand child can
+legitimately report disabled while its parent processes it. GPU success remains
+unverified.
+The v0.130.3 test reached the child-attachment guard, which compared Lua wrapper
+equality. v0.130.4 compares registered native IDs instead: a base SimObject
+wrapper returned by enumeration need not equal the retained PostEffect wrapper.
+It still requires exactly one correct child, verifies this before the native
+material lease, and reports child counts/IDs on a real mismatch.
+The v0.130.4 test showed stage 10 (stale snapshot). v0.130.5 uses
+`setShaderConsts` rather than the potentially once-only `preProcess` callback
+for per-frame authorization. Two 1x1 scratch scheduler draws ensure those
+callbacks are invoked; they never write scene color. Stale snapshot rejection
+is unchanged. Live refresh/native visibility still require verification.
+v0.130.6 switched false-state checks to native field readback: the live binding
+returned `skipDrawNative="0"` but the direct Lua property was nil. Each scheduler
+field is now validated separately, with actual/expected values retained on failure.
+The resulting live counters showed zero scheduler draws, one lazy child draw,
+and hundreds of late display draws. v0.130.7 corrects the hook from the wrong
+`AL_LightBin` name to `AL_LightBinMgr` found in the installed executable. Startup
+requires that exact registered `AdvancedLightBinManager` object and identity.
+If either early root still has zero CPU draw callbacks by epoch 64, it restores
+instead of displaying a stale snapshot for the entire budget. Native GPU
+visibility is still unverified; registered object presence is not execution proof.
 
 Only owned fields/objects are restored; foreign replacements are not overwritten.
 Failed restoration retains the lease and neutralizes the relay/display for retry.

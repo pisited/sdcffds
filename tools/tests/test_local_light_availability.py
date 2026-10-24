@@ -36,6 +36,12 @@ class Availability(unittest.TestCase):
         self.assertTrue(self.lua.globals().M.setMeshLocalLightsEnabled(False))
         self.assertEqual(self.lua.globals().disables,1)
 
+    def test_installed_cluster_namespace_blocks_enable_without_loading(self):
+        self.lua.execute("ClusterShading=setmetatable({},{__index=function()error('no backend getters')end})")
+        self.assertFalse(self.lua.globals().M.getMeshLocalLightStatus().canEnable)
+        self.assertFalse(self.lua.globals().M.setMeshLocalLightsEnabled(True)[0])
+        self.assertEqual(self.lua.globals().loads,0)
+
     def test_existing_hook_stays_disableable_when_backend_exposure_changes(self):
         self.lua.globals().M.setMeshLocalLightsEnabled(True)
         self.lua.globals().ClusteredShading=self.lua.table()

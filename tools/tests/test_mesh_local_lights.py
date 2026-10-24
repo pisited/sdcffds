@@ -162,4 +162,61 @@ class Local(unittest.TestCase):
         self.assertTrue(any(m.name=='shadowMaxCasters'and m.kind=='number'for m in info.members.values()))
         self.assertFalse(self.module.getStatus().clusteredDispatchIntegrated)
 
+    def test_installed_cluster_name_is_detected_and_preferred_without_getters(self):
+        self.lua.execute("ClusterShading=setmetatable({shadowMaxCasters=96},{__index=function()error('no getters')end});ClusteredShading={oldAlias=true}")
+        self.assertFalse(self.module.enable()[0])
+        self.assertEqual(self.obj('AL_SpotLightMaterial').reloads,0)
+        info=self.module.getBackendInfo()
+        self.assertEqual(info.name,'ClusterShading')
+        self.assertTrue(any(m.name=='shadowMaxCasters'for m in info.members.values()))
+        self.assertFalse(any(m.name=='oldAlias'for m in info.members.values()))
+        self.assertTrue(self.module.getStatus().clusteredBackendExposed)
+
+    def test_exposing_cluster_backend_stops_and_restores_active_legacy_hook(self):
+        self.assertTrue(self.module.enable()[0])
+        self.lua.execute('ClusterShading={}')
+        self.module.onPreRender()
+        self.assertFalse(self.module.getStatus().enabled)
+        self.assertEqual(self.obj('AL_SpotLightMaterial').fields.shader[0],'AL_SpotLightShader')
+
+    def test_beamng_numeric_binding_metadata_is_read_without_invoking_accessors(self):
+        self.lua.execute('''
+          accessorCalls=0
+          local function accessor()accessorCalls=accessorCalls+1;error('must not call')end
+          local inherited={[1]={inheritedRead=accessor},[2]={inheritedWrite=accessor}}
+          local mt={[1]={shadowMaxCasters=accessor},[2]={shadowMaxCasters=accessor},[3]=inherited}
+          inherited[3]=mt -- cyclic native metadata must remain bounded
+          ClusterShading=setmetatable({___type='static_class<ClusterShading>'},mt)
+          mt.__index=accessor;mt.__newindex=accessor
+        ''')
+        info=self.module.getBackendInfo()
+        names={m.name:m.kind for m in info.members.values()}
+        self.assertEqual(info.schema,'beamrt.cluster.backend-metadata.v2')
+        self.assertEqual(names['meta.getters.shadowMaxCasters'],'function')
+        self.assertEqual(names['meta.setters.shadowMaxCasters'],'function')
+        self.assertEqual(names['meta.super.getters.inheritedRead'],'function')
+        self.assertEqual(self.lua.globals().accessorCalls,0)
+        self.assertEqual(self.obj('AL_SpotLightMaterial').reloads,0)
+
+    def test_numeric_binding_slots_on_the_namespace_itself_and_member_limit(self):
+        self.lua.execute('''
+          ClusterShading={[1]={heatmapOverlay=function()error('must not call')end}}
+        ''')
+        info=self.module.getBackendInfo()
+        self.assertTrue(any(m.name=='getters.heatmapOverlay'for m in info.members.values()))
+        self.lua.execute('for i=1,200 do ClusterShading[1]["field"..i]=function()error("must not call")end end')
+        info=self.module.getBackendInfo()
+        self.assertEqual(len(info.members),128)
+        self.assertTrue(info.truncated)
+
+    def test_deep_metadata_is_truncated_without_following_arbitrary_inheritance(self):
+        self.lua.execute('''
+          ClusterShading={};local t=ClusterShading
+          for i=1,20 do t[3]={};t=t[3]end
+          t[1]={hidden=function()error('must not call')end}
+        ''')
+        info=self.module.getBackendInfo()
+        self.assertTrue(info.truncated)
+        self.assertLessEqual(len(info.members),128)
+
 if __name__=='__main__':unittest.main(verbosity=2)

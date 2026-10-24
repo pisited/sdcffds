@@ -187,6 +187,6 @@ function M.getStatus()
     receiverBias='depth-neighbour geometric frame, 5-25 mm offset, 3-15 mm receiver-plane rejection',
     rayPolicy='32 coarse samples, at most two 6-step crossing refinements; 2 cm depth residual; misses remain unknown',
     geometryVisibilityAvailable=false,feedsGI=false,appliesShadowAttenuation=false,
-    clusteredBackendExposed=ClusteredShading~=nil,gpuExecutionVerified=false}
+    clusteredBackendExposed=ClusterShading~=nil or ClusteredShading~=nil,gpuExecutionVerified=false}
 end
 return M

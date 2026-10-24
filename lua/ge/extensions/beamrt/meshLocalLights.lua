@@ -89,7 +89,7 @@ function M.enable()
   -- This installation also provides clustered compute shading. Its texture/
   -- structured-buffer bindings are not the legacy CustomMaterial interface.
   -- Do not report a successful install on an unverified alternate route.
-  if ClusteredShading~=nil then
+  if ClusterShading~=nil or ClusteredShading~=nil then
     return fail('clustered lighting backend exposed; legacy point/spot hook is staged, not activated until matching dispatch/bindings are integrated')
   end
   local data,why=sceneModule.prepare();if not data then return fail(why)end
@@ -114,6 +114,9 @@ function M.enable()
 end
 function M.onPreRender()
   if not active then return end
+  if ClusterShading~=nil or ClusteredShading~=nil then
+    M.disable();fail('clustered lighting backend exposed; legacy local-light hook stopped');return
+  end
   frame=frame+1
   for _,record in pairs(originals)do
     local material=find(record.name)
@@ -136,7 +139,7 @@ function M.getStatus()
   return {enabled=active,error=errorMessage,objectId=scene and scene.objectId,
     selectedShape=scene and scene.asset.shapePath,triangles=scene and scene.gpuData.triangleCount,
     nodes=scene and scene.gpuData.nodeCount,scope='one imported underground instance, legacy native deferred point and spot lights',
-    clusteredBackendExposed=ClusteredShading~=nil,clusteredDispatchIntegrated=false,
+    clusteredBackendExposed=ClusterShading~=nil or ClusteredShading~=nil,clusteredDispatchIntegrated=false,
     installation='fresh ShaderData with direct BVH queries in native local-light shading',
     cameraDepthRelayUsed=false,controlledVehicleSelectionUsed=false,brightnessOrColorChanged=false,
     nativeShadowsPreserved=true,ambientLightingChanged=false,alphaTexturesSampled=false,
@@ -144,8 +147,11 @@ function M.getStatus()
 end
 function M.getBackendInfo()
   -- Bounded read-only member metadata, no getter calls or values/pointers.
-  local backend=ClusteredShading
-  local result={exposed=backend~=nil,kind=type(backend),members={},truncated=false}
+  local backend=ClusterShading
+  local backendName='ClusterShading'
+  if backend==nil then backend=ClusteredShading;backendName='ClusteredShading'end
+  local result={schema='beamrt.cluster.backend-metadata.v2',exposed=backend~=nil,
+    name=backend~=nil and backendName or nil,kind=type(backend),members={},truncated=false}
   local seen={}
   local function collect(value,prefix,depth)
     if type(value)~='table'or seen[value]then return end
@@ -154,7 +160,18 @@ function M.getBackendInfo()
       if #result.members>=128 then result.truncated=true;return end
       if type(key)=='string'then
         result.members[#result.members+1]={name=prefix..key,kind=type(member)}
-        if depth<2 and type(member)=='table'then collect(member,prefix..key..'.',depth+1)end
+        if type(member)=='table'then
+          if depth<4 then collect(member,prefix..key..'.',depth+1)else result.truncated=true end
+        end
+      end
+    end
+    -- Installed lua/common/luaBinding.lua: 1=getters, 2=setters, 3=super.
+    -- These numeric slots are absent from a string-key-only member inventory.
+    -- Inspect raw registration tables only; never invoke a bound accessor.
+    for index,label in ipairs({'getters.','setters.','super.'})do
+      local child=rawget(value,index)
+      if type(child)=='table'then
+        if depth<4 then collect(child,prefix..label,depth+1)else result.truncated=true end
       end
     end
   end

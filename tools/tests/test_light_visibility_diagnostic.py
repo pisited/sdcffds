@@ -55,6 +55,13 @@ class Diagnostic(unittest.TestCase):
             module=lua.execute(SOURCE);lua.globals().diagnostic=module
             yield lua,module
 
+    def test_status_recognizes_installed_cluster_name_without_backend_getters(self):
+        for lua,m in self.runtimes():
+            lua.execute("ClusterShading=setmetatable({},{__index=function()error('no backend getters')end})")
+            self.assertTrue(m.getStatus().clusteredBackendExposed)
+            self.assertFalse(m.getStatus().geometryVisibilityAvailable)
+            self.assertFalse(m.getStatus().feedsGI)
+
     def test_read_only_candidates_do_not_change_shared_provider_cache(self):
         for lua,m in self.runtimes():
             provider=lua.eval("require('ge/extensions/beamrt/providers/lightProvider')")

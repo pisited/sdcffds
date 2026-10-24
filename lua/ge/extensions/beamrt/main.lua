@@ -1,4 +1,4 @@
--- BeamRT v0.130.2: persistent early native relay targets and scheduling guards.
+-- BeamRT v0.130.9: recognize installed ClusterShading before legacy hooks.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
@@ -131,7 +131,7 @@ do
   end
   M._ptgiCoherent = require(key)
 end
-local VERSION = "0.130.2"
+local VERSION = "0.130.9"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -3266,7 +3266,10 @@ function M.inspectNativeShadowInputs(token)
   beamrtLog('I','Native shadow input contract: '..jsonEncode(report));return report
 end
 function M.stopNativeShadowDiagnostic()return M._nativeShadowDiagnostic.disable()end
-function M.startNativeShadowDiagnostic(token)
+function M.startNativeShadowDiagnostic(token,probe)
+  if probe~=nil and probe~='visibility'and probe~='dispatch'and probe~='selector'then
+    return false,'Use visibility, dispatch or selector probe.'
+  end
   if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
     or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen()then
     return false,'Finish captures before starting native shadow diagnostics.'
@@ -3276,7 +3279,7 @@ function M.startNativeShadowDiagnostic(token)
   end
   local report=M.inspectNativeShadowInputs(token);if not report.canStart then return false,report.reason end
   if not M.disable()then return false,'Previous renderer ownership could not be restored.'end
-  local ok,why=M._nativeShadowDiagnostic.enable(token)
+  local ok,why=M._nativeShadowDiagnostic.enable(token,probe)
   beamrtLog(ok and'I'or'W','Native shadow diagnostic: '..tostring(why));return ok,why
 end
 function M.getNativeShadowDiagnosticStatus()
@@ -8256,7 +8259,7 @@ function M.getMeshLocalLightStatus()
   -- Reading tuner availability must not trigger extensions.__index auto-load.
   local lights=extensions and rawget(extensions,'beamrt_meshLocalLights')
   local status=lights and lights.getStatus()or{enabled=false}
-  local availability=M.localLightAvailability.resolve(status,ClusteredShading~=nil)
+  local availability=M.localLightAvailability.resolve(status,ClusterShading~=nil or ClusteredShading~=nil)
   status.canEnable=availability.canEnable; status.canDisable=availability.canDisable
   status.unavailableReason=availability.reason
   return status

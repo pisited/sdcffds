@@ -48,8 +48,8 @@ def main():
         entries = ['shaders/beamrt/beamrtLightVisibilityP_v003.hlsl']
     if args.native_shadows:
         entries = ['shaders/beamrt/beamrtNativeShadowFrameP_v002.hlsl',
-                   'shaders/beamrt/beamrtNativeShadowCaptureP_v001.hlsl',
-                   'shaders/beamrt/beamrtNativeShadowViewP_v003.hlsl']
+                   'shaders/beamrt/beamrtNativeShadowCaptureP_v002.hlsl',
+                   'shaders/beamrt/beamrtNativeShadowViewP_v004.hlsl']
     if not entries:
         raise RuntimeError('No literal BeamRT shader entries found.')
     output = ROOT / '.beamrt-validation' / ('postfx-compile-' + uuid.uuid4().hex)

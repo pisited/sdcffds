@@ -12,20 +12,35 @@ sys.path.insert(0,str(ROOT/'tools'))
 import beamrt_native_shadow_diagnostic as prepare
 SOURCE=(ROOT/'lua/ge/extensions/beamrt/nativeShadowDiagnostic.lua').read_text()
 HELPER=(ROOT/'shaders/beamrt/beamrtNativeShadowRelay.h.hlsl').read_text()
-VIEW=(ROOT/'shaders/beamrt/beamrtNativeShadowViewP_v003.hlsl').read_text()
-CAPTURE=(ROOT/'shaders/beamrt/beamrtNativeShadowCaptureP_v001.hlsl').read_text()
+VIEW=(ROOT/'shaders/beamrt/beamrtNativeShadowViewP_v004.hlsl').read_text()
+CAPTURE=(ROOT/'shaders/beamrt/beamrtNativeShadowCaptureP_v002.hlsl').read_text()
 EXTRA=r'''
 originalCreateObject=createObject
+nextObjectId=100000
 function createObject(class)
- local o=originalCreateObject(class);o.children={}
+ local o=originalCreateObject(class);o.children={};nextObjectId=nextObjectId+1;o.nativeId=nextObjectId
+ function o:getID()return self.nativeId end
+ function o:getId()return self.nativeId end
+ function o:getName()return self.name end
+ function o:getClassName()return class end
  function o:add(child)table.insert(self.children,child)end
  function o:getCount()return #self.children end
- function o:getObject(i)return self.children[i+1]end
+ function o:getObject(i)
+   local child=self.children[i+1];if not child then return nil end
+   -- Native SimSet enumeration may return a distinct base-type Lua wrapper.
+   return {getID=function()return child:getID()end,getName=function()return child.name end}
+ end
  function o:getRenderTargetSize()return {x=1,y=1}end
+ function o:enable()
+   if self:getField('renderTime',0)=='PFXTexGenOnDemand'then return end
+   local cb=_G[(self.name or '')..'Callbacks']
+   self.enabled=not cb or not cb.onEnabled or cb.onEnabled()==true
+ end
  return o
 end
 managerName='Advanced Lighting 1.5'
 function getActiveLightManager()return managerName end
+local nativeBin=createObject('AdvancedLightBinManager');nativeBin:registerObject('AL_LightBinMgr')
 function setShadowVizLight()error('Do not mutate native shadow visualizer')end
 manifest={schema='beamrt.native.visibility.v1',dependencies={['shaders/beamrt/beamrtNativeShadowRelay.h.hlsl']='helper'},lights={}}
 files={['/shaders/beamrt/beamrtNativeShadowRelay.h.hlsl']='helper'}
@@ -78,7 +93,7 @@ class Controller(unittest.TestCase):
             self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
 
     def test_supported_manager_source_and_unique_native_light_are_required(self):
-        for change in ("managerName='Advanced Lighting'",'ClusteredShading={}',"objects[2].enabled='0'",
+        for change in ("managerName='Advanced Lighting'",'ClusterShading={}','ClusteredShading={}',"objects[2].enabled='0'",
             "objects.AL_SpotLightMaterial:setField('sampler','shadowMap','#unknown')",
             "files['/'..manifest.lights.Spot.nativePath]='changed'"):
             for vm,m in self.runtimes():
@@ -90,6 +105,29 @@ class Controller(unittest.TestCase):
             self.assertTrue(m.inspect(2).canStart)
             vm.execute("lamp(3,'SpotLight')")
             self.assertFalse(m.inspect(2).canStart)
+
+    def test_installed_cluster_namespace_blocks_all_probes_without_native_writes(self):
+        for mode in ('visibility','dispatch','selector'):
+            for vm,m in self.runtimes():
+                vm.execute("ClusterShading=setmetatable({},{__index=function()error('no backend getters')end})")
+                report=m.inspect(2)
+                self.assertFalse(report.canStart);self.assertTrue(report.clusteredBackendExposed)
+                self.assertFalse(m.enable(2,mode)[0])
+                self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
+                self.assertIsNone(vm.globals().objects.BeamRT_NativeShadowNativeShader)
+                self.assertTrue(m.getStatus().clusteredBackendExposed)
+                self.assertFalse(m.getStatus().clusteredDispatchIntegrated)
+
+    def test_new_cluster_namespace_exposure_restores_active_native_lease(self):
+        for name in ('ClusterShading','ClusteredShading'):
+            for vm,m in self.runtimes():
+                self.assertTrue(m.enable(2,'dispatch')[0])
+                vm.execute(name+'={}')
+                m.update()
+                self.assertFalse(m.getStatus().enabled)
+                self.assertFalse(m.getStatus().pendingRestore)
+                self.assertIn('backend changed',m.getStatus().reason)
+                self.assertEqual(vm.globals().objects.AL_SpotLightMaterial.fields.shader[0],'AL_SpotLightShader')
 
     def test_native_shader_and_only_extra_sampler_are_leased_then_restored(self):
         for vm,m in self.runtimes():
@@ -107,17 +145,22 @@ class Controller(unittest.TestCase):
             schedule=vm.globals().objects.BeamRT_NativeShadowFrameScheduleFx
             capture=vm.globals().objects.BeamRT_NativeShadowCaptureFx
             capture_schedule=vm.globals().objects.BeamRT_NativeShadowCaptureScheduleFx
-            self.assertEqual(schedule.fields.renderBin[0],'AL_LightBin')
+            self.assertEqual(schedule.fields.renderBin[0],'AL_LightBinMgr')
             self.assertEqual(schedule.fields.renderTime[0],'PFXBeforeBin')
-            self.assertTrue(schedule.skipDraw);self.assertTrue(capture_schedule.skipDraw)
+            self.assertEqual(schedule.fields.skipDraw[0],'0')
+            self.assertEqual(capture_schedule.fields.skipDraw[0],'0')
+            self.assertEqual(schedule.fields.targetSize[0],'1 1')
             self.assertEqual(schedule.getCount(schedule),1)
             self.assertEqual(capture.fields.renderTime[0],'PFXTexGenOnDemand')
             self.assertEqual(capture.fields.texture[1],'#lightinfo[RT1]')
             self.assertEqual(capture_schedule.fields.renderTime[0],'PFXAfterBin')
             self.assertEqual(view.fields.texture[1],'#BeamRT_NativeShadowSnapshot')
             self.assertIsNone(view.fields.texture[2])
-            self.assertTrue(vm.globals().objects.BeamRT_NativeShadowViewShader.DXPixelShaderFile.endswith('P_v003.hlsl'))
+            self.assertTrue(vm.globals().objects.BeamRT_NativeShadowViewShader.DXPixelShaderFile.endswith('P_v004.hlsl'))
             self.assertFalse(frame.allowReflectPass);self.assertFalse(view.allowReflectPass)
+            self.assertFalse(frame.isEnabled(frame))
+            self.assertFalse(capture.isEnabled(capture))
+            self.assertTrue(schedule.isEnabled(schedule));self.assertTrue(view.isEnabled(view))
             self.assertFalse(m.getStatus().nativeAttenuationChanged)
             self.assertFalse(m.getStatus().beautyRGBChanged);self.assertFalse(m.getStatus().feedsGI)
             self.assertFalse(m.getStatus().nativeDispatchObserved)
@@ -151,6 +194,7 @@ class Controller(unittest.TestCase):
             m.enable(2);tags=[]
             for _ in range(2050):
                 if not m.getStatus().enabled:break
+                vm.execute('BeamRT_NativeShadowFrameScheduleFxCallbacks.setShaderConsts(); BeamRT_NativeShadowCaptureScheduleFxCallbacks.setShaderConsts()')
                 tags.append(m.getStatus().epoch);m.update()
             self.assertEqual(len(tags),len(set(tags)))
             self.assertNotIn(480,tags)
@@ -163,6 +207,54 @@ class Controller(unittest.TestCase):
         for vm,m in self.runtimes():
             m.enable(2);m.update();old=m.getStatus().epoch;m.disable()
             self.assertTrue(m.enable(2)[0]);self.assertGreater(m.getStatus().epoch,old)
+
+    def test_on_demand_children_stay_manager_disabled_but_do_not_stop_diagnostic(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0])
+            for suffix in ('FrameFx','CaptureFx'):
+                child=vm.globals().objects['BeamRT_NativeShadow'+suffix]
+                self.assertFalse(child.isEnabled(child));child.enable(child)
+                self.assertFalse(child.isEnabled(child)) # engine returns early for on-demand enable
+            m.update();self.assertTrue(m.getStatus().enabled,m.getStatus().reason)
+            self.assertGreater(m.getStatus().epoch,32)
+            vm.execute('objects.BeamRT_NativeShadowViewFx:disable()')
+            m.update();self.assertFalse(m.getStatus().enabled)
+            self.assertIn('View pass stopped',m.getStatus().reason)
+
+    def test_scheduled_root_disable_still_stops_and_restores(self):
+        for suffix in ('FrameScheduleFx','CaptureScheduleFx'):
+            for vm,m in self.runtimes():
+                self.assertTrue(m.enable(2)[0])
+                root=vm.globals().objects['BeamRT_NativeShadow'+suffix];root.disable(root)
+                m.update();self.assertFalse(m.getStatus().enabled)
+                self.assertEqual(vm.globals().objects.AL_SpotLightMaterial.fields.shader[0],'AL_SpotLightShader')
+
+    def test_child_identity_uses_engine_id_not_lua_wrapper_equality(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0])
+            vm.execute('''
+              local root=objects.BeamRT_NativeShadowFrameScheduleFx
+              local child=objects.BeamRT_NativeShadowFrameFx
+              assert(root:getObject(0)~=child)
+              assert(root:getObject(0):getID()==child:getID())
+            ''')
+            m.update();self.assertTrue(m.getStatus().enabled,m.getStatus().reason)
+            vm.execute('objects.BeamRT_NativeShadowFrameScheduleFx.children={objects.BeamRT_NativeShadowCaptureFx}')
+            m.update();self.assertFalse(m.getStatus().enabled)
+            self.assertIn('expectedID=',m.getStatus().reason)
+            self.assertEqual(m.getStatus().lastAttachmentFailure['pass'],'Frame')
+            self.assertNotEqual(m.getStatus().lastAttachmentFailure.expectedId,m.getStatus().lastAttachmentFailure.reportedId)
+
+    def test_missing_child_identity_or_failed_add_refused_before_native_material_write(self):
+        for change in ('''local original=createObject;createObject=function(class)
+              local o=original(class);function o:add(child)end;return o end''',
+                       '''local original=createObject;createObject=function(class)
+              local o=original(class);o.getID=nil;o.getId=nil;return o end'''):
+            for vm,m in self.runtimes():
+                vm.execute(change);self.assertFalse(m.enable(2)[0])
+                self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
+                self.assertFalse(m.getStatus().pendingRestore)
+                self.assertIn('attachment mismatch',m.getStatus().reason)
 
     def test_callback_counts_are_not_gpu_proof_and_own_callbacks_are_removed(self):
         for vm,m in self.runtimes():
@@ -186,6 +278,8 @@ class Controller(unittest.TestCase):
             vm.execute('BeamRT_NativeShadowCaptureFxCallbacks.preProcess()')
             self.assertEqual(capture.consts['$nativeScheduledEpoch'],0) # lazy read is NOT authorization
             vm.execute('BeamRT_NativeShadowFrameScheduleFxCallbacks.preProcess(); BeamRT_NativeShadowCaptureScheduleFxCallbacks.preProcess()')
+            self.assertEqual(capture.consts['$nativeScheduledEpoch'],0) # setup callback is not a frame signal
+            vm.execute('BeamRT_NativeShadowFrameScheduleFxCallbacks.setShaderConsts(); BeamRT_NativeShadowCaptureScheduleFxCallbacks.setShaderConsts()')
             self.assertEqual(capture.consts['$nativeScheduledEpoch'],m.getStatus().epoch)
             self.assertEqual(frame.consts['$nativeScheduledEpoch'],m.getStatus().epoch)
             m.update()
@@ -193,6 +287,130 @@ class Controller(unittest.TestCase):
             self.assertEqual(frame.consts['$nativeScheduledEpoch'],0)
         self.assertLess(CAPTURE.index('nativeScheduledEpoch!=nativeShadowEpoch'),CAPTURE.index('nativeSpecTexTex.GetDimensions'))
         self.assertIn('relayFailure(13)',CAPTURE)
+
+    def test_per_draw_updates_survive_once_only_preprocess_and_status_survives_stop(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0])
+            vm.execute('''
+              function simulateDraw(name)
+                local o=objects[name];local cb=_G[name..'Callbacks']
+                if not o.preProcessed then cb.preProcess();o.preProcessed=true end
+                cb.setShaderConsts()
+                for _,child in ipairs(o.children)do simulateDraw(child.name)end
+              end
+            ''')
+            for _ in range(3):
+                m.update()
+                vm.execute('''simulateDraw('BeamRT_NativeShadowFrameScheduleFx')
+                  simulateDraw('BeamRT_NativeShadowCaptureScheduleFx')
+                  simulateDraw('BeamRT_NativeShadowViewFx')''')
+                epoch=m.getStatus().epoch
+                self.assertEqual(vm.globals().objects.BeamRT_NativeShadowFrameFx.consts['$nativeScheduledEpoch'],epoch)
+                self.assertEqual(vm.globals().objects.BeamRT_NativeShadowCaptureFx.consts['$nativeScheduledEpoch'],epoch)
+            live=m.getStatus()
+            self.assertEqual(live.passes.CaptureFx.processCalls,1)
+            self.assertEqual(live.passes.CaptureFx.drawCalls,3)
+            self.assertFalse(live.gpuExecutionVerified)
+            m.disable('test stop');stopped=m.getStatus()
+            self.assertTrue(stopped.passesAreLastStop)
+            self.assertEqual(stopped.passes.CaptureFx.drawCalls,3)
+            self.assertEqual(stopped.passes.FrameScheduleFx.drawCalls,3)
+            m.disable();self.assertEqual(m.getStatus().passes.CaptureFx.drawCalls,3)
+
+    def test_lazy_child_cannot_authorize_itself_with_per_draw_callback(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0]);m.update()
+            vm.execute('BeamRT_NativeShadowCaptureFxCallbacks.setShaderConsts()')
+            self.assertEqual(vm.globals().objects.BeamRT_NativeShadowCaptureFx.consts['$nativeScheduledEpoch'],0)
+
+    def test_false_native_field_does_not_require_false_lua_property(self):
+        for value in ('0','false',False,0):
+            for vm,m in self.runtimes():
+                self.assertTrue(m.enable(2)[0])
+                root=vm.globals().objects.BeamRT_NativeShadowFrameScheduleFx
+                root.skipDraw=None
+                root.fields.skipDraw[0]=value
+                # Mock getField normally collapses false with `or`; model the
+                # native field reader returning its typed bool here instead.
+                vm.execute('''local root=objects.BeamRT_NativeShadowFrameScheduleFx
+                  local old=root.getField
+                  root.getField=function(self,k,i)if k=='skipDraw'then return self.fields.skipDraw[i]end;return old(self,k,i)end''')
+                m.update();self.assertTrue(m.getStatus().enabled,m.getStatus().reason)
+
+    def test_scheduler_mismatch_names_exact_field_and_retains_actual_expected(self):
+        for key,value in (('targetSize','2 1'),('targetFormat','GFXFormatR8G8B8A8'),('skipDraw','1'),('renderBin','OtherBin')):
+            for vm,m in self.runtimes():
+                self.assertTrue(m.enable(2)[0])
+                root=vm.globals().objects.BeamRT_NativeShadowFrameScheduleFx
+                root.setField(root,key,0,value);m.update()
+                status=m.getStatus();self.assertFalse(status.enabled)
+                self.assertEqual(status.lastValidationFailure.field,key)
+                self.assertIn('scheduler '+key+':',status.reason)
+
+    def test_scheduler_readback_failure_refused_before_native_material_lease(self):
+        for vm,m in self.runtimes():
+            vm.execute('''local oldCreate=createObject
+              createObject=function(class)local o=oldCreate(class);local oldSet=o.setField
+                o.setField=function(self,k,i,v)
+                  if self.name and self.name:find('ScheduleFx',1,true)and k=='renderBin'then return end
+                  if k=='targetSize'and v=='1 1'then v='2 1'end
+                  oldSet(self,k,i,v)
+                end
+                return o
+              end''')
+            self.assertFalse(m.enable(2)[0])
+            self.assertIn('scheduler targetSize:',m.getStatus().reason)
+            self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
+
+    def test_real_registered_lighting_manager_required_before_writes(self):
+        for vm,m in self.runtimes():
+            report=m.inspect(2);self.assertTrue(report.canStart)
+            self.assertEqual(report.nativeBin.name,'AL_LightBinMgr')
+            vm.execute("objects.AL_LightBin=objects.AL_LightBinMgr;objects.AL_LightBinMgr=nil")
+            ok,why=m.enable(2);self.assertFalse(ok)
+            self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
+            self.assertIn('no guessed render timing',why)
+
+    def test_dispatch_and_selector_modes_are_explicit_not_shadow_results(self):
+        for label,number in (('visibility',0),('dispatch',1),('selector',2)):
+            for vm,m in self.runtimes():
+                self.assertTrue(m.enable(2,label)[0])
+                shader=vm.globals().objects.BeamRT_NativeShadowNativeShader
+                self.assertIn('BEAMRT_NATIVE_PROBE='+str(number),shader.fields.defines[0])
+                self.assertEqual(vm.globals().objects.BeamRT_NativeShadowCaptureFx.consts['$nativeProbeMode'],number)
+                self.assertEqual(m.getStatus().probeMode,number)
+                self.assertFalse(m.getStatus().feedsGI);self.assertFalse(m.getStatus().gpuExecutionVerified)
+                if number:self.assertIn('NOT shadows',m.getStatus().probeMeaning)
+        for vm,m in self.runtimes():
+            self.assertFalse(m.enable(2,'fake')[0])
+            self.assertIsNone(vm.globals().objects.AL_SpotLightMaterial.reloads)
+
+    def test_missing_early_callbacks_auto_restores_and_retains_counts(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0])
+            for _ in range(40):m.update()
+            status=m.getStatus();self.assertFalse(status.enabled)
+            self.assertIn('No early CPU draw callbacks for AL_LightBinMgr',status.reason)
+            self.assertTrue(status.passesAreLastStop)
+            self.assertEqual(status.passes.FrameScheduleFx.drawCalls,0)
+            self.assertEqual(vm.globals().objects.AL_SpotLightMaterial.fields.shader[0],'AL_SpotLightShader')
+
+    def test_manager_name_not_bin_type_drives_scheduled_callbacks(self):
+        for vm,m in self.runtimes():
+            self.assertTrue(m.enable(2)[0]);m.update()
+            vm.execute('''function emitBin(name,when)
+              for _,suffix in ipairs({'FrameScheduleFx','CaptureScheduleFx'})do
+                local fx=objects['BeamRT_NativeShadow'..suffix]
+                if fx:isEnabled()and fx:getField('renderBin',0)==name and fx:getField('renderTime',0)==when then
+                  _G[fx.name..'Callbacks'].setShaderConsts()
+                end
+              end
+            end
+            emitBin('AL_LightBin','PFXBeforeBin');emitBin('AL_LightBin','PFXAfterBin')''')
+            self.assertEqual(m.getStatus().passes.FrameScheduleFx.drawCalls,0)
+            vm.execute("emitBin('AL_LightBinMgr','PFXBeforeBin');emitBin('AL_LightBinMgr','PFXAfterBin')")
+            self.assertEqual(m.getStatus().passes.FrameScheduleFx.drawCalls,1)
+            self.assertEqual(m.getStatus().passes.CaptureScheduleFx.drawCalls,1)
 
     def test_detached_child_or_changed_capture_binding_stops_and_restores(self):
         for change in ("objects.BeamRT_NativeShadowCaptureFx:setField('texture',1,'#prepass[RT1]')",
@@ -205,6 +423,17 @@ class Controller(unittest.TestCase):
 
 
 class GeneratedShader(unittest.TestCase):
+    def test_dispatch_probe_bypasses_selector_and_tag_sampler_but_only_writes_alpha(self):
+        generated=prepare.generate(NATIVE_FIXTURE,'Spot')
+        dispatch=generated.split('#if BEAMRT_NATIVE_PROBE == 1',1)[1].split('#elif',1)[0]
+        self.assertIn('outData.outB.a = -0.125;',dispatch)
+        self.assertNotIn('beamrtNativeSelected',dispatch);self.assertNotIn('beamrtNativePacket',dispatch)
+        self.assertLess(CAPTURE.index('nativeProbeMode==1||nativeProbeMode==2'),CAPTURE.index('nativeFrameTexTex.GetDimensions'))
+        self.assertIn('packed==0',CAPTURE)
+        self.assertIn('return relayFailure(18)',CAPTURE)
+        self.assertIn('payload.z==positive',VIEW)
+        self.assertIn('if(payload.z!=12)',VIEW) # visibility still requires its own status
+
     def test_transport_failures_have_seven_distinct_numbered_stages(self):
         for stage in range(1,8):
             self.assertIn('relayFailure('+str(stage)+')',CAPTURE)

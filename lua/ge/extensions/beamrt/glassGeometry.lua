@@ -228,7 +228,7 @@ local function prepare(record,vehicle)
 end
 function M.capture(vehicle,readyMesh)
   local targetOK,targetWhy=M.checkTarget(vehicle);if not targetOK then return nil,targetWhy end
-  local id=vehicle:getID();local record,why=provider.capture(id,readyMesh)
+  local id=vehicle:getID();local record,why=provider.capture(id,readyMesh,'glass')
   if not record then return nil,why end
   local names=record.materialNames
   if not names then
