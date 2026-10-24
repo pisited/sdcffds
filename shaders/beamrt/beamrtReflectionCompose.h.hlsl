@@ -9,11 +9,21 @@ uniform_sampler2D(prepassTex, 2);
 #ifdef BEAMRT_MATERIAL_FRESNEL
 uniform_sampler2D(materialSpecTex, 3);
 #endif
+#ifdef BEAMRT_REFLECTION_LOCAL_RESOLVE
+uniform_sampler2D(prepassDepthTex, 4);
+#endif
 
 cbuffer perDraw : register(b0)
 {
     uniform float reflectionStrength;
     uniform float reflectionMaxRoughness;
+#ifdef BEAMRT_REFLECTION_LAB
+    uniform float reflectionLabGain;
+#endif
+#ifdef BEAMRT_REFLECTION_LOCAL_RESOLVE
+    uniform float reflectionLocalResolveEnabled;
+    uniform float reflectionLocalResolveStrength;
+#endif
 #ifdef BEAMRT_REFLECTION_GGX
     uniform float reflectionSamplingMode;
 #endif

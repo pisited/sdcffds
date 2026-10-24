@@ -1,3 +1,929 @@
+# BeamRT v0.130.9 — experimental native per-light visibility relay
+
+**Current integration boundary:** the installed engine's
+`lua/ge/extensions/core/settings/clusteredQuality.lua` uses **`ClusterShading`**.
+Previous guards checked only `ClusteredShading`, so an exposed clustered
+interface was mistakenly allowed through the legacy-material gate. v0.130.9
+recognizes both names in native visibility, local-mesh hooks and status/UI;
+it refuses the unintegrated route before native material writes. Exposure is
+not proof of a particular GPU dispatch. The live dispatch probe remained gray
+and `AL_SpotLightMaterial:dumpInstances()` listed no instances, so neither
+legacy execution nor native visibility has been verified. This is a guard fix,
+not a working clustered shadow export. No engine quality/backend is toggled.
+
+This is a **different diagnostic**, not another revision of the camera-depth
+tracer. It instruments the installed native point/spot shader **after its real
+light-space shadow calculation**, before optional lightmap adjustments. Native
+projection, shadow texture, filter, bias, cookies, irradiance and RGB BRDF formulas
+are retained. No additional shadow attenuation is applied to beauty or GI.
+
+The confirmed `Advanced Lighting 1.5` build writes zero to specular/lightinfo RT1
+alpha, and its inspected lighting consumer reads only RT1 RGB. The experiment
+temporarily leases one native light-kind shader plus one extra sampler. It puts
+quantized native visibility in that otherwise-unused alpha and displays it in a
+separate PostFX. The tag and snapshot use owned `PFXTexGenOnDemand` child targets,
+explicitly scheduled before/after the registered `AL_LightBinMgr` every frame.
+The late display
+reads only our early snapshot, never the transient native lightinfo target.
+Installed game files and native light/material parameters are
+not changed. Actual dispatch, RT1 binding/format and visible output are still
+**unverified until tested in-game**. Other mods consuming RT1 alpha are unsupported.
+
+At night, while the intended scene lamp is enabled, run in **GE Lua**:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.startNativeShadowDiagnostic("SpotLight_11011175112730191")
+```
+
+The v0.130.7 live test confirmed synchronized CPU callbacks for all five passes,
+but the view was gray (no matching packet). A read-only engine texture query
+reported `GFXFormatR16G16B16A16F` for `#lightinfo[RT1]`, so alpha storage exists.
+v0.130.8 adds explicit marker probes to isolate the native PS output path:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.startNativeShadowDiagnostic("SpotLight_11011175112730191", "dispatch")
+```
+
+Dispatch probe: cyan = a candidate surviving negative marker from any native
+draw of this light kind, NOT the selected lamp and NOT shadow visibility.
+It bypasses tuple selection and the native frame-tag sampler. Gray = no marker;
+18 white bars = unexpected alpha data. Neither proves why a marker is absent.
+After a cyan result, use `"selector"` instead: orange means the selected native
+parameter tuple's marker reached capture. The default `"visibility"` remains
+the separate frame-tagged shadow diagnostic. Probe results never feed GI.
+
+Startup first checks CPU readiness, then stops BeamRT custom rendering/captures
+before installing the native diagnostic. It does not change time, native SSR,
+shadow quality, lamp brightness/color/casting flags or physics. Do not enable
+PTGI/Coherent or the screen-depth diagnostic during this comparison.
+
+- Green: native sampled visibility near 1; red: near 0; intermediate colors:
+  native filtered partial visibility, quantized to 16 display levels.
+- Transport failures retain a faint scene and show numbered white bars along
+  the top. Count the bars: 1 = wrong frame texture size; 2 = nonfinite frame data;
+  3 = missing frame signature; 4 = stale frame epoch; 5 = incompatible lightinfo
+  dimensions; 6 = nonfinite native alpha; 7 = matching draw reports unavailable
+  shadow data (`NO_SHADOW`/invalid map). These are **not** shadow visibility.
+  Snapshot failures use 8 = absent texture, 9 = invalid signature, 10 = stale
+  epoch, 11 = invalid status, 13 = early capture not scheduled this epoch.
+  Version 0.130 used the same magenta for every one of these failures; a solid
+  magenta screenshot from that version cannot distinguish them.
+- Dark gray: no matching current-frame native sample. Could be outside coverage,
+  an unused legacy path, a missing RT1/alpha relay or a selector mismatch; **not lit**.
+
+Compare an off-screen caster by moving the camera while keeping the lamp and
+receiver fixed. Native map caster selection, range and shadow budgets still apply;
+this does not create complete world coverage or new BVH geometry.
+
+The binary16 relay has **1,919 non-repeating frame tags per controller lifetime**
+(about 32 seconds at 60 FPS, less at higher FPS), after which it automatically
+restores native shader ownership. This bound prevents tag wrapping from accepting
+old data. Manual stops/restarts do not reset its budget; reload for another test.
+Freshness after a full reload still relies on the native light-buffer clear and
+same-frame producer order and therefore remains part of live verification.
+
+```lua
+extensions.beamrt_main.getNativeShadowDiagnosticStatus()
+extensions.beamrt_main.stopNativeShadowDiagnostic()
+```
+
+`inspectNativeShadowInputs(nameOrID)` is a read-only readiness report. It requires
+the confirmed manager, unmodified native material/shader/shadow alias, a uniquely
+resolved static scene point/spot light and pinned installed source dependencies.
+Exposed clustered dispatches, coincident selectors, disabled/moving lights and
+other native shader hooks are refused. Native dispatch does not supply a scene
+object ID in this legacy constant layout: the match uses the unique light
+position/range and spot direction/outer cone, not a guessed persistent ID.
+Status includes setup and per-draw callback counts and reported output sizes;
+these prove only CPU processing, not valid GPU output. Counters survive stop/
+timeout (`passesAreLastStop=true`), so status can be requested after the bounded
+test. The v0.130.1 live screenshot
+showed stage 1 (tag input not 1x1), before any native visibility was read.
+The v0.130.2 live test stopped at epoch 32 because its guard incorrectly required
+on-demand children to report enabled in the PostFX manager. v0.130.3 checks root
+enable state separately from child ownership/bindings; an on-demand child can
+legitimately report disabled while its parent processes it. GPU success remains
+unverified.
+The v0.130.3 test reached the child-attachment guard, which compared Lua wrapper
+equality. v0.130.4 compares registered native IDs instead: a base SimObject
+wrapper returned by enumeration need not equal the retained PostEffect wrapper.
+It still requires exactly one correct child, verifies this before the native
+material lease, and reports child counts/IDs on a real mismatch.
+The v0.130.4 test showed stage 10 (stale snapshot). v0.130.5 uses
+`setShaderConsts` rather than the potentially once-only `preProcess` callback
+for per-frame authorization. Two 1x1 scratch scheduler draws ensure those
+callbacks are invoked; they never write scene color. Stale snapshot rejection
+is unchanged. Live refresh/native visibility still require verification.
+v0.130.6 switched false-state checks to native field readback: the live binding
+returned `skipDrawNative="0"` but the direct Lua property was nil. Each scheduler
+field is now validated separately, with actual/expected values retained on failure.
+The resulting live counters showed zero scheduler draws, one lazy child draw,
+and hundreds of late display draws. v0.130.7 corrects the hook from the wrong
+`AL_LightBin` name to `AL_LightBinMgr` found in the installed executable. Startup
+requires that exact registered `AdvancedLightBinManager` object and identity.
+If either early root still has zero CPU draw callbacks by epoch 64, it restores
+instead of displaying a stale snapshot for the entire budget. Native GPU
+visibility is still unverified; registered object presence is not execution proof.
+
+Only owned fields/objects are restored; foreign replacements are not overwritten.
+Failed restoration retains the lease and neutralizes the relay/display for retry.
+Mission/settings/source changes, captures, custom rendering and changed selection
+stop the test. This does **not** feed native visibility into PTGI or change its GI
+source. See [integration notes](docs/light-visibility-diagnostic.md).
+
+Private shaders can be prepared again against the current installation with:
+
+```powershell
+.\.beamrt-validation\python-tests\Scripts\python.exe -I -B tools/beamrt_native_shadow_diagnostic.py --game-root E:/SteamLibrary/steamapps/common/BeamNG.drive
+```
+
+## v0.129.2 — depth-crossing refinement for the visibility diagnostic
+
+The repeated offset outlines remaining in v0.129.1 exposed a separate sampling
+problem: 32 steps across 12 m can skip the old 1.5–12 cm accepted depth band,
+turning continuous blockers into phase-dependent strips. The v003 shader now
+brackets signed depth crossings and refines up to two brackets with six bisections
+each. A candidate must converge to within 2 cm of sampled depth and still pass
+the geometric receiver-plane rejection. Both crossing directions are supported.
+Missing/sky samples reset the bracket; a discontinuous depth sign flip alone is
+not accepted. This remains single-layer depth evidence, not complete geometry.
+
+The base budget remains 32 coarse samples / 12 m reach, plus at most 12 refinement
+samples. Bias, native shadows, GI and beauty rendering are unchanged. Missed thin
+occluders and exhausted/invalid brackets remain amber/unknown, never proven clear.
+At night, reload and reselect the same lamp by name using the command below.
+Live reduction of the repeated bands still needs verification in the game.
+
+## v0.129.1 — receiver-plane rejection for the visibility diagnostic
+
+This diagnostic-only update targets receiver self-intersection (red acne).
+It reconstructs geometric normals from the nearer valid depth neighbour on each
+axis, offsets by a bounded 5–25 mm, and rejects candidates on/behind the receiver
+plane (3–15 mm tolerance). Point depth samples now reconstruct the actual texel
+centre's world ray. Missing/degenerate/discontinuous receiver frames remain
+unknown rather than fabricate a shadow. Very small blockers within that plane
+tolerance can still be missed; this is not a complete geometry visibility system.
+The 32-step/12 m probe and 12 cm hit-thickness assumption otherwise remain.
+No shadow-map/cascade settings, native lamps, GI or beauty equations change.
+
+At night, reload and select the same lamp by its scene name for comparison:
+
+```lua
+extensions.reload("beamrt_main")
+extensions.beamrt_main.setLightVisibilityDiagnostic("visibility", "SpotLight_11011175112730191")
+```
+
+Reload stops BeamRT rendering. The diagnostic alone does not restart PTGI or
+Coherent; compare it before enabling beauty rendering again. This revision uses
+a new shader path to avoid reusing the old compiled variant. Compilation/tests
+do not establish in-game acne reduction or preserved shadow contact.
+
+## v0.129 — separate light visibility diagnostic
+
+The latest glass report names `character_glass`: the controlled object was the
+walking avatar, not the parked car. Glass startup now refuses the native
+`unicycle` walking-character identity **before changing the test preset or
+requesting GPU geometry**. Enter the intended car first; free camera is fine
+afterward. No caster/opacity guard was removed. This does not yet prove that
+the car's glass capture or sunlight transmission works.
+
+The next milestone is diagnostic, not another beauty preset. Native scene
+PointLight/SpotLight declarations now feed an opt-in **one-selected-light**
+display, separate from indirect GI. In GE Lua, reload once, then list nearby
+candidates (one explicit enumeration, nearest 16 reported):
+
+```lua
+extensions.reload("beamrt_main"); extensions.beamrt_main.listLightVisibilityCandidates()
+```
+
+Use an actual ID from that report in place of `123`:
+
+```lua
+print(extensions.beamrt_main.setLightVisibilityDiagnostic("visibility", 123))
+```
+
+It works without enabling PTGI/Coherent and does not start either renderer.
+The selected light is re-read each frame, without rescanning the map or touching
+shared provider caches. The status report identifies its ID/name, source position,
+axis/cone/range, brightness, enabled-state certainty and requested shadow policy.
+`castShadows` is a request, **not proof of an allocated or sampled shadow map**.
+Unknown enabled state is explicitly unavailable, never silently assumed on.
+
+| View | Meaning |
+| --- | --- |
+| `influence` | Relative unoccluded potential: normal, distance, spot cone, declared brightness/color and windowed inverse-square falloff. Fixed log display gain, not calibrated engine photometry. |
+| `direction` | World-space receiver-to-selected-light direction encoded as `0.5 * direction + 0.5` RGB. |
+| `visibility` | Red: plausible screen-depth blocker; amber: unknown, **not proven clear**. Dark gray: disabled/outside potential influence/back-facing. Magenta: enabled state unavailable. |
+| `native` | Magenta: native per-light visibility unavailable to this diagnostic. No atlas/view binding is guessed. |
+
+Switch views without rescanning/restarting, inspect status, then turn it off:
+
+```lua
+extensions.beamrt_main.setLightVisibilityDiagnostic("direction")
+extensions.beamrt_main.getLightVisibilityDiagnosticStatus()
+extensions.beamrt_main.setLightVisibilityDiagnostic("off")
+```
+
+Only the explicit diagnostic replaces the display, after renderer histories and
+haze; stopping removes it. It does not modify native light/material fields,
+graphics settings, GI transport, beauty brightness or shadow attenuation.
+Captures, source/settings changes, mission changes, unload and lost object
+ownership stop it. Shader compilation and Lua tests are not live GPU proof.
+
+The screen probe has 32 fixed samples and at most 12 m reach. It cannot establish
+off-screen visibility, thin/transparent geometry or complete chassis coverage;
+its 12 cm depth-hit tolerance is approximate. Scene lights only for now: no sun,
+vehicle-prop telemetry, emissive sources, cookies, calibrated intensity conversion
+or full geometry visibility integration. See [the visibility integration
+notes](docs/light-visibility-diagnostic.md) for native resource findings and the
+direct/indirect ownership boundary.
+
+## v0.128.1 — explicit glass rejection diagnostics
+
+The reported `No supported exterior window triangles` failure happens before
+the sunlight hook is installed. Strength 0/1 cannot compare glass shadows when
+that capture has failed. No renderer success is inferred from that message.
+
+The glass panel now has **Explain glass material rejection**, or after reloading
+BeamRT run this GE Lua command:
+
+```lua
+extensions.beamrt_main.inspectGlassSunMaterials()
+```
+
+This is a read-only scan of the current player vehicle's glass-like material
+names and live declarations; it does not capture GPU geometry, enable rendering,
+change material fields, pause physics or change settings. It logs each material's
+first rejected contract plus raw checked fields. Failed captures also include
+up to four exterior rejection reasons in their status. The report distinguishes
+empty/missing opacity maps, caster flags, source/version/layer declarations,
+alpha/instance opacity and UV limitations. It is not proof of native GPU behavior.
+No selection guard, GI math, source policy or shadow equation was relaxed.
+
+## v0.128 — paused-vehicle glass sunlight transmission experiment
+
+Park in sunlight and pause physics with **J**, then run this in the **GE Lua**
+console (BeamNG integrated SSR must already be off):
+
+```lua
+extensions.reload("beamrt_main"); print(extensions.beamrt_main.startGlassTest())
+```
+
+The public preset starts baseline PTGI + Coherent, native material response,
+eight reflection rays, temporal accumulation and automatic lamp shadows, then
+requests the glass snapshot. It preserves existing GI/brightness tuning.
+Named HDR handoff, local haze, the old glass-caster probe and diagnostic views
+are off. It never changes native graphics settings, sun/time, window opacity
+or physics pause itself. Status reports asynchronous readiness/failure; a CPU
+"scheduled" message is NOT proof of GPU output. Inspect Lighting & GI → Mesh
+visibility and shadows for the actual exterior material names and triangle count.
+
+This is a separate **deferred sunlight** experiment, not the v0.127 caster flag.
+It reads the player's actual native flexmesh triangles and UV0, including
+`_glass_tint`, excludes duplicate interior glass, builds a bounded BVH, and
+publishes an R16 geometry cache in `settings/beamrt/glass_snapshots`. Native
+opacity maps and opacity factors determine scalar transmission at each ray
+intersection. Coplanar seam hits merge; separate panes multiply transmission.
+`T = 1 - opacity` is an appearance-driven extinction approximation, not
+calibrated absorption, refractive/Fresnel transport or measured window tint.
+Maximum eight crossings, three exterior materials and 4096 triangles. Unsupported
+or incomplete captures fail explicitly; there is no geometry truncation or
+guessed window-plane replacement. Native world-vs-origin-relative coordinates
+must pass the live vehicle OBB bounds check, otherwise activation is refused.
+
+A full-resolution receiver-identified mask is produced before native direct
+sunlight, and a private copy of the installed sunlight shader multiplies its
+existing visibility by window transmission. Body/scene/cloud shadows remain
+native, never brightened. No final-image darkening, native installation edits
+or material remapping. This uses six producer texture inputs and one extra
+native sun input. Other native sun hooks must be disabled first. The installed
+source-specific shader can be prepared again using:
+
+```powershell
+.\.beamrt-validation\python-tests\Scripts\python.exe -I -B tools/beamrt_glass_sun_prepare.py --game-root E:/SteamLibrary/steamapps/common/BeamNG.drive
+```
+
+Compare without recompiling or changing the lighting:
+
+```lua
+extensions.beamrt_main.setGlassSunShadowStrength(0) -- native baseline
+extensions.beamrt_main.setGlassSunShadowStrength(1) -- opacity-map extinction
+extensions.beamrt_main.setGlassSunShadowsEnabled(false) -- restore native sunlight
+```
+
+**Limits:** physics must remain paused. Resume, vehicle/pose/material changes,
+captures, settings, reload, mission transitions or disable-all stop/release the
+snapshot. Readback is asynchronous and times out after five seconds. Up to eight
+snapshots per module session bound cache churn. No moving/deforming cars, window
+prop transforms, damaged/alpha-tested glass, animated UVs, RGB transmission,
+local-lamp/headlight glass shadows or new window reflections yet. This does not
+repair the separate late-GI/transparent-composition limitation. Offline shader
+compilation and CPU tests are not live appearance or performance proof.
+
+## v0.127 — native window shadow probe
+
+Lighting & GI → Mesh visibility and shadows (experimental) now offers **Try
+native window shadows** and **Restore window shadows**. This is a deliberately
+limited A/B probe, NOT lighter/tinted transmission rendering. Test a stationary
+vehicle in sunlight or beside an existing shadow-casting lamp. Native shadow
+submission may ignore translucent casters or make them solid; neither outcome
+is reported as working transmission. Please compare the ground/interior shadow
+through a window opening, not the appearance of the glass itself.
+
+The probe inspects the selected player vehicle's live material names and only
+requests `castShadows` for narrowly identified, non-emissive, single-layer,
+non-alpha-tested translucent window Materials from vehicle material files.
+Unsupported materials are left alone. Opacity/maps, blending, body/interior
+materials, GI, Coherent, native shaders and files are not changed. Native
+Materials are shared, so other vehicles using the same Material also inherit
+the temporary request. This does not add window reflections or RGB shadows.
+
+Default OFF; no automatic activation. Restore, disable-all, reload, vehicle
+switch, material changes, settings changes and mission lifecycle release the
+owned values. A failed restore retains its lease and exposes a retry button;
+replacement materials and subsequent edits are not overwritten. Inspection is
+read-only and lists the actual accepted material names. CPU tests establish
+selection, rollback and ownership only; live shadow opacity remains unverified.
+
+## v0.126 — compact continuous vehicle haze and rear-light fairness
+
+Vehicle haze no longer borrows the lamp sphere integrator. Its v006 shader
+intersects each view ray with the finite positive cone (or the real point-light
+sphere), then integrates sixteen deterministic samples inside only that segment.
+Depth still limits the result. This avoids the sparse eight-samples-across-the-
+whole-sphere pattern that produced stepped/sliced headlight volumes. The original
+eight-sample streetlamp kernel is unchanged, as are reflections, GI and shadows.
+This is still an unshadowed cone approximation, not native beam-cookie rendering.
+
+Vehicle haze now has independent defaults: 20 m beam reach and 0.35 beam gain,
+3 m point/red-light reach and 1.0 halo gain. All reaches are capped by the
+authored light range, never written back to native lights. The tuner exposes
+four separately labelled vehicle brightness/reach controls. These are artistic
+haze bounds, not a claim of calibrated atmospheric scattering or shorter native
+headlight illumination. Increasing samples can cost GPU time; the shorter
+footprint and cone clipping may offset it, but no FPS improvement is claimed.
+
+Both telemetry and the four-source selector now retain active red/orange light
+props instead of allowing bright headlights to occupy every slot. Up to two
+red-dominant sources are reserved, with the remaining slots importance-ranked.
+The colour threshold excludes ordinary warm halogen headlights; it is source
+classification, not a guess of a physical rear position. Nearly coincident,
+same-vehicle, same-kind, same-colour and aligned props are merged for haze
+(strongest retained, not summed). The existing four-source GPU budget remains.
+The panel shows reported/eligible/red-selected/merged counts. An emissive-only
+tail texture is still not a native light prop, so missing native sources are
+reported rather than fabricated. Very weak real tail lighting can remain subtle.
+
+The on-demand VL sampler is protocol-versioned and refreshed on mismatch, so an
+extension reload does not silently keep the old first-32-props sampling policy.
+CPU tests cover red-source starvation, telemetry fairness, compact bounds,
+overlapping props, retained native ranges and lifecycle. Numerical cone tests
+check randomized support, positive/backward cones, parallel/tangent/point/depth
+cases and continuity against a dense reference. Shader compilation and CPU tests
+do not prove the in-game visual result; reload once and compare from the same
+camera with vehicle lights on and off.
+
+### Glass investigation (not implemented by this haze patch)
+
+Inspected installed shader paths: `common/material/shadergen/permutations.h.hlsl`
+has a distinct forward glass-lighting path, with cube reflection behind
+`MFT_CubeMap`. Its dedicated native SSR surface capture also has a separate
+reflection/transmission receiver route. Coherent currently reads the ordinary
+prepass; it has no independent transparent-window receiver depth, normal,
+coverage and material layer. Underlying opaque depth/material data cannot
+reliably substitute for that glass surface. Increasing global SSR intensity or
+making glass opaque would not be a correct window-reflection fix.
+
+The installed native sun/vehicle shadow lookup (`calcShadowPSSM` /
+`calcShadowVehicle` in `common/lighting/shadowMap/shadowMapPSSM.hlsl`) returns
+scalar depth visibility, not RGB glass transmittance. The inspected stock
+`pickup_glass` declarations in `common.zip` already request `dynamicCubemap=true`,
+declare `translucent=true`, and set `castShadows=false`. Those examples establish
+native reflection support, not proof of the cause on every live vehicle.
+Proper lighter/tinted glass shadows require a transmission-aware light-space
+layer, preserving opaque body/interior occlusion. This patch does not toggle
+glass shadow flags, alter opacity/materials, edit installed shaders, or claim
+that glass reflection/transmission is now implemented.
+
+## v0.125 — LED discovery repair and vehicle-light haze
+
+Prepared LED discovery no longer relies on numeric scene mask `256`. It uses
+the native `SOTStaticShape` constant when available, plus a read-only TSStatic
+class scan that continues past the first 128 results. The incremental scan
+inspects up to 128 entries per update with a soft 2 ms budget after the first
+24, refreshes no more often than five seconds, and caches at most 64 matching
+prepared-asset instances. It does not rescan arbitrary material contents.
+This fixes the first-batch starvation path; it is not proof of the exact live
+rejection behind the earlier 0/2 screenshot.
+
+The tuner now shows inspected/matched/pending counts and rejection stages:
+hidden or render-disabled geometry, source integrity, placement, material fields,
+instance-emission tint, native API errors, duplicate native haze or view distance.
+Material booleans accept native numeric as well as string/boolean forms. Live
+`instanceColor` is honored where `instanceEmissive` is enabled; night/day control
+is not overridden. Coincident same-material emitters are deduplicated. The map
+contains duplicate night-only LED layers, including authored render-disabled
+instances; hidden sources are not forced on to make the counter nonzero.
+The same two prepared LED assets remain supported, with visual alignment and
+photometry still unverified.
+
+Local haze now includes **Vehicle light haze**, enabled when local haze starts
+unless deselected for this session. It uses a separate budget of four light
+sources from up to four nearby vehicles, preserving the existing eight lamp
+spotlights. Spot- and point-light JBeam props are supported, including headlights,
+tail/brake/fog/reverse/indicator lights when authored as actual light props.
+Purely glowing textures and custom lights outside the standard prop path are
+not inferred from body brightness or material names.
+
+The GE helper reads `getProp(pid):getLiveTransformWorld()` each render update,
+adding vehicle translation and using the prop's +Y axis for spot direction,
+following BeamNG's shipped vehicle light debugger. A small on-demand VL helper
+reads the live prop disabled/hidden flags, its exact electrics function and
+authored light settings. It mirrors the shipped props scaling and JBeam
+candela/lumen conversions; it does not change electrics, props or native lights.
+This is a derived approximation, not a readback of final native light radiance.
+Native cookies, shadows, custom controller overrides and flare optics are not
+sampled. Point props use the same eight-sample integration without a cone.
+
+Nearby vehicle selection refreshes every 0.5 s and considers at most 64 registry
+entries. Read-only VL requests are bounded to 10 Hz per tracked vehicle with one
+pending request each; samples expire after 0.35 s. Prop poses update every frame
+so beams do not wait for the lamp detector's 0.25 s upload cadence. Generation
+tokens, monotonic sequence numbers and vehicle identity checks reject stale
+replies, including reset/replacement/disable cases. The VL helper has no update
+hook; disabling haze removes the owned GE callback and stops further requests.
+All vehicle haze is unshadowed, depth-limited scattering and adds GPU/CPU work.
+No native shadow budget, reflection/GI tuning or global fog settings are changed.
+
+Reload once, enable local haze, and check **Active vehicle haze sources** while
+switching car lights on/off and moving. For the LED experiment, enable its own
+checkbox and inspect the new LED rejection status if the count stays zero.
+Offline tests and v005 shader compilation validate CPU/math/lifecycle contracts,
+not live game appearance or frame time.
+
+## v0.124 — material-aware reflection and prepared LED haze experiments
+
+Two independent A/B options are added; both default OFF. Existing ray counts,
+roughness cutoff, reflection strength, PTGI tuning and native materials/lights
+are not changed by enabling either option. Reload the extension once to load
+the new modules and shader cache version.
+
+**Reflections → Look → Native material response (experimental)** reads native
+per-pixel RGB specular reflectance from `#prepass[RT1]`, alongside the existing
+native normal/roughness inputs. A second material/texture library or material-name
+guess is not used. Ordinary surfaces no longer use the legacy global face-on
+blend-mask floor; material reflectance and view angle determine their response.
+Zero-specular material data stays nonreflective even at grazing angles, matching
+the native low-reflectance Fresnel guard. Water and procedural puddles retain
+their existing model, including their legacy face-on control.
+
+The new composition preserves scene direct/diffuse/PTGI lighting and adds a
+bounded material-weighted screen-space reflection. This is NOT exact native
+probe replacement or a full BRDF integration: native probe lighting cannot be
+isolated from the final beauty input, so overlapping native specular can still
+be counted twice. Incorrect native material authoring is not repaired. Ordinary
+surface detail no longer needs the four beauty low-pass taps in this mode.
+It uses the existing trace/history graph and adds no rays or fullscreen pass;
+no measured FPS improvement is claimed.
+
+Native integrated SSR must remain OFF (it can repurpose RT1). This option also
+requires HDR composition and terrain material masking OFF, because Apply's sixth
+texture slot is shared. Conflicting changes are refused, not silently applied.
+Diagnostic views temporarily use their original bindings. Turning the option
+OFF restores legacy composition; restarting preserves the chosen option. Missing
+or invalid material samples retain the original beauty. These are CPU binding
+checks, not proof of live GPU texture contents or the named HDR handoff.
+
+**Lighting & GI → Volumetric lighting experiment → Prepared LED emissive haze**
+is a separate opt-in after local lamp haze is enabled. It supports only the two
+standalone Polish Roads Owlen LED meshes (`owlen_ledy.dae` and
+`owlen_led_budynek.dae`), not the pylon sign, textured logos, arbitrary glowing
+surfaces or vehicle lights. The prepared catalogue contains material-mapped
+triangle quadratures from those installed assets; runtime verifies source size
+and Adler checksum, material identity/emission state/map, live emissive RGB/nits
+and native instance transforms. It creates no native lights and edits no assets,
+materials, global fog or shadow fields.
+Emission uses the live RGB/nits as a uniform approximation over the selected
+geometry; it does not sample the emissive texture per triangle/texel. The known
+red data map is not perfectly uniform, so its variation is not reproduced.
+
+Read-only spatial discovery inspects at most 128 TSStatic query results every
+0.5 seconds or after 4 m movement; at most two emitters are selected. Four
+geometry-oriented area samples per mesh feed four deterministic view-integration
+steps, with 12 m local source reach and the existing 160 m view limit. Nearby
+same-colour native haze samples are suppressed by a conservative proximity
+heuristic, not fixture identity. No bright-pixel emitter detection is used.
+
+This produces **haze only**, not surface illumination or area-light GI. It is
+coarse, unshadowed and uses an uncalibrated nits-to-working-radiance gain; hidden
+blockers may leak, and native visual mesh/pivot alignment still needs an in-game
+check. It does not imply support for every emissive material. The original
+eight-spotlight wide haze remains available unchanged when this option is OFF.
+Disabling/restarting haze, captures and lifecycle stops clear emitter discovery
+and leave emissive haze OFF until explicitly enabled again. Adds GPU work.
+
+Offline tests cover material routing/rollback/conflicts, cold restart, live
+emission validation, source integrity, placement math, nonuniform scale, bounded
+selection, native-source suppression and haze-only lifecycle. Coherent and haze
+shaders compile against installed BeamNG headers. Live appearance, photometry,
+shadow visibility and frame time remain unverified.
+
+## v0.123 — separate wide haze discovery
+
+Nearby native shadow discovery and priority assistance now use 100 m instead of
+80 m, keeping the same eight-light priority budget and native light ranges.
+The existing level-wide automatic `castShadows` eligibility requests are not
+expanded or replaced; nearby distance is not a promise of a GPU shadow view.
+Native shadow selection, atlas budgets and caster materials still apply.
+
+Haze has its own read-only `volumeLights.lua` detector. It does not borrow the
+shadow-prioritized list, require shadow assistance, or write any lamp fields.
+While explicitly enabled, it queries a 180 m camera-centered region and selects
+up to eight supported native spotlights by a bounded brightness/range/distance
+importance estimate. Source spheres wholly behind the camera are rejected;
+off-screen lamps remain eligible because their volumes can enter the image.
+This is not an exact visible-contribution estimator. Invalid, disabled, replaced
+and out-of-range sources are rejected. Native lamp range is never enlarged.
+
+The spatial query refreshes every 0.25 seconds or on movement of 4 m / a camera
+turn. It inspects at most 512 returned entries. If unavailable, a read-only
+incremental class scan processes 24–128 entries per update, with a soft 2 ms
+limit above the first 24; the fallback can take longer to find a new location.
+Status identifies this route, pending checks and the bounded candidate cache.
+No new discovery occurs merely by opening the tuner or while haze is disabled.
+
+The v003 haze shader extends view integration from 50 m to 160 m and supports
+eight lamps, retaining eight deterministic integration samples per intersected
+lamp. Its maximum sampling cost is higher than v002; no FPS improvement is
+claimed. Scene-preserving output and zero-contribution bypass remain intact.
+This provides wider local coverage as the camera travels, not simultaneous
+whole-world rendering. It remains an opt-in, unshadowed approximation: unseen
+blockers can leak. Point lights, vehicle props and emissive surfaces are still
+unsupported. Disable-all, captures, lifecycle changes and inactive rendering
+stop haze and clear its detector; it does not restart shadow requests.
+
+No Coherent material response, reflection strength, roughness, resolution or ray
+count changed here. The material investigation confirms native per-pixel
+roughness/normals are already used; a complete duplicate material/texture library
+is not needed just to consume those properties. A material-specific reflectance
+handoff and composition audit remain separate work; material-name guesses are
+not silently applied to native materials.
+
+CPU tests cover independent read-only discovery, wider shadow priority, camera
+movement/turns, invalid/deleted/recycled lamps, bounded fallback/cache and haze
+lifecycle. The v003 shader compiles offline in both stages. These are not proof
+of live GPU appearance, shadow visibility, frame time or HDR-handoff correctness.
+
+## v0.122.2 — combined restart recovery
+
+Combined startup now recreates PTGI's nested PostEffect graph after safe teardown,
+as well as Coherent's graph. Previously only Coherent was recreated; PTGI reused
+its child passes and cached target/shader-requirement state after being disabled
+and moved between stages. This recovery removes that retained state without
+rebuilding ShaderData, native lights, materials or geometry, or changing saved
+settings. GI/reflection tuning is retained. Repeated enable on an already-active
+pair does not rebuild it. Failed cleanup/construction leaves rendering stopped
+and permits a retry rather than reporting a partially enabled pair as ready.
+
+The optional haze pass now uses beauty in input slot zero and explicitly writes
+scene plus scattering to `$backBuffer`, with blending disabled. A native
+passthrough must preserve the scene, not show the raw normals that previously
+occupied slot zero or add the scene to itself. The cache-busted v002 shader uses
+the depth slot's own UV transform. Haze is still optional, unshadowed and off
+at combined startup; no reduction of ray count, resolution or reflection reach.
+
+CPU regression tests use the actual PTGI child-pass constructors and exercise
+repeated combined off/on, slider edits, retained-child contamination and failed
+restart/retry in Lua 5.1 and LuaJIT. Offline haze VS/PS compilation also passes.
+These checks do not establish the exact native GPU cause or verify the in-game
+fix. Reload BeamRT once, test combined off/on with baseline source and haze off,
+then enable haze and repeat. The named HDR source remains experimental.
+
+## v0.122.1 — combined beauty recovery and source isolation
+
+The user reports that v0.122 can claim both renderers are active while reflections
+are not visibly working. CPU-enabled objects alone do not validate the GPU image.
+The named HDR target is therefore no longer the default. Combined mode defaults
+to the earlier ordered `$backBuffer` route, keeping the same PTGI-before-Coherent
+staging. **Combined pipeline experiments → Try named HDR source** retains the
+explicit-target experiment as a session-only, inactive-only choice for A/B tests.
+The exact visual regression remains unconfirmed; this is a baseline recovery and
+isolation change, not proof that VL or the named target caused the reported image.
+
+Starting combined mode now restores GI ray/lighting diagnostics and Coherent's
+debug display to beauty after capture guards and safe teardown. Previously a
+retained Coherent debug view could make startup fail the combined beauty contract,
+and GI debug modes were rejected rather than cleared. No sampling or appearance
+settings are reset. Enabling Coherent manually while GI is active now joins them
+through combined startup instead of taking the standalone path that disables GI.
+Repeated enable on a complete combined graph is idempotent.
+
+Volumetrics remain off whenever combined rendering starts (normal safe teardown
+stops them first). Test the baseline without haze, then opt into haze or named HDR
+one at a time. **Log combined pipeline state** is a read-only CPU report of actual
+pass enablement, stages, shader, source/aux textures and targets, plus diagnostic
+and haze state. It is not a GPU readback. An incomplete combined graph logs this
+report before stopping, where serialization is available. Live recovery still
+needs an in-game comparison.
+
+## v0.122 — explicit PTGI handoff and local haze experiment
+
+Combined rendering now gives Coherent an explicit current-frame scene producer:
+native scene → PTGI compose → `#BeamRT_PTGI_LitScene` → Coherent color pyramid,
+trace/rebuild, and final composition. PTGI composition writes a full-resolution
+RGBA16F HDR target instead of the generic `$backBuffer` in combined mode only.
+No extra copy/blit pass is added. The early shared depth pyramid still runs
+before PTGI and deliberately keeps its native source; it must not read a target
+that has not been produced yet. Each renderer retains its own history. This is
+one-way lit-radiance sharing, not shared ray hits, a unified denoiser, or recursive
+multi-bounce transport. CPU binding/order checks stop both on producer/consumer
+loss; actual current-frame GPU execution and improved appearance remain unverified.
+Disable restores the PTGI target fields and standalone Coherent scene binding.
+
+Quality-neutral CPU reductions format vehicle-motion vectors once, suppress
+identical native uniform uploads per owned pass, and avoid a duplicate Coherent
+history reset on combined lamp updates. No ray count, resolution, trace reach,
+history precision, roughness cutoff or lighting-strength preset was reduced.
+There is no measured in-game FPS improvement claim.
+
+**Lighting & GI → Volumetric lighting experiment → Try local lamp haze** is
+explicit opt-in and starts no renderer. Start GI/Coherent first; keep automatic
+lamp shadows and nearby priority enabled. It reads up to four selected native
+SpotLights (color, brightness, cone, range and transform), without changing them.
+A separate HDR pass after Coherent integrates an optically thin scattering
+approximation with eight deterministic midpoint samples per lamp, up to 50 m
+and the visible surface depth. The original v001 added scattering with One/One
+blending; v0.122.2 supersedes that output path with a scene-preserving replacement
+composition. No animated noise, accumulation or global fog
+edits; it stays outside GI/SSR histories and is not itself reflected by SSR.
+It adds GPU work when active and disables its pass when no supported lamp is
+available or brightness/density is zero. Point lights, vehicle props, emissive
+geometry and lamps without readable fields are not supported by this prototype.
+
+**This is not shadowed volumetrics.** Native shadow-atlas visibility is not
+bound. Visible foreground depth ends the camera ray, but walls or pipes between
+the lamp and a scattering point can still leak light. This is an appearance
+experiment, not a replacement for the native lamp shadows or physically
+calibrated photometric transport. Test around factory pipes before expanding it.
+Disable-all, mission/settings changes, extension reload/unload, pass loss and
+active captures stop it; it does not silently resume. Cleanup failures retain
+owned objects for an explicit retry. Live GPU behavior still needs testing.
+
+Offline shader check for this experiment:
+`tools/tests/validate_postfx_shaders.py --volumes --game-root <installed-game> --compiler <fxc>`.
+
+## v0.121.2 — low-FPS nearby shadow discovery
+
+Nearby lamp discovery no longer waits behind the level-wide queue when the
+native `findObjectList` / `SOTLight` spatial query is available. Before background
+inspection, it requests an 80 m camera-centered box, inspects at most 256 hits,
+and processes the nearest 16 supported enabled lamps through the same ownership
+and rollback path. Priority still selects at most eight. It refreshes on the
+next update after moving 4 m, or every 0.25 seconds while stationary. Missing or
+rejected native queries fall back to incremental discovery; status identifies
+which route is active. Opening the tuner still makes no shadow writes.
+
+Background throughput now scales with real frame time: 24–192 inspections and
+16–128 validations per update, with a soft 2 ms CPU limit on extra work above
+the original 24/16 minimums. This avoids making a 15 FPS player wait through a
+strict 24-per-frame queue, without synchronously flushing thousands of writes.
+Individual native calls and the spatial query cannot be preempted by that limit.
+Native shadow allocation/rendering remains engine-controlled: this removes our
+queue delay for nearby query hits, not a promise of instant or cheaper GPU
+shadows. Low-FPS live behavior still needs an in-game comparison.
+
+## v0.121.1 — outdoor shadow-selection assistance
+
+The v0.121 automatic path raised every smaller lamp shadow map to 1024. This
+does not guarantee GPU selection and can add pressure to the installed renderer's
+finite 8192² clustered shadow atlas. Automatic mode now preserves native map
+sizes for distant lamps while still requesting `castShadows` level-wide.
+
+**Nearby shadow priority** (Lighting & GI → Automatic lamp shadows) defaults ON.
+Once per second, up to eight enabled lamps within 80 m of the camera receive a
+reversible `priority` boost (+4 from their captured baseline), when that native
+field is advertised and accepts the write. Nearby spot maps are raised to at
+least 1024, point maps to 512; existing larger maps are preserved. Moving away
+or turning the assist off restores owned map/priority values but leaves global
+shadow requests active. Object changes and other field owners are respected.
+
+This helps the native light manager choose camera-relevant lamps; it does not
+create more atlas capacity or repair non-casting materials. It is a hypothesis
+for missing outdoor shadows, not proof that the photographed box/barrier is
+fixed. No material flags, ambient light, intensity, color or global graphics
+quality are changed. The original factory result was user-confirmed; the new
+outdoor behavior still needs an in-game comparison.
+
+The repeated thousands counter is now labeled **Discovery checks**, not pending
+new lights/maps. Periodic rescans normally perform no new shadow-field writes.
+**Log nearby light shadow inputs** writes a bounded read-only report of up to
+12 nearby light objects and their advertised native shadow fields to the game
+log. These CPU fields do not prove GPU atlas allocation or material casting.
+
+## v0.121 — automatic native lamp shadows
+
+The previously tested native-lamp shadow request now starts automatically with
+GI, Coherent, or combined rendering. There is **no four-light or camera-radius
+limit** in automatic mode: every supported scene PointLight/SpotLight is
+processed, including currently switched-off lights so their shadows are ready
+when they turn on. This does not enable lights or alter their brightness, color,
+range, direction or global graphics settings. It requests `castShadows` and
+raises smaller advertised per-light shadow maps to 1024, retaining higher sizes.
+
+Discovery/inspection is limited to 24 lights per frame and ownership validation
+to 16 lights per frame. Rescans discover new/replaced lights every five seconds
+once the previous queue finishes. Large maps take time to populate. Lua queues
+are incremental; native shadow-map allocation/rendering can still cost GPU
+time. The engine's visibility, shadow budgets and material caster rules still
+limit actual rendered shadows; requesting every light is not unlimited GPU
+shadow support. Embedded vehicle lights not exposed as scene PointLight or
+SpotLight objects are outside this scanner.
+
+Lighting & GI → **Automatic lamp shadows** shows progress and offers a disable/
+restore button. Automatic mode defaults ON at renderer startup; opting out lasts
+for the current session. Disable-all restores owned native fields and does not
+restart by itself; the next renderer start resumes automatic mode unless opted
+out. Mission/settings/unload restore as before. Captures/audits pause automatic
+updates, and conflicting field owners are left alone instead of repeatedly
+overwritten. Restoration failures retain their rollback lease.
+
+No map files, native DLLs or shader hooks are changed. The user confirmed the
+original nearby experiment's visual benefit; level-wide cost and appearance
+still need live verification. The old fixed-cohort diagnostic API remains
+available as `setNearbyLampShadowsEnabled(true)`, but the normal tuner now uses
+automatic mode via `setAutomaticLampShadowsEnabled(true/false)`.
+
+## v0.120.2 — nearby native lamp-shadow experiment
+
+In Lighting & GI, open **Nearby lamp shadows (native experiment)** and choose
+**Try nearby lamp shadows**. This explicitly requests native `castShadows` on
+up to four enabled PointLight/SpotLight objects within 30 m of the camera. Smaller
+advertised shadow maps are raised to 1024; higher sizes remain unchanged. The
+selected lamp names/distances are shown. This fixed selection does not follow
+the camera: restore, then try again at a different location.
+
+**Restore lamp shadows** restores original owned values. Disable-all, graphics
+changes, mission changes and unload also restore them. Restoration failures keep
+their lease for retry; replaced objects and externally changed fields are never
+overwritten. This does not save a level, alter global quality/budgets, replace
+shaders, create lights or change their brightness, color, range or direction.
+
+This is separate from the still-unconnected custom clustered mesh-light hook.
+Native shadow budgets, graphics quality, disabled caster materials, and light
+placement may still prevent the pipe/support shadows. Already-shadowed lamps
+are reported without pretending a change occurred. GPU execution and appearance
+must be checked in-game; control tests do not establish visual success.
+
+## v0.120.1 — receiver color and coverage experiments
+
+Lighting & GI has a collapsed **GI color and coverage experiments** section:
+
+- **Try de-lit receiver color** estimates material tint after dividing out direct
+  light color, rather than tinting arriving GI with the already-lit orange/brown
+  scene color again. It keeps the existing scalar reflectance, F0/roughness gates,
+  source-light color, Bounce color and GI strength controls. The new chroma has
+  unit luminance; this can recover energy lost by the old peak-normalized tint.
+  This is an approximate albedo estimate, not a physical material-buffer fix.
+  Default OFF; **Restore original receiver color** restores the baseline.
+- **Try wider DDA coverage** doubles the current screen stride, retaining the
+  same sample count, world reach and validation. Select Screen DDA first. It may
+  skip thin geometry; more coverage is not automatically more correct. **Undo**
+  restores the exact previous stride. Linear and Coherent traversal are unchanged.
+
+Neither action starts a renderer, changes presets, desaturates the entire GI,
+or edits native water/reflections. Receiver strength is included in explicit
+tuning saves and audit manifests; the DDA undo snapshot is session-only. Test
+each option separately before combining them. Warm lights should remain warm.
+Offline shader/control tests are not in-game appearance verification.
+
+## v0.120 — opt-in PTGI + Coherent reflections
+
+In **Lighting & GI**, choose **Enable PTGI + Coherent** for the experimental
+combined path. PTGI diffuse lighting is composed before Coherent captures its
+reflection source; the older BeamRT SSR stays off. The original stages are
+restored on disable. New six/eight-ray controls sit between four and sixteen,
+with six now the default. Existing material, water and GI tuning is retained.
+
+The audit also repairs GI history invalidation after long frame gaps and links
+GI changes to reflection-history resets while combined. CPU graph checks and
+offline shader/GPU tests do not establish combined appearance or performance in
+BeamNG. See [combined mode and audit notes](native/lighting/COHERENT_SSR.md#v0120-ptgi--coherent-and-intermediate-ray-counts).
+
+## v0.119.1 — parked-vehicle accumulation repair
+
+Parked cars no longer receive the moving-vehicle history-refresh floor merely
+because their rigid pose is available. GPU regressions reproduce the old failure
+and check parked, jittering, translating and rotating receivers. Temporal
+accumulation OFF freezes noisy samples; ON advances and averages them. In-game
+appearance still requires comparison. See [the repair notes](native/lighting/COHERENT_SSR.md#v01191-parked-vehicle-accumulation-repair).
+
+## v0.119 — high-sample reflection cleanup
+
+The Reflections tab now has a reversible **Apply high-sample cleanup (slow)**
+action: full-resolution sixteen-ray sampling and temporal accumulation, without
+changing brightness, material reflectivity or stock water color. Four-ray sampling
+is the new default. Mature history now honors requested retention, and the tuner
+warns when accumulation is off. This is still screen-space rendering; zero noise
+and off-screen reflections are not guaranteed. In-game appearance is unverified.
+See [Coherent SSR notes](native/lighting/COHERENT_SSR.md#v0119-high-sample-cleanup)
+for changes, checks and the stillness/motion comparison.
+
+# BeamRT v0.108 — native device bootstrap and honest feature availability
+
+The offline no-ReShade worker now supports exact-adapter device acquisition and
+resource-owner identity checks. These passed on the RTX 4070 and WARP; they do
+not establish a game attachment or expose game depth/lighting resources.
+The tuner now labels blocked underground local-light visibility unavailable,
+with no failing activation button. Existing rendering/fallback stays intact.
+See [NATIVE_DEVICE_BOOTSTRAP_V0108.md](NATIVE_DEVICE_BOOTSTRAP_V0108.md).
+
+## v0.107 — reliable native-noise baseline (retained)
+
+The rejected experimental DDS atlas is no longer a mandatory startup input.
+Custom STBN selection now reports unavailable; native BeamNG noise is preserved.
+No reflection/GI filter, sampling sequence, lighting strength or geometry tracing
+changed. This handles a failed optional resource; it does not fix STBN loading
+or promise less reflection noise. See [NOISE_SOURCE_V0107.md](NOISE_SOURCE_V0107.md).
+
+## Native worker progress / current reload (2026-10-11)
+
+A no-ReShade D3D12 GPU worker is now implemented and validated **offline** using
+the existing real guardhouse BVH. It is not attached to BeamNG and does not alter
+the running renderer. No native DLL, loader or injector has been installed.
+See [native/worker/README.md](native/worker/README.md) for exact results/limitations.
+That offline-worker batch left runtime v0.106 unchanged; the subsequent optional
+noise-resource handling update is retained in current runtime v0.108.
+
+For future Lua/HLSL updates, this full GE Lua reload preserves unsaved tuning,
+unloads BeamRT extensions before clearing their helper-module cache, and recreates
+the main effects. Experimental native-shadow hooks stay off; it never loads a DLL:
+
+```lua
+do local saved=beamrt_main and beamrt_main.getSettings(); local loaded=extensions.getLoadedExtensionsNames(); if beamrt_main then beamrt_main.disable() end; extensions.unload("beamrt_main"); for _,name in ipairs(loaded) do if name:match("^beamrt_") then extensions.unload(name) end end; for key in pairs(package.loaded) do if type(key)=="string" and key:match("^ge/extensions/beamrt/") then package.loaded[key]=nil end end; extensions.load("beamrt_main"); if saved then beamrt_main.applySettings(saved); beamrt_main.enable(); beamrt_main.openTuner() else beamrt_main.start() end end
+```
+
+---
+
+# BeamRT v0.103 — shared material-aware mesh visibility for GI
+
+Full imported guardhouse geometry now has an opt-in WORLD-surfel GI visibility
+path using live native opaque declarations, rather than only a debug preview.
+Screen GI and native lighting stay on their existing paths; unsupported opacity
+and unavailable data fall back. No final-scene darkening pretends to replace shadows.
+
+This batch also removes leftover magenta returns, restores existing reflection
+composition/filter code, makes variance OFF remove its three experiment passes,
+and fixes stale visibility-provider lookup. Local regressions and compilation pass;
+live GPU loading, appearance and frame cost are not yet verified.
+
+One normal-render activation and exact scope:
+[SHARED_MESH_GI_MILESTONE.md](SHARED_MESH_GI_MILESTONE.md).
+
+---
+
+# BeamRT v0.102 — one-building GPU BVH preview
+
+Full imported guardhouse geometry now has an isolated GPU BVH traversal path,
+not a 12-triangle truncation or box proxy. Live GPU correctness is still pending.
+In GE Lua, while parked near the current alignment capture:
+
+```lua
+extensions.load("beamrt_meshBVH"); beamrt_meshBVH.setQuality("cinematic"); beamrt_meshBVH.setTestLightEnabled(true); beamrt_meshBVH.enable()
+```
+
+Native scene is left; geometry intersections right. Orange = mesh blocks a ray
+to a fixed **synthetic test light**, green = no hit against this mesh, magenta =
+data failure. This is geometry proof, not finished lighting or alpha-aware shadows.
+No scene light/time change, GI/reflection toggle, or camera move occurs.
+Stop with `beamrt_meshBVH.disable()`. Details: [MESH_BVH_MILESTONE.md](MESH_BVH_MILESTONE.md).
+
+---
+
+# BeamRT v0.102 — real building alignment preview
+
+The next geometry milestone is implemented: a selected real West Coast guardhouse
+visual mesh, node-transform-aware extraction, material references, native instance
+placement and an isolated wireframe alignment check. No GI/shadow/reflection changes
+are activated. Actual in-game alignment and GPU mesh tracing remain unverified.
+
+In GE Lua while parked in West Coast USA:
+
+```lua
+extensions.load("beamrt_meshAlignment"); beamrt_meshAlignment.previewNearest(); dump(beamrt_meshAlignment.getStatus())
+```
+
+The nearest **prepared guardhouse** instance is selected; it may not be in the
+current view. Orange edges are real mesh triangles, not box shadows. Hide with
+`beamrt_meshAlignment.setMode("off")`, or clear with `beamrt_meshAlignment.clear()`.
+Optional `beamrt_meshAlignment.focusPreview()` takes only the free camera to it;
+`beamrt_meshAlignment.restoreCamera()` returns to the previous camera mode.
+Details, private package reproduction, evidence and limits:
+[MESH_ALIGNMENT_MILESTONE.md](MESH_ALIGNMENT_MILESTONE.md).
+
+---
+
 # BeamRT v0.101 — reflection source isolation
 
 No new denoiser or claimed noise fix. Tests original SSR input, native-only color,
@@ -1259,6 +2185,26 @@ Search for `BeamRT`, `v012`, `beamrtSurfelCache`, `beamrtGITrace`, `compile`, an
 4. Inspect `beamng.log` for BeamRT Lua errors or another mod failing earlier during initialization.
 
 ## Scope boundary
+
+### v0.104 real-mesh sunlight integration (opt-in)
+
+v0.106 prepares actual WCU underground meshes and stages a direct world-mesh query
+inside the legacy native point/spot light passes. This build also exposes clustered
+compute lighting, whose integration is still blocked by its binding interface;
+the legacy hook refuses activation there. **Not yet a verified headlight/sewer
+fix.** See [scope and required binding-interface lookup](UNDERGROUND_LOCAL_LIGHTS_V0106.md).
+
+v0.105 corrects vehicle-light acquisition across driving/walking and replaces the
+unsafe cached-shader filename swap with private shader objects/material rebinding.
+These are implementation fixes, **not verified headlight/sewer shadow fixes**.
+See [scope, evidence and next integration milestone](LIGHT_VISIBILITY_V0105.md).
+
+The guardhouse BVH now has an actual native direct-sun shading hook, not only a
+colored preview. Native shadows remain; unknown/alpha materials fall back. GI/SSR
+algorithms are preserved. Default OFF; GPU execution, off-screen appearance and
+cost remain unverified. See [implementation and one normal-render activation](MESH_SUN_SHADOW_MILESTONE.md).
+The native hook is generated privately from the local installation; its source
+is not included in Git and must be prepared when moving to another PC/game version.
 
 Phase 4 intentionally departs from v0.004's single-pass design because previous-frame data requires persistent intermediate targets. All added objects and targets are uniquely BeamRT-prefixed and are removed when the extension unloads. No base-game files are changed.
 

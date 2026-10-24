@@ -15,6 +15,13 @@ local captures = {
 }
 
 local function mainModule() return extensions and extensions.beamrt_main or beamrt_main end
+local function rendererCompatible(main)
+  local ok,status=pcall(function()
+    if not main or type(main.getRendererCompatibilityStatus)~='function' then return nil end
+    return main.getRendererCompatibilityStatus()
+  end)
+  return ok and type(status)=='table' and status.safe==true
+end
 local function report(level, message) if log then log(level, 'BeamRT.Convergence', message) end end
 local function checked(fn, ...)
   local ok, result = pcall(fn, ...)
@@ -155,6 +162,7 @@ function M.start()
   if not main or type(main.setReflectionConvergenceEnabled)~='function' then
     report('E','Load BeamRT v0.100 before starting convergence.');return false
   end
+  if not rendererCompatible(main) then report('W','Renderer compatibility is unverified; convergence refused.');return false end
   if main.getReflectionConvergenceEnabled() then report('E','Another raw convergence gate is already active.');return false end
   if main.getLightingAuditStatus().active then report('E','Finish the current lighting audit first.');return false end
   local ok,api=pcall(require,'screenshot')
@@ -199,8 +207,9 @@ end
 function M.onPreRender(dtReal)
   local run=active;if not run then return end
   local ok,err=pcall(function()
-    if cameraMoved(run.camera) then error('camera/FOV/resolution moved; reference cancelled',0) end
     local main=mainModule()
+    if not rendererCompatible(main) then error('renderer compatibility changed; convergence cancelled',0) end
+    if cameraMoved(run.camera) then error('camera/FOV/resolution moved; reference cancelled',0) end
     local selection=main.getReflectionSamplingState()
     if main.getLightingAuditStatus().active or selection.frozen or selection.name~='ggx'
       or main.getReflectionReconstructionState().name~='playable' or main.getLightingAuditState().mode~='reflections' then

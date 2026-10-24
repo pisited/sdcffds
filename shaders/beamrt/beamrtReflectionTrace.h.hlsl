@@ -22,6 +22,13 @@ cbuffer perDraw : register(b0)
     uniform float reflectionMaxSteps;
     uniform float reflectionMaxDistance;
     uniform float reflectionMaxRoughness;
+#ifdef BEAMRT_SSSR_FORK_LAB
+    // x: optional lookup budget (0 retains normal); y: physical reach override.
+    uniform float2 reflectionForkWork;
+#endif
+#ifdef BEAMRT_REFLECTION_SOURCE_RECONSTRUCTION
+    uniform float reflectionSourceReconstructionEnabled;
+#endif
 #ifdef BEAMRT_REFLECTION_TUNING
     uniform float reflectionSampleCellPixels;
     uniform float reflectionNoiseSeed;

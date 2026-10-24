@@ -11,6 +11,13 @@ local cases={
   {name='frozen-GI',target='#BeamRT_SourceProbeFrozen',source='#BeamRT_SourceProbeFrozen'},
 }
 local function main() return extensions and extensions.beamrt_main or beamrt_main end
+local function rendererCompatible(m)
+  local ok,status=pcall(function()
+    if not m or type(m.getRendererCompatibilityStatus)~='function' then return nil end
+    return m.getRendererCompatibilityStatus()
+  end)
+  return ok and type(status)=='table' and status.safe==true
+end
 local function obj(name) return scenetree.findObject(prefix .. name) end
 local function logResult(level,s) if log then log(level,'BeamRT.SourceProbe',s) end end
 local function checked(fn,...)
@@ -122,6 +129,7 @@ function M.start()
   if active then return false end
   local m=main()
   if not m or type(m.setReflectionSourceProbeTarget)~='function' then logResult('E','Load BeamRT v0.101 first');return false end
+  if not rendererCompatible(m) then logResult('W','Renderer compatibility is unverified; source probe refused.');return false end
   if m.getReflectionSourceProbeTarget()~=nil then logResult('E','Another source override is active');return false end
   if m.getLightingAuditStatus().active or m.getReflectionConvergenceEnabled()
     or extensions and extensions.beamrt_reflectionConvergence and extensions.beamrt_reflectionConvergence.getStatus().active then
@@ -155,8 +163,9 @@ end
 function M.onPreRender(dtReal)
   local run=active;if not run then return end
   local ok,err=pcall(function()
-    if moved(run.camera) then error('camera/FOV/resolution moved',0) end
     local m=main()
+    if not rendererCompatible(m) then error('renderer compatibility changed; source probe cancelled',0) end
+    if moved(run.camera) then error('camera/FOV/resolution moved',0) end
     if m.getLightingAuditStatus().active or m.getReflectionSamplingState().frozen or m.getLightingAuditState().mode~='lighting'
       or m.getReflectionSamplingState().name~='ggx' or m.getReflectionReconstructionState().name~='playable' then error('render selection changed',0) end
     local dt=tonumber(dtReal) or 0;if dt~=dt or dt<0 or dt==math.huge then dt=0 end

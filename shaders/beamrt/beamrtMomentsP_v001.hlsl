@@ -58,7 +58,9 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         float depthConfidence = 1.0 - smoothstep(safeTolerance, safeTolerance * 4.0, relativeDepthDelta);
         float velocityConfidence = 1.0 - smoothstep(32.0, 96.0, velocityPixels);
         float confidence = depthConfidence * velocityConfidence;
-        if (confidence > 0.0001 && previous.b > 0.5)
+        // Invalid statistics restart this pixel instead of poisoning all
+        // subsequent variance/history estimates, even with matching depth.
+        if (all(isfinite(previous)) && confidence > 0.0001 && previous.b > 0.5)
         {
             float maxHistory = clamp(momentsMaxHistory, 1.0, 256.0);
             historyLength = min(previous.b + 1.0, maxHistory);
@@ -79,6 +81,9 @@ PFXVertToPix mainV(PFXVert IN)
     return processPostFxVert(IN);
 }
 
+/* Historical GGX reflection-moments example, not this GI shader's executable
+   code. The reflection pass is implemented in beamrtReflectionMomentsP_v001.
+   Keep this example as documentation: its names are not GI shader bindings.
 float3 radiance = max(
     tex2D(currentReflectionTex, IN.uv0).rgb,
     0.0
@@ -103,3 +108,4 @@ float variance = max(
     accumulatedMoments.x * accumulatedMoments.x,
     0.0
 );
+*/

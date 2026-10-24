@@ -100,6 +100,7 @@ local function writeManifest(run, outcome, reason)
       reflectionDiagnosticMode = run.saved.state.reflectionDiagnosticMode},
     originalReflectionDiagnostic = run.saved.reflectionDiagnostic,
     originalReflectionSampling = run.saved.reflectionSampling,
+    originalReflectionRenderer = run.saved.reflectionRenderer,
     reflectionSamplingRestorePolicy = "Selected mode/settings restored; SSR history and sequence restart intentionally.",
     stages = run.captures,
     auditType = run.kind, restored = run.restored}
@@ -170,6 +171,10 @@ function M.start(main, includeInputs)
   if type(main.getReflectionSamplingState) == "function" then
     saved.reflectionSampling = main.getReflectionSamplingState()
   end
+  saved.reflectionRenderer = {
+    fork = type(main.getSsrForkStatus) == "function" and main.getSsrForkStatus() or nil,
+    lab = type(main.getReflectionLabStatus) == "function" and main.getReflectionLabStatus() or nil,
+  }
   if type(main.getTextureBindingStatus) == "function" then
     saved.textureBindings = main.getTextureBindingStatus()
   end
@@ -242,6 +247,10 @@ function M.update(main, dtReal)
       if type(main.getReflectionSamplingState) == "function" then
         run.pending.reflectionSampling = main.getReflectionSamplingState()
       end
+      run.pending.reflectionRenderer = {
+        fork = type(main.getSsrForkStatus) == "function" and main.getSsrForkStatus() or nil,
+        lab = type(main.getReflectionLabStatus) == "function" and main.getReflectionLabStatus() or nil,
+      }
       -- Direct tracked capture does not collect player/camera/system metadata.
       run.job = run.screenshot.createScreenshotTracked({filename = filename,
         writeJPG = false, superSampling = 1, tiles = 1, overlap = 0,

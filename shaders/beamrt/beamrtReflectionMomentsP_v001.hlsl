@@ -32,14 +32,18 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
 {
     float4 receiver = decodeGBuffer(
         TEX_SAMPLER(prepassDepthTex), TEX_SAMPLER(prepassTex), IN.uv1, projParams);
-    float roughness = max(tex2D(prepassTex, IN.uv1).b, 0.02);
+    float4 packedReceiver = tex2D(prepassTex, IN.uv1);
+    float roughness = max(packedReceiver.b, 0.02);
     // Do not use raw trace alpha as a validity boolean: hit-aware GGX
     // packs a hit UV in alpha, and accepted dark hits have zero RGB.
-    if (receiver.w >= 0.9999 || roughness >= max(reflectionMaxRoughness, 0.021)
+    if (!all(isfinite(receiver)) || !all(isfinite(packedReceiver)) || receiver.w <= 0.0
+        || receiver.w >= 0.9999 || roughness >= max(reflectionMaxRoughness, 0.021)
         || dot(receiver.xyz, normalize(-IN.wsEyeRay)) <= 0.001)
         return 0.0;
 
-    float3 rawRadiance = max(tex2D(currentReflectionTex, IN.uv0).rgb, 0.0);
+    float4 rawSample = tex2D(currentReflectionTex, IN.uv0);
+    if (!all(isfinite(rawSample))) return 0.0;
+    float3 rawRadiance = max(rawSample.rgb, 0.0);
     float L = dot(rawRadiance, float3(0.2126, 0.7152, 0.0722));
     float2 sampleMoments = float2(L, L * L);
     float2 accumulated = sampleMoments;
@@ -61,7 +65,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         float depthConfidence = 1.0 - smoothstep(tolerance, tolerance * 4.0, relDepth);
         float velocityConfidence = 1.0 - smoothstep(12.0, 96.0, velocityPixels);
         float confidence = depthConfidence * velocityConfidence;
-        if (prev.b >= 1.0 && prev.a > 0.0 && confidence > 0.001)
+        if (all(isfinite(prev)) && prev.b >= 1.0 && prev.a > 0.0 && confidence > 0.001)
         {
             float maxHistory = clamp(reflectionMomentsMaxHistory, 2.0, 128.0);
             historyLength = min(prev.b + 1.0, maxHistory);

@@ -1,0 +1,4 @@
+; Test-only unresolved dependency. Never build or install the corresponding DLL.
+LIBRARY beamrt_deliberately_absent_fixture_dependency.dll
+EXPORTS
+    BeamRT_MissingFixtureDependency

@@ -6,6 +6,49 @@
 #ifdef BEAMRT_REFLECTION_HIT_AWARE
 #include "beamrtReflectionHitPacking.h.hlsl"
 #endif
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+#include "beamrtReflectionReceiverHistory.h.hlsl"
+
+bool beamrtReflectionInputsLayoutValid()
+{
+    if (reflectionHitAwareEnabled <= 0.5) return true;
+    if (!beamrtReceiverLogicalSizeValid(targetSize)) return false;
+    uint width, height;
+    velocityTexTex.GetDimensions(width, height);
+    return width == uint(targetSize.x) && height == uint(targetSize.y * 2.0);
+}
+
+float4 beamrtReflectionMotionInputs(float2 transformedUV)
+{
+    float4 result = velocityTexTex.SampleLevel(velocityTex_sampler_, transformedUV, 0);
+    uint width, height;
+    velocityTexTex.GetDimensions(width, height);
+    int2 logicalSize = max(int2(targetSize), int2(1, 1));
+    if (reflectionHitAwareEnabled > 0.5)
+    {
+        result = 0.0;
+        if (width == uint(logicalSize.x) && height == uint(logicalSize.y * 2))
+        {
+            float2 viewportUV = (transformedUV - rtParams3.xy) / rtParams3.zw;
+            int2 pixel = clamp(int2(viewportUV * logicalSize), int2(0, 0), logicalSize - 1);
+            result = velocityTexTex.Load(int3(pixel, 0));
+        }
+    }
+    return result;
+}
+
+float beamrtReflectionPreviousReceiverConfidence(int2 pixel, float3 normalWS,
+    float roughness, float3 specular)
+{
+    uint width, height;
+    velocityTexTex.GetDimensions(width, height);
+    int2 logicalSize = max(int2(targetSize), int2(1, 1));
+    if (width != uint(logicalSize.x) || height != uint(logicalSize.y * 2)
+        || any(pixel < 0) || any(pixel >= logicalSize)) return 0.0;
+    float4 descriptor = velocityTexTex.Load(int3(pixel + int2(0, logicalSize.y), 0));
+    return beamrtReceiverHistoryConfidence(descriptor, normalWS, roughness, specular);
+}
+#endif
 
 #ifdef SHADER_STAGE_VS
     #define mainV main
@@ -20,7 +63,11 @@ float beamrtMaxAbs3(float3 value)
 }
 
 #ifdef BEAMRT_REFLECTION_COLOR_FILTER
-float3 beamrtReflectionHistoryColor(float2 uv, float depth, bool currentHit, float3 fallback)
+float3 beamrtReflectionHistoryColor(float2 uv, float depth, bool currentHit, float3 fallback
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+    , float3 normalWS, float roughness, float3 specular, bool validateReceiver
+#endif
+)
 {
     float2 position = uv * targetSize - 0.5;
     int2 base = int2(floor(position));
@@ -35,12 +82,21 @@ float3 beamrtReflectionHistoryColor(float2 uv, float depth, bool currentHit, flo
         if (all(p >= 0) && all(p < size))
         {
             float4 history = historyReflectionTexTex.Load(int3(p, 0));
+            if (!all(isfinite(history))) continue;
             bool valid = currentHit ? abs(history.a) > 0.000001 : history.a > 0.000001;
             float error = abs(abs(history.a) - depth) / max(depth, 0.0001);
             float tolerance = max(reflectionHistoryDepthTolerance, 0.0001);
             float2 axis = lerp(1.0 - phase, phase, float2(x, y));
             float weight = valid ? axis.x * axis.y
                 * (1.0 - smoothstep(tolerance, tolerance * 4.0, error)) : 0.0;
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+            if (validateReceiver)
+            {
+                float receiverWeight = beamrtReflectionPreviousReceiverConfidence(p, normalWS, roughness, specular);
+                if (!(receiverWeight > 0.0)) continue;
+                weight *= receiverWeight;
+            }
+#endif
             sum += history.rgb * weight;
             weights += weight;
         }
@@ -72,7 +128,11 @@ float beamrtHitSourceHistoryConfidence(float4 previousInputs, float currentPacke
     if (beamrtHasHitUV(currentPacked))
     {
         float2 hitUV = beamrtUnpackHitUV(currentPacked);
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+        float2 sourceVelocity = beamrtReflectionMotionInputs(viewportCoordToRenderTarget(hitUV, rtParams3)).xy;
+#else
         float2 sourceVelocity = tex2D(velocityTex, viewportCoordToRenderTarget(hitUV, rtParams3)).xy;
+#endif
         confidence *= 1.0 - smoothstep(0.35, 3.0, length(sourceVelocity * imageSize));
     }
     // Old screen coordinates are meaningful only while the camera is still.
@@ -80,7 +140,11 @@ float beamrtHitSourceHistoryConfidence(float4 previousInputs, float currentPacke
     if (stationaryCamera && beamrtHasHitUV(previousInputs.z) && previousInputs.w > 0.0)
     {
         float2 hitUV = beamrtUnpackHitUV(previousInputs.z);
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+        float2 sourceVelocity = beamrtReflectionMotionInputs(viewportCoordToRenderTarget(hitUV, rtParams3)).xy;
+#else
         float2 sourceVelocity = tex2D(velocityTex, viewportCoordToRenderTarget(hitUV, rtParams3)).xy;
+#endif
         confidence *= 1.0 - smoothstep(0.35, 3.0, length(sourceVelocity * imageSize));
         // One-pixel neighborhood protects quantized UV and depth-edge samples.
         // A disoccluded old source must disagree at ALL five probes to reject.
@@ -100,6 +164,7 @@ float beamrtHitSourceHistoryConfidence(float4 previousInputs, float currentPacke
 float4 mainP(PFXVertToPix IN) : SV_Target0
 {
     float4 rawCurrent = tex2D(currentReflectionTex, IN.uv0);
+    if (!all(isfinite(rawCurrent))) return 0.0;
     float4 centerPacked = tex2D(prepassTex, IN.uv1);
     float4 centerDecoded = decodeGBuffer(
         TEX_SAMPLER(prepassDepthTex),
@@ -176,6 +241,9 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         float2 offsetPixels = filterOffsets[tapIndex] * filterRadiusPixels;
         float2 offset = offsetPixels * oneOverTargetSize;
         float4 sampleReflection = tex2D(currentReflectionTex, IN.uv0 + offset);
+        // Unsupported/zero-weight neighbors must not poison the sum through
+        // Inf*0 or NaN*0. Valid zero GGX samples remain in the denominator.
+        if (!all(isfinite(sampleReflection))) continue;
         float4 samplePacked = tex2D(prepassTex, IN.uv1 + offset);
         float4 sampleDecoded = decodeGBuffer(
             TEX_SAMPLER(prepassDepthTex),
@@ -293,14 +361,24 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         neighborhoodMax = rawCurrent.rgb;
     }
 
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+    bool validateReceiverHistory = useHitAware && reflectionReceiverHistoryEnabled > 0.5;
+    bool receiverInputLayoutValid = beamrtReflectionInputsLayoutValid();
+    float2 velocity = beamrtReflectionMotionInputs(IN.uv3).xy;
+#else
     float2 velocity = tex2D(velocityTex, IN.uv3).xy;
+#endif
     float2 previousUv = IN.uv0 + velocity;
     float velocityPixels = length(velocity * targetSize);
 #ifdef BEAMRT_REFLECTION_HIT_AWARE
     float hitSourceConfidence = 1.0;
     [branch] if (useHitAware)
     {
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+        float4 oldHitInputs = beamrtReflectionMotionInputs(IN.uv3);
+#else
         float4 oldHitInputs = tex2D(velocityTex, IN.uv3);
+#endif
         hitSourceConfidence = beamrtHitSourceHistoryConfidence(oldHitInputs, rawCurrent.a,
             reflectionCameraMotion <= 0.0001, targetSize);
     }
@@ -311,7 +389,11 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     float3 historyRadiance = currentRadiance;
     bool historyFresh = false;
     bool historyGrace = false;
-    if (reflectionHistoryValid > 0.5 && previousUvValid && velocityPixels <= 96.0)
+    if (reflectionHistoryValid > 0.5 && previousUvValid && velocityPixels <= 96.0
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+        && receiverInputLayoutValid
+#endif
+    )
     {
         // Lifetime is categorical, so read one exact history texel. Linear
         // filtering could otherwise invent a grace frame between fresh and
@@ -319,6 +401,10 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         int2 historyMaxPixel = max(int2(targetSize) - 1, int2(0, 0));
         int2 historyPixel = clamp(int2(previousUv * targetSize), int2(0, 0), historyMaxPixel);
         float4 history = historyReflectionTexTex.Load(int3(historyPixel, 0));
+        // Do not let rejected history enter a zero-factor lerp. Invalid data
+        // leaves currentRadiance and its geometric lifetime untouched.
+        if (all(isfinite(history)))
+        {
         historyFresh = history.a > 0.000001;
         historyGrace = history.a < -0.000001;
         bool historyHit = historyFresh || historyGrace;
@@ -334,6 +420,11 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         bool historyLifetimeValid = currentHit ? historyHit : historyFresh;
         historyConfidence = depthConfidence * velocityConfidence
             * (historyLifetimeValid ? 1.0 : 0.0);
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+        if (validateReceiverHistory)
+            historyConfidence *= beamrtReflectionPreviousReceiverConfidence(historyPixel,
+                centerDecoded.xyz, centerRoughness, centerSpecular);
+#endif
 
         // Receiver motion vectors locate the old pixel, but cannot make a
         // view-dependent reflected ray valid for the new camera direction.
@@ -357,7 +448,14 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             historyRadiance = history.rgb;
 #ifdef BEAMRT_REFLECTION_COLOR_FILTER
             if (reflectionColorFilterEnabled > 0.5)
-                historyRadiance = beamrtReflectionHistoryColor(previousUv, centerRealDepth, currentHit, history.rgb);
+                historyRadiance = beamrtReflectionHistoryColor(previousUv, centerRealDepth, currentHit,
+#ifdef BEAMRT_REFLECTION_RECEIVER_HISTORY
+                    validateReceiverHistory ? currentRadiance : history.rgb,
+                    centerDecoded.xyz, centerRoughness, centerSpecular, validateReceiverHistory
+#else
+                    history.rgb
+#endif
+                );
 #endif
         }
         else
@@ -376,6 +474,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             staticClamp, 1.0, smoothstep(0.5, 12.0, velocityPixels));
         historyRadiance = lerp(history.rgb, boundedHistory, clampStrength);
         }
+        }
     }
 
     float currentWeight = saturate(reflectionTemporalBlend);
@@ -391,6 +490,13 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         // and user 1 remains immediate. Static source changes decay normally.
         float userWeight = saturate(reflectionTemporalBlend);
         float weight60 = clamp(userWeight * sqrt(userWeight), 0.10, 1.0);
+#ifdef BEAMRT_REFLECTION_LAB
+        // Opt-in bounded laboratory EMA. Zero/unset preserves the production
+        // floor exactly; motion, material/depth rejection and valid zeros stay.
+        if ((asuint(reflectionLabCurrentWeight) & 0x7f800000u) != 0x7f800000u
+            && reflectionLabCurrentWeight > 0.0)
+            weight60 = clamp(reflectionLabCurrentWeight, 1.0 / 64.0, 1.0);
+#endif
         float frameDelta = clamp(reflectionFrameDelta, 1.0 / 240.0, 1.0 / 15.0);
         currentWeight = 1.0 - pow(1.0 - weight60, frameDelta * 60.0);
     }

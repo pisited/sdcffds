@@ -33,6 +33,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
     }
 
     float4 centerGI = tex2D(currentGITex, IN.uv0);
+    if (!all(isfinite(centerGI))) return 0.0;
 #ifdef BEAMRT_RAY_HIT_DIAGNOSTIC
     if (giTraceDebugMode > 0.5)
     {
@@ -78,6 +79,9 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             float2 offset = float2((float)x, (float)y) * oneOverTargetSize;
             float2 giUv = IN.uv0 + offset;
             float4 sampleGI = centerSample ? centerGI : tex2D(currentGITex, giUv);
+            // A zero bilateral weight does not cancel NaN/Inf arithmetic.
+            // Skip unusable samples before bounds, statistics or weighted sums.
+            if (!all(isfinite(sampleGI))) continue;
 
             float4 sampleDecoded = centerDecoded;
             if (!centerSample && (spatialFilterEnabled
@@ -172,6 +176,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         {
             float2 offset = outerRing[ringIndex] * oneOverTargetSize;
             float4 sampleGI = tex2D(currentGITex, IN.uv0 + offset);
+            if (!all(isfinite(sampleGI))) continue;
             float4 sampleDecoded = decodeGBuffer(
                 TEX_SAMPLER(prepassDepthTex),
                 TEX_SAMPLER(prepassTex),
@@ -234,10 +239,16 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         float4 history = tex2D(historyTex, previousUv);
 #ifdef BEAMRT_PRESERVE_HIT_CONFIDENCE
         float historyDepth = tex2D(historyMomentsTex, previousUv).a;
-        float relativeHistoryDepth = abs(historyDepth - centerDecoded.w) / safeCenterDepth;
-        historySupport = saturate(history.a);
 #else
-        float relativeHistoryDepth = abs(history.a - centerDecoded.w) / safeCenterDepth;
+        float historyDepth = history.a;
+#endif
+        // Rejected history must stay out of lerp entirely: zero confidence
+        // cannot sanitize an invalid RGB/support value.
+        if (all(isfinite(history)) && isfinite(historyDepth))
+        {
+        float relativeHistoryDepth = abs(historyDepth - centerDecoded.w) / safeCenterDepth;
+#ifdef BEAMRT_PRESERVE_HIT_CONFIDENCE
+        historySupport = saturate(history.a);
 #endif
         float safeTolerance = max(historyDepthTolerance, 0.0001);
         float depthConfidence = 1.0 - smoothstep(safeTolerance, safeTolerance * 4.0, relativeHistoryDepth);
@@ -321,6 +332,7 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             ? max(motionClampStrength, saturate(progressiveClampStrength))
             : motionClampStrength;
         historyGI = lerp(history.rgb, boundedHistory, clampStrength);
+        }
     }
 
     float currentWeight = progressiveEnabled > 0.5

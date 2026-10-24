@@ -9,7 +9,13 @@ uniform_sampler2D(backBufferTex, 2);
 #ifdef BEAMRT_SIX_INPUT_BINDINGS
 uniform_sampler2D(lightInfoTex, 3);
 uniform_sampler2D(auxiliaryTex, 4);
+#ifdef BEAMRT_SHARED_MESH_GI
+uniform_sampler2D(meshDataTex, 5);
+#elif defined(BEAMRT_NATIVE_GI)
+uniform_sampler2D(nativeGIVisibilityTex, 5);
+#else
 uniform_sampler2D(materialSpecTex, 5);
+#endif
 #else
 #ifdef BEAMRT_DIRECT_DIFFUSE_SOURCE
 #ifdef BEAMRT_LIGHTINFO_SLOT3
@@ -181,10 +187,77 @@ cbuffer perDraw : register(b0)
     uniform float4 surfelNormalSource30;
     uniform float4 surfelPositionRadius31;
     uniform float4 surfelNormalSource31;
+#ifdef BEAMRT_SCENE_VISIBILITY_GI
+    // Guarded: only GI shader v082 adds these declarations. Older presets
+    // retain exactly their historical constant layout and compiled behavior.
+    uniform float sceneVisibilityEnabled;
+    uniform float sceneVisibilityTriangleCount;
+    uniform float4 sceneVisTri0A;
+    uniform float4 sceneVisTri0B;
+    uniform float4 sceneVisTri0C;
+    uniform float4 sceneVisTri1A;
+    uniform float4 sceneVisTri1B;
+    uniform float4 sceneVisTri1C;
+    uniform float4 sceneVisTri2A;
+    uniform float4 sceneVisTri2B;
+    uniform float4 sceneVisTri2C;
+    uniform float4 sceneVisTri3A;
+    uniform float4 sceneVisTri3B;
+    uniform float4 sceneVisTri3C;
+    uniform float4 sceneVisTri4A;
+    uniform float4 sceneVisTri4B;
+    uniform float4 sceneVisTri4C;
+    uniform float4 sceneVisTri5A;
+    uniform float4 sceneVisTri5B;
+    uniform float4 sceneVisTri5C;
+    uniform float4 sceneVisTri6A;
+    uniform float4 sceneVisTri6B;
+    uniform float4 sceneVisTri6C;
+    uniform float4 sceneVisTri7A;
+    uniform float4 sceneVisTri7B;
+    uniform float4 sceneVisTri7C;
+    uniform float4 sceneVisTri8A;
+    uniform float4 sceneVisTri8B;
+    uniform float4 sceneVisTri8C;
+    uniform float4 sceneVisTri9A;
+    uniform float4 sceneVisTri9B;
+    uniform float4 sceneVisTri9C;
+    uniform float4 sceneVisTri10A;
+    uniform float4 sceneVisTri10B;
+    uniform float4 sceneVisTri10C;
+    uniform float4 sceneVisTri11A;
+    uniform float4 sceneVisTri11B;
+    uniform float4 sceneVisTri11C;
+#endif
+#ifdef BEAMRT_SHARED_MESH_GI
+    #include "beamrtMeshBVHUniforms.h.hlsl"
+#endif
+#ifdef BEAMRT_NATIVE_GI
+    uniform float nativeGIVisibilityEnabled;
+    uniform float2 nativeGIVisibilitySize;
+    uniform float4 nativeGIVisibilityKey;
+#endif
     POSTFX_UNIFORMS
 };
 
 #include "shaders/common/postFx/postFx.hlsl"
+
+#if defined(BEAMRT_SHARED_MESH_GI) || defined(BEAMRT_NATIVE_GI)
+float beamrtSharedRetro(float2 prepassUv)
+{
+    float2 viewport=(prepassUv-rtParams0.xy)/rtParams0.zw;
+    float2 uv=viewportCoordToRenderTarget(viewport,rtParams3);
+    uint width,height;lightInfoTexTex.GetDimensions(width,height);
+    int2 p=clamp((int2)floor(uv*float2(width,height)),int2(0,0),int2(width,height)-1);
+    return lightInfoTexTex.Load(int3(p,0)).a;
+}
+#endif
+#ifdef BEAMRT_SHARED_MESH_GI
+#include "beamrtMeshBVHCommon.h.hlsl"
+#endif
+#ifdef BEAMRT_NATIVE_GI
+#include "beamrtNativeGIVisibility_v001.h.hlsl"
+#endif
 
 #ifdef BEAMRT_SIX_INPUT_BINDINGS
 // Each panel is copied without color encoding. The first two panels use GI

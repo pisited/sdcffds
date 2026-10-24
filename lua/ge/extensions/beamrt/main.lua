@@ -1,7 +1,9 @@
--- BeamRT v0.102: independent reflection noise and reconstruction controls.
+-- BeamRT v0.130.9: recognize installed ClusterShading before legacy hooks.
 
 local M = {}
 M.dependencies = {"ui_imgui"}
+M.noiseSourcePolicy = require("ge/extensions/beamrt/noiseSourcePolicy")
+M.localLightAvailability = require("ge/extensions/beamrt/localLightAvailability")
 
 local im = ui_imgui
 local sceneDatabase = require("ge/extensions/beamrt/sceneDatabase")
@@ -10,9 +12,126 @@ local rayBackendRegistry = require("ge/extensions/beamrt/rayBackendRegistry")
 -- The companion helper is a normal required module, so an extension reload
 -- otherwise keeps its old functions even after its source file changes.
 package.loaded["ge/extensions/beamrt/lightingAudit"] = nil
+package.loaded["ge/extensions/beamrt/presets"] = nil
+package.loaded["ge/extensions/beamrt/waterReceivers"] = nil
+package.loaded["ge/extensions/beamrt/reflectionLab"] = nil
+package.loaded["ge/extensions/beamrt/tunerUI"] = nil
+M._tunerUI = require("ge/extensions/beamrt/tunerUI")
+M._automaticLampShadows = true -- session preference; renderer startup opts in
+do
+  local key='ge/extensions/beamrt/lightVisibilityDiagnostic'
+  local previous=package.loaded[key]
+  if previous then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  -- Refresh this module's read-only acquisition API on an extension reload.
+  -- Existing scene-database provider references keep their own cached records.
+  package.loaded['ge/extensions/beamrt/providers/lightProvider']=nil
+  M._lightVisibilityDiagnostic=require(key)
+end
+do
+  local key='ge/extensions/beamrt/nativeShadowDiagnostic'
+  local previous=package.loaded[key]
+  if previous then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._nativeShadowDiagnostic=require(key)
+end
+do
+  local key='ge/extensions/beamrt/glassShadowProbe'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._glassShadowProbe=require(key)
+end
+do
+  local key='ge/extensions/beamrt/glassSunShadow'
+  local previous=package.loaded[key]
+  local refresh=not previous
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    refresh=ok and restored
+  end
+  if refresh then
+    package.loaded[key]=nil
+    package.loaded['ge/extensions/beamrt/glassGeometry']=nil
+    package.loaded['ge/extensions/beamrt/providers/vehicleProvider']=nil
+  end
+  M._glassSunShadow=require(key)
+end
+do
+  local key='ge/extensions/beamrt/localVolumes'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok,restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._localVolumes=require(key)
+end
+do
+  local key='ge/extensions/beamrt/nearbyLampShadows'
+  local previous=package.loaded[key]
+  if previous and previous.disable then
+    local ok, restored=pcall(previous.disable,'BeamRT reloaded')
+    if ok and restored then package.loaded[key]=nil end
+  end
+  M._nearbyLampShadows=require(key)
+end
+
+-- A native experiment can own a temporary field value. Restore that ownership
+-- before refreshing its module; never orphan a failed restoration on reload.
+do
+  local key = "ge/extensions/beamrt/nativeSsrEnhancement"
+  local previous = package.loaded[key]
+  if type(previous) == "table" and type(previous.disable) == "function" then
+    local ok, restored = pcall(previous.disable, "BeamRT module reloaded")
+    if ok and restored then package.loaded[key] = nil end
+  end
+  M._nativeSsrEnhancement = require(key)
+end
 
 local LOG_TAG = "BeamRT"
-local VERSION = "0.102"
+-- Release the previous controller before replacing its cached rendering module.
+do
+  local key = "ge/extensions/beamrt/coherentRenderer"
+  local previous = package.loaded[key]
+  if type(previous) == "table" and type(previous.release) == "function" then
+    local ok, released = pcall(previous.release, "BeamRT module reloaded")
+    if ok and released then
+      package.loaded[key] = nil
+      package.loaded["ge/extensions/beamrt/coherentPipeline"] = nil
+      package.loaded["ge/extensions/beamrt/coherentVehicleMotion"] = nil
+    end
+  end
+  M._coherentRenderer = require(key)
+end
+do
+  local key = "ge/extensions/beamrt/planarCapture"
+  local previous = package.loaded[key]
+  if type(previous) == "table" and type(previous.release) == "function" then
+    local ok, released = pcall(previous.release, "BeamRT module reloaded")
+    if ok and released then
+      package.loaded[key] = nil
+      package.loaded["ge/extensions/beamrt/reflectionCaptureMath"] = nil
+    end
+  end
+  M._planarCapture = require(key)
+end
+-- Keep the previous lease if restoration failed, so disable can retry it.
+do
+  local key = "ge/extensions/beamrt/ptgiCoherent"
+  local previous = package.loaded[key]
+  if previous and previous.release then
+    local ok, released = pcall(previous.release)
+    if ok and released then package.loaded[key] = nil end
+  end
+  M._ptgiCoherent = require(key)
+end
+local VERSION = "0.130.9"
 local TUNING_FILE = "/settings/beamrtTuner.json"
 local STATE_NAME = "BeamRT_DebugState"
 local DEBUG_SHADER_NAME = "BeamRT_DebugShader"
@@ -52,15 +171,35 @@ local CLEAN_RADIANCE = {
   },
 }
 local PROGRESSIVE = {
+  rendererCompatibility = require("ge/extensions/beamrt/rendererCompatibility"),
+  sssrFork = {
+    backend = "experimental",
+    shaderName = "BeamRT_SssrForkTraceShader",
+    shaderEntry = "shaders/beamrt/nativeSsr/traceP_v002.hlsl",
+  },
+  reflectionLab = {mode = "normal", policy = require("ge/extensions/beamrt/reflectionLab")},
+  lastPresetId = nil,
+  reflectionLocalResolve = {enabled = false, strength = 0.35},
+  waterPreview = {
+    provider = require("ge/extensions/beamrt/waterReceivers"),
+    enabled = false,
+    shaderName = "BeamRT_WaterReceiverPreviewShader",
+    shaderEntry = "shaders/beamrt/beamrtWaterReceiverPreviewP_v001.hlsl",
+    effectName = "BeamRT_WaterReceiverPreviewFx",
+    callbacks = {},
+  },
   reflectionVariance = {
     momentsShaderName = "BeamRT_ReflectionMomentsShader",
     atrousShaderName = "BeamRT_ReflectionAtrousShader",
     momentsEffectName = "BeamRT_ReflectionMomentsFx",
     atrousEffectName = "BeamRT_ReflectionAtrousFx",
+    atrousEffectNames = {"BeamRT_ReflectionAtrousFx", "BeamRT_ReflectionAtrousFx2", "BeamRT_ReflectionAtrousFx3"},
+    atrousTargets = {"#BeamRT_VarianceReflection", "#BeamRT_VarianceReflection2", "#BeamRT_VarianceReflection3"},
     momentsCopyEffectName = "BeamRT_ReflectionMomentsHistoryCopyFx",
     momentsShaderEntry = "shaders/beamrt/beamrtReflectionMomentsP_v001.hlsl",
-    atrousShaderEntry = "shaders/beamrt/beamrtReflectionAtrousP_v001.hlsl",
+    atrousShaderEntry = "shaders/beamrt/beamrtReflectionAtrousP_v003.hlsl",
     enabled = false,
+    passes = 3,
     strength = 0.65,
     scale = 1.0,
   },
@@ -107,20 +246,26 @@ local PROGRESSIVE = {
   cameraCutReason = nil,
   lightingDiagnostic = {mode = 0, name = "off", gain = 4.0},
   lightingAccuracyMode = 1, -- conservative by default; 0 is legacy baseline
+  receiverDeLight = 0, -- opt-in; preserve the existing appearance by default
   reflectionDiagnostic = {mode = 0, name = "off"},
   reflectionSampling = {mode = 0, name = "mirror", frame = 0, sampleIndex = 0},
   reflectionReconstruction = {mode = 1, name = "playable", frameDelta = 1 / 60},
+  reflectionReceiverHistory = {enabled = true},
+  reflectionSourceReconstruction = {enabled = true},
   reflectionHit = {
     enabled = true,
     inputsShaderName = "BeamRT_ReflectionHitInputsShader",
-    inputsShaderEntry = "shaders/beamrt/beamrtReflectionHitInputsP_v001.hlsl",
+    inputsShaderEntry = "shaders/beamrt/beamrtReflectionHitInputsP_v002.hlsl",
     inputsEffectName = "BeamRT_ReflectionHitInputsFx",
     inputsTarget = "#BeamRT_ReflectionHitInputs",
     copyShaderName = "BeamRT_ReflectionHitCopyShader",
-    copyShaderEntry = "shaders/beamrt/beamrtReflectionHitCopyP_v001.hlsl",
+    copyShaderEntry = "shaders/beamrt/beamrtReflectionHitCopyP_v002.hlsl",
     copyEffectName = "BeamRT_ReflectionHitCopyFx",
     historyTarget = "#BeamRT_HistoryReflectionHit",
     traceStateName = "BeamRT_ReflectionHitTraceState",
+    receiverSize = "0 0",
+    receiverWidth = 0, receiverHeight = 0,
+    sizeValid = false,
     callbacks = {},
   },
   lightingAudit = require("ge/extensions/beamrt/lightingAudit"),
@@ -142,11 +287,11 @@ local PROGRESSIVE = {
   },
   inputPrep = {
     receiverShaderName = "BeamRT_ReceiverResponseShader",
-    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v001.hlsl",
+    receiverShaderEntry = "shaders/beamrt/beamrtReceiverResponseP_v002.hlsl",
     receiverEffectName = "BeamRT_ReceiverResponseFx",
     receiverTarget = "#BeamRT_ReceiverResponse",
     auxiliaryShaderName = "BeamRT_AuxiliaryPackShader",
-    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v001.hlsl",
+    auxiliaryShaderEntry = "shaders/beamrt/beamrtAuxiliaryPackP_v002.hlsl",
     auxiliaryEffectName = "BeamRT_AuxiliaryPackFx",
     auxiliaryTarget = "#BeamRT_AuxiliaryInputs",
     stateName = "BeamRT_SixInputState",
@@ -319,14 +464,14 @@ local SURFEL_CACHE_CALLBACKS_NAME = SURFEL_CACHE_EFFECT_NAME .. "Callbacks"
 local REFLECTION_CALLBACKS_NAME = REFLECTION_EFFECT_NAME .. "Callbacks"
 
 local DEBUG_SHADER_ENTRY = "shaders/beamrt/beamrtDebugP_v011.hlsl"
-local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v081.hlsl"
+local GI_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtGITraceP_v082.hlsl"
 local TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtTemporalP_v071.hlsl"
 local COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtLightingComposeP_v079.hlsl"
 local COPY_SHADER_ENTRY = "shaders/beamrt/beamrtCopyP_v005.hlsl"
 local SURFEL_CACHE_SHADER_ENTRY = "shaders/beamrt/beamrtSurfelCacheP_v062.hlsl"
-local REFLECTION_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTraceP_v041.hlsl"
-local REFLECTION_TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTemporalP_v038.hlsl"
-local REFLECTION_COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionComposeP_v032.hlsl"
+local REFLECTION_TRACE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTraceP_v043.hlsl"
+local REFLECTION_TEMPORAL_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionTemporalP_v040.hlsl"
+local REFLECTION_COMPOSE_SHADER_ENTRY = "shaders/beamrt/beamrtReflectionComposeP_v035.hlsl"
 local BUFFER_DIAGNOSTIC_SHADER_ENTRY = "shaders/beamrt/beamrtBufferDiagnosticP_v001.hlsl"
 
 local MODE_IDS = {
@@ -605,6 +750,13 @@ local surfelScanPosition = nil
 local surfelTraceDistance = 75.0
 local surfelBaseRadius = 1.75
 local giSourceMode = 0 -- 0 hybrid, 1 screen-space only, 2 world surfels only
+-- Opt-in world-surfel GI visibility through the same verified opaque mesh
+-- dataset as the experimental off-screen shadow geometry. Disabled by default.
+M.sceneGIVisibility = {enabled = false, revision = -1, lastEnabled = nil}
+-- Full-mesh geometry is an opt-in dataset, not a saved graphics preset or
+-- replacement for native shadows. Preserve the v082 shader when unavailable.
+M.sharedMeshGI = {enabled=false,effective=false,key='',reason='disabled',backend='inline',source='guardhouse',
+  shaderName='BeamRT_GISharedMeshShader',shaderEntry='shaders/beamrt/beamrtGITraceP_v083.hlsl'}
 local worldGIStrength = 1.15
 local worldLeakSuppression = 0.85
 local radianceCleanup = 1.0
@@ -723,251 +875,7 @@ local tuningPointers = {
   reflectionSourceFootprintScale = im.FloatPtr(PROGRESSIVE.reflectionTuning.sourceFootprintScale),
 }
 
-local TUNING_PRESETS = {
-  experimental = {
-    rayStepSize = 0.20, rayThickness = 0.55, rayNormalBias = 0.035, rayMaxSteps = 32,
-    giPathCount = 1, giRenderScale = 0.5,
-    giStrength = 1.35, giClamp = 16.0, giCellSize = 0.005,
-    temporalBlend = 0.10, historyDepthTolerance = 0.004, denoiseStrength = 0.85,
-    contactShadowStrength = 0.20, bounceSaturation = 1.35,
-    giExposure = 0.15, giShadowFocus = 0.82, giReceiverTint = 0.50,
-    giContrast = 1.15, giEnergyLimit = 3.0, giHighlightRolloff = 0.88,
-    worldGIStrength = 1.50, worldLeakSuppression = 0.94,
-    radianceCleanup = 1.0, specularReject = 0.90,
-    progressiveEnabled = true, progressiveMaxSamples = 4096, progressiveClampStrength = 0.10,
-    giEstimator = "corrected", giLocalization = 0.55, secondBounceStrength = 0.25, emissiveBoost = 4.0,
-    rayReach = 0.45, rearRayReach = 0.18, lowPathRescue = 0.80,
-    blueNoiseStrength = 1.0, svgfStrength = 1.0, svgfVarianceScale = 4.0, svgfMaxHistory = 32,
-    hitRefinementSteps = 2, candidateRetryCount = 1,
-    rayMarcher = "screendda", screenRayStride = 1.0,
-    surfelTraceDistance = 120.0, surfelBaseRadius = 1.35,
-    surfelVisibilityTolerance = 1.0, surfelCacheBlend = 0.12, surfelRefreshDistance = 7.0,
-  },
-  userbest = {
-    rayStepSize = 0.20, rayThickness = 0.55, rayNormalBias = 0.039, rayMaxSteps = 128,
-    giPathCount = 16, giRenderScale = 1.0,
-    giStrength = 4.0, giClamp = 10.25, giCellSize = 0.005,
-    temporalBlend = 0.093, historyDepthTolerance = 0.05, denoiseStrength = 1.0,
-    contactShadowStrength = 0.06, bounceSaturation = 0.90,
-    giExposure = 0.0, giShadowFocus = 0.80, giReceiverTint = 0.40,
-    giContrast = 1.10, giEnergyLimit = 2.50, giHighlightRolloff = 0.80,
-    worldGIStrength = 4.0, worldLeakSuppression = 0.94,
-    radianceCleanup = 1.0, specularReject = 0.85,
-    surfelTraceDistance = 150.0, surfelBaseRadius = 1.83,
-    surfelVisibilityTolerance = 5.0, surfelCacheBlend = 1.0, surfelRefreshDistance = 30.0,
-    rayMarcher = "linear",
-  },
-  cinematic = {
-    rayStepSize = 0.24, rayThickness = 0.55, rayNormalBias = 0.035, rayMaxSteps = 128,
-    giPathCount = 16, giRenderScale = 1.0,
-    giStrength = 2.20, giClamp = 12.0, giCellSize = 0.005,
-    temporalBlend = 0.075, historyDepthTolerance = 0.01, denoiseStrength = 1.0,
-    contactShadowStrength = 0.10, bounceSaturation = 1.15,
-    giExposure = 0.60, giShadowFocus = 0.88, giReceiverTint = 0.55,
-    giContrast = 1.18, giEnergyLimit = 2.20, giHighlightRolloff = 0.88,
-    worldGIStrength = 2.50, worldLeakSuppression = 0.94,
-    radianceCleanup = 1.0, specularReject = 0.90,
-    surfelTraceDistance = 120.0, surfelBaseRadius = 1.40,
-    surfelVisibilityTolerance = 1.5, surfelCacheBlend = 0.25, surfelRefreshDistance = 10.0,
-    rayMarcher = "linear",
-  },
-  maxquality = {
-    rayStepSize = 0.15, rayThickness = 0.55, rayNormalBias = 0.03, rayMaxSteps = 200,
-    giPathCount = 32, giRenderScale = 1.0,
-    giStrength = 1.25, giClamp = 16.0, giCellSize = 0.005,
-    temporalBlend = 0.16, historyDepthTolerance = 0.003, denoiseStrength = 0.65,
-    contactShadowStrength = 0.42, bounceSaturation = 1.80,
-    giExposure = 0.25, giShadowFocus = 0.80, giReceiverTint = 0.45,
-    giContrast = 1.12, giEnergyLimit = 2.0, giHighlightRolloff = 0.82,
-    worldGIStrength = 1.80, worldLeakSuppression = 0.94,
-    radianceCleanup = 1.0, specularReject = 0.90,
-    surfelTraceDistance = 120.0, surfelBaseRadius = 1.25,
-    surfelVisibilityTolerance = 0.9, surfelCacheBlend = 0.18, surfelRefreshDistance = 7.0,
-    rayMarcher = "linear",
-  },
-  beautymax = {
-    -- Accuracy-first still-image preset. Until the experimental screen DDA and
-    -- coarse surfel cache pass their visual gates, spend the maximum budget on
-    -- the validated linear screen path instead of mixing representations.
-    rayStepSize = 0.18, rayThickness = 0.42, rayNormalBias = 0.035, rayMaxSteps = 160,
-    giPathCount = 32, giRenderScale = 1.0,
-    giStrength = 1.10, giClamp = 12.0, giCellSize = 0.005,
-    temporalBlend = 0.06, historyDepthTolerance = 0.004, denoiseStrength = 0.60,
-    contactShadowStrength = 0.0, bounceSaturation = 1.15,
-    giExposure = 0.10, giShadowFocus = 0.82, giReceiverTint = 0.45,
-    giContrast = 1.10, giEnergyLimit = 1.60, giHighlightRolloff = 0.90,
-    worldGIStrength = 0.0, worldLeakSuppression = 0.96,
-    radianceCleanup = 1.0, specularReject = 0.95,
-    progressiveEnabled = true, progressiveMaxSamples = 4096, progressiveClampStrength = 0.08,
-    giEstimator = "corrected", giLocalization = 0.70, secondBounceStrength = 0.0, emissiveBoost = 2.5,
-    rayReach = 1.0, rearRayReach = 0.35, lowPathRescue = 0.0,
-    blueNoiseStrength = 1.0, blueNoiseSource = "beamng",
-    svgfStrength = 0.75, svgfVarianceScale = 3.0, svgfMaxHistory = 64,
-    hitRefinementSteps = 5, hitValidationStrength = 1.0, minHitTravelPixels = 2.0,
-    candidateContinuation = 1.0, candidateRetryCount = 4,
-    emissiveSeparation = 1.0, echoHistoryGuard = 1.0,
-    rayMarcher = "linear", screenRayStride = 1.0,
-    giSource = "screen",
-    surfelTraceDistance = 80.0, surfelBaseRadius = 1.25,
-    surfelVisibilityTolerance = 0.8, surfelCacheBlend = 0.10, surfelRefreshDistance = 6.0,
-  },
-  ptgiplay = {
-    -- Gameplay-oriented PTGI: one full-resolution Screen DDA path is allowed to
-    -- converge temporally, while the lighting controls make transported color
-    -- and the guarded previous-GI bounce deliberately visible. This avoids the
-    -- 32 paths x 160 linear steps paid by Beauty Max.
-    rayStepSize = 0.20, rayThickness = 0.55, rayNormalBias = 0.035, rayMaxSteps = 64,
-    giPathCount = 1, giRenderScale = 1.0,
-    giStrength = 1.65, giClamp = 10.0, giCellSize = 0.005,
-    temporalBlend = 0.10, historyDepthTolerance = 0.004, denoiseStrength = 0.90,
-    contactShadowStrength = 0.0, bounceSaturation = 1.45,
-    giExposure = 0.40, giShadowFocus = 0.86, giReceiverTint = 0.58,
-    giContrast = 1.12, giEnergyLimit = 2.25, giHighlightRolloff = 0.90,
-    worldGIStrength = 0.0, worldLeakSuppression = 0.96,
-    radianceCleanup = 1.0, specularReject = 0.92,
-    radianceSource = "directdiffuse", radianceChromaStrength = 0.75, retroReject = 1.0,
-    progressiveEnabled = true, progressiveMaxSamples = 1024, progressiveClampStrength = 0.10,
-    giEstimator = "corrected", giLocalization = 0.60, secondBounceStrength = 0.22, emissiveBoost = 4.0,
-    rayReach = 0.70, rearRayReach = 0.25, lowPathRescue = 0.70,
-    blueNoiseStrength = 1.0, blueNoiseSource = "beamng",
-    svgfStrength = 1.0, svgfVarianceScale = 4.0, svgfMaxHistory = 32,
-    hitRefinementSteps = 3, hitValidationStrength = 1.0, minHitTravelPixels = 2.0,
-    candidateContinuation = 0.90, candidateRetryCount = 2,
-    emissiveSeparation = 1.0, echoHistoryGuard = 1.0,
-    rayMarcher = "screendda", screenRayStride = 1.0,
-    giSource = "screen",
-    surfelTraceDistance = 80.0, surfelBaseRadius = 1.25,
-    surfelVisibilityTolerance = 0.8, surfelCacheBlend = 0.10, surfelRefreshDistance = 6.0,
-  },
-  ultra = {
-    rayStepSize = 0.24, rayThickness = 0.62, rayNormalBias = 0.035, rayMaxSteps = 96,
-    giPathCount = 16, giRenderScale = 1.0,
-    giStrength = 1.25, giClamp = 12.0, giCellSize = 0.006,
-    temporalBlend = 0.12, historyDepthTolerance = 0.004, denoiseStrength = 0.82,
-    contactShadowStrength = 0.42, bounceSaturation = 1.80,
-    giExposure = 0.20, giShadowFocus = 0.78, giReceiverTint = 0.42,
-    giContrast = 1.10, giEnergyLimit = 1.85, giHighlightRolloff = 0.80,
-    worldGIStrength = 1.80, worldLeakSuppression = 0.92,
-    radianceCleanup = 1.0, specularReject = 0.85,
-    surfelTraceDistance = 120.0, surfelBaseRadius = 1.35,
-    surfelVisibilityTolerance = 1.0, surfelCacheBlend = 0.18, surfelRefreshDistance = 7.0,
-    rayMarcher = "linear",
-  },
-  showcase = {
-    rayStepSize = 0.55, rayThickness = 0.80, rayNormalBias = 0.04, rayMaxSteps = 36,
-    giPathCount = 8, giRenderScale = 0.75,
-    giStrength = 0.90, giClamp = 6.0, giCellSize = 0.0125,
-    temporalBlend = 0.07, historyDepthTolerance = 0.008, denoiseStrength = 1.0,
-    contactShadowStrength = 0.58, bounceSaturation = 1.25,
-    giExposure = 0.0, giShadowFocus = 0.75, giReceiverTint = 0.40,
-    giContrast = 1.10, giEnergyLimit = 1.75, giHighlightRolloff = 0.80,
-    worldGIStrength = 1.15, worldLeakSuppression = 0.85,
-    radianceCleanup = 1.0, specularReject = 0.85, surfelTraceDistance = 75.0, surfelBaseRadius = 1.75,
-    surfelVisibilityTolerance = 1.5, surfelCacheBlend = 0.15, surfelRefreshDistance = 8.0,
-    rayMarcher = "linear",
-  },
-  balanced = {
-    rayStepSize = 0.65, rayThickness = 0.85, rayNormalBias = 0.05, rayMaxSteps = 28,
-    giPathCount = 4, giRenderScale = 0.5,
-    giStrength = 0.75, giClamp = 5.0, giCellSize = 0.015625,
-    temporalBlend = 0.10, historyDepthTolerance = 0.01, denoiseStrength = 1.0,
-    contactShadowStrength = 0.65, bounceSaturation = 1.20,
-    giExposure = -0.10, giShadowFocus = 0.70, giReceiverTint = 0.35,
-    giContrast = 1.05, giEnergyLimit = 1.50, giHighlightRolloff = 0.75,
-    worldGIStrength = 1.0, worldLeakSuppression = 0.8,
-    radianceCleanup = 1.0, specularReject = 0.80, surfelTraceDistance = 60.0, surfelBaseRadius = 2.0,
-    surfelVisibilityTolerance = 1.5, surfelCacheBlend = 0.20, surfelRefreshDistance = 8.0,
-    rayMarcher = "linear",
-  },
-  clean = {
-    rayStepSize = 0.50, rayThickness = 0.72, rayNormalBias = 0.04, rayMaxSteps = 40,
-    giPathCount = 8, giRenderScale = 0.75,
-    giStrength = 0.72, giClamp = 5.0, giCellSize = 0.01,
-    temporalBlend = 0.045, historyDepthTolerance = 0.007, denoiseStrength = 1.0,
-    contactShadowStrength = 0.45, bounceSaturation = 1.10,
-    giExposure = -0.20, giShadowFocus = 0.82, giReceiverTint = 0.30,
-    giContrast = 1.08, giEnergyLimit = 1.35, giHighlightRolloff = 0.90,
-    worldGIStrength = 1.0, worldLeakSuppression = 0.9,
-    radianceCleanup = 1.0, specularReject = 0.90, surfelTraceDistance = 75.0, surfelBaseRadius = 1.5,
-    surfelVisibilityTolerance = 1.25, surfelCacheBlend = 0.10, surfelRefreshDistance = 7.0,
-    rayMarcher = "linear",
-  },
-  performance = {
-    rayStepSize = 0.85, rayThickness = 1.0, rayNormalBias = 0.06, rayMaxSteps = 20,
-    giPathCount = 2, giRenderScale = 0.5,
-    giStrength = 0.65, giClamp = 4.0, giCellSize = 0.025,
-    temporalBlend = 0.14, historyDepthTolerance = 0.014, denoiseStrength = 0.85,
-    contactShadowStrength = 0.25, bounceSaturation = 1.10,
-    giExposure = -0.30, giShadowFocus = 0.68, giReceiverTint = 0.30,
-    giContrast = 1.0, giEnergyLimit = 1.25, giHighlightRolloff = 0.75,
-    worldGIStrength = 0.80, worldLeakSuppression = 0.7,
-    radianceCleanup = 1.0, specularReject = 0.75, surfelTraceDistance = 50.0, surfelBaseRadius = 2.5,
-    surfelVisibilityTolerance = 2.0, surfelCacheBlend = 0.25, surfelRefreshDistance = 10.0,
-    rayMarcher = "linear",
-  },
-}
-
--- Preserve Beauty Max as the neutral baseline. This opt-in variant changes only
--- the reflection controls, so selecting it cannot silently alter the accepted
--- GI/ray/temporal settings.
-TUNING_PRESETS.beautyreflect = {}
-for settingName, settingValue in pairs(TUNING_PRESETS.beautymax) do
-  TUNING_PRESETS.beautyreflect[settingName] = settingValue
-end
-TUNING_PRESETS.beautyreflect.reflectionsEnabled = true
-TUNING_PRESETS.beautyreflect.reflectionStrength = 0.85
-TUNING_PRESETS.beautyreflect.reflectionMaxRoughness = 0.35
-TUNING_PRESETS.beautyreflect.reflectionStepSize = 0.24
-TUNING_PRESETS.beautyreflect.reflectionThickness = 0.22
-TUNING_PRESETS.beautyreflect.reflectionNormalBias = 0.04
-TUNING_PRESETS.beautyreflect.reflectionTemporalBlend = 0.22
-TUNING_PRESETS.beautyreflect.reflectionDenoiseStrength = 0.55
-
-TUNING_PRESETS.ptgiplayreflect = {}
-for settingName, settingValue in pairs(TUNING_PRESETS.ptgiplay) do
-  TUNING_PRESETS.ptgiplayreflect[settingName] = settingValue
-end
-TUNING_PRESETS.ptgiplayreflect.reflectionsEnabled = true
-TUNING_PRESETS.ptgiplayreflect.reflectionStrength = 0.72
-TUNING_PRESETS.ptgiplayreflect.reflectionMaxRoughness = 0.32
-TUNING_PRESETS.ptgiplayreflect.reflectionStepSize = 0.35
-TUNING_PRESETS.ptgiplayreflect.reflectionThickness = 0.28
-TUNING_PRESETS.ptgiplayreflect.reflectionNormalBias = 0.045
-TUNING_PRESETS.ptgiplayreflect.reflectionTemporalBlend = 0.30
-TUNING_PRESETS.ptgiplayreflect.reflectionDenoiseStrength = 0.40
-
--- The quality-oriented DDA path keeps the practical screen marcher, spends a
--- second path on coverage, and leans on the real three-scale reconstruction
--- rather than the unusably expensive 32-path linear preset.
-TUNING_PRESETS.ptgimax = {}
-for settingName, settingValue in pairs(TUNING_PRESETS.ptgiplay) do
-  TUNING_PRESETS.ptgimax[settingName] = settingValue
-end
-TUNING_PRESETS.ptgimax.giPathCount = 2
-TUNING_PRESETS.ptgimax.screenDdaMaxPaths = 2
-TUNING_PRESETS.ptgimax.screenDdaMaxSteps = 48
-TUNING_PRESETS.ptgimax.rayReach = 0.75
-TUNING_PRESETS.ptgimax.temporalBlend = 0.075
-TUNING_PRESETS.ptgimax.progressiveMaxSamples = 2048
-TUNING_PRESETS.ptgimax.progressiveClampStrength = 0.08
-TUNING_PRESETS.ptgimax.secondBounceStrength = 0.35
-TUNING_PRESETS.ptgimax.giStrength = 1.75
-TUNING_PRESETS.ptgimax.giExposure = 0.45
-TUNING_PRESETS.ptgimax.svgfVarianceScale = 3.25
-TUNING_PRESETS.ptgimax.candidateRetryCount = 3
-
-TUNING_PRESETS.ptgimaxreflect = {}
-for settingName, settingValue in pairs(TUNING_PRESETS.ptgimax) do
-  TUNING_PRESETS.ptgimaxreflect[settingName] = settingValue
-end
-TUNING_PRESETS.ptgimaxreflect.reflectionsEnabled = true
-TUNING_PRESETS.ptgimaxreflect.reflectionStrength = 0.80
-TUNING_PRESETS.ptgimaxreflect.reflectionMaxRoughness = 0.34
-TUNING_PRESETS.ptgimaxreflect.reflectionStepSize = 0.28
-TUNING_PRESETS.ptgimaxreflect.reflectionThickness = 0.24
-TUNING_PRESETS.ptgimaxreflect.reflectionNormalBias = 0.04
-TUNING_PRESETS.ptgimaxreflect.reflectionTemporalBlend = 0.25
-TUNING_PRESETS.ptgimaxreflect.reflectionDenoiseStrength = 0.50
+local TUNING_PRESETS = require("ge/extensions/beamrt/presets")
 
 local function beamrtLog(level, message)
   log(level, LOG_TAG, "[BeamRT] " .. message)
@@ -1368,6 +1276,35 @@ local function uploadSurfelGeometry(effect)
   end
 end
 
+function M._uploadGISceneVisibility(effect,force)
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
+  if not effect then return end
+  local status=worldMeshCasters.getStatus()
+  local generation=status.generation or 0
+  if not force and M.sceneGIVisibility.revision==generation
+      and M.sceneGIVisibility.lastEnabled==M.sceneGIVisibility.enabled then
+    return
+  end
+  local triangles=M.sceneGIVisibility.enabled
+    and worldMeshCasters.getOpaqueTriangles() or {}
+  -- Partial map geometry is never presumed complete. The GI shader may
+  -- reject paths proven blocked, but lack of a hit cannot certify a path.
+  effect:setShaderConst("$sceneVisibilityEnabled",
+    M.sceneGIVisibility.enabled and #triangles>0 and 1 or 0)
+  effect:setShaderConst("$sceneVisibilityTriangleCount",#triangles)
+  for i=0,11 do
+    local tri=triangles[i+1]
+    local zero={0,0,0}
+    for _,part in ipairs({"A","B","C"}) do
+      local v=tri and tri[part:lower()] or zero
+      effect:setShaderConst("$sceneVisTri"..i..part,
+        string.format("%.6f %.6f %.6f 0",v[1],v[2],v[3]))
+    end
+  end
+  M.sceneGIVisibility.revision=generation
+  M.sceneGIVisibility.lastEnabled=M.sceneGIVisibility.enabled
+end
+
 local function applyGIShaderConsts(forceGeometryRebind)
   local traceEffect = findObject(GI_EFFECT_NAME)
   if not traceEffect then
@@ -1414,6 +1351,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   traceEffect:setShaderConst("$giEmissiveSeparation", PROGRESSIVE.emissiveSeparation)
   traceEffect:setShaderConst("$surfelVisibilityTolerance", surfelVisibilityTolerance)
   traceEffect:setShaderConst("$surfelCacheReset", surfelCacheResetFrames > 0 and 1 or 0)
+  M._uploadGISceneVisibility(traceEffect,forceGeometryRebind)
   if forceGeometryRebind or surfelGeometryDirtyGI then
     traceEffect:setShaderConst("$surfelCount", #surfels)
     traceEffect:setShaderConst("$surfelMaxDistance", surfelTraceDistance)
@@ -1454,6 +1392,8 @@ local function applyGIShaderConsts(forceGeometryRebind)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giExposure", giExposure)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giShadowFocus", giShadowFocus)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverDeLight", PROGRESSIVE.receiverDeLight)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giContrast", giContrast)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giEnergyLimit", giEnergyLimit)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giHighlightRolloff", giHighlightRolloff)
@@ -1461,6 +1401,7 @@ local function applyGIShaderConsts(forceGeometryRebind)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giTraceDebugMode", PROGRESSIVE.rayDebugMode)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giLightingDiagnostic", PROGRESSIVE.lightingDiagnostic.mode)
   setIfPresent(COMPOSE_EFFECT_NAME, "$giLightingDiagnosticGain", PROGRESSIVE.lightingDiagnostic.gain)
+  M._applySharedMeshGI(traceEffect)
   return true
 end
 
@@ -1496,7 +1437,40 @@ end
 
 function PROGRESSIVE.reflectionHit.configured()
   return not PROGRESSIVE.reflectionConvergenceEnabled and PROGRESSIVE.reflectionHit.enabled and PROGRESSIVE.reflectionSampling.mode == 1
+    and not (PROGRESSIVE.sssrFork and PROGRESSIVE.sssrFork.backend == "fork")
     and PROGRESSIVE.reflectionReconstruction.mode == 1 and not PROGRESSIVE.reflectionSampling.isFrozen()
+end
+
+function PROGRESSIVE.reflectionHit.updateSizes()
+  local hit = PROGRESSIVE.reflectionHit
+  local previousWidth, previousHeight, previousValid = hit.receiverWidth, hit.receiverHeight, hit.sizeValid
+  local trace = findObject(REFLECTION_EFFECT_NAME)
+  local ok, resolution = pcall(function() return trace:getRenderTargetSize() end)
+  if not ok then resolution = nil end
+  local w, h = resolution and tonumber(resolution.x), resolution and tonumber(resolution.y)
+  -- Two RGBA32F planes must fit a D3D12 Texture2D. Invalid/unknown extent
+  -- invalidates descriptors rather than guessing a camera or target size.
+  if not w or not h or w ~= w or h ~= h or w < 1 or h < 1 or w > 16384 or h > 8192 then
+    hit.receiverWidth, hit.receiverHeight, hit.receiverSize = 0, 0, "0 0"
+    hit.sizeValid = false
+  else
+    hit.receiverWidth, hit.receiverHeight = math.floor(w), math.floor(h)
+    hit.receiverSize = string.format("%d %d", hit.receiverWidth, hit.receiverHeight)
+    hit.sizeValid = true
+  end
+  if previousWidth ~= hit.receiverWidth or previousHeight ~= hit.receiverHeight or previousValid ~= hit.sizeValid then
+    -- Internal render resolution can change without a display/window change.
+    -- Do not recurse through resetReflectionHistory -> apply -> updateSizes.
+    reflectionHistoryValid, reflectionHistoryWarmupFrames = 0, 0
+    PROGRESSIVE.reflectionSampling.frame, PROGRESSIVE.reflectionSampling.sampleIndex = 0, 0
+  end
+  local atlasSize = hit.sizeValid and string.format("%d %d", hit.receiverWidth, hit.receiverHeight * 2) or "1 2"
+  for _, name in ipairs({hit.inputsEffectName, hit.copyEffectName}) do
+    local effect = findObject(name)
+    if effect and effect:getField("targetSize", 0) ~= atlasSize then effect:setField("targetSize", 0, atlasSize) end
+  end
+  setIfPresent(hit.inputsEffectName, "$reflectionReceiverSize", hit.receiverSize)
+  setIfPresent(hit.copyEffectName, "$reflectionReceiverSize", hit.receiverSize)
 end
 
 function PROGRESSIVE.reflectionColor.configured()
@@ -1538,7 +1512,20 @@ local function applyReflectionShaderConsts()
   if not traceEffect then
     return false
   end
+  local selectedShader = PROGRESSIVE.sssrFork and PROGRESSIVE.sssrFork.backend == "fork"
+    and PROGRESSIVE.sssrFork.shaderName or REFLECTION_TRACE_SHADER_NAME
+  if traceEffect:getField("shader", 0) ~= selectedShader then traceEffect:setField("shader", 0, selectedShader) end
+  PROGRESSIVE.reflectionHit.updateSizes()
   local frozen = PROGRESSIVE.reflectionSampling.isFrozen()
+  local lab = PROGRESSIVE.reflectionLab.policy.resolve(
+    (PROGRESSIVE.reflectionConvergenceEnabled or PROGRESSIVE.reflectionSourceProbeTarget)
+      and "normal" or PROGRESSIVE.reflectionLab.mode)
+  local labFork = PROGRESSIVE.sssrFork.backend == "fork" and lab.lookups > 0
+  local effectiveRoughness = labFork and math.max(reflectionMaxRoughness, lab.roughness) or reflectionMaxRoughness
+  if PROGRESSIVE.sssrFork.backend == "fork" then
+    traceEffect:setShaderConst("$reflectionForkWork", string.format("%d %.3f", lab.lookups, lab.reach))
+  end
+  setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionLabGain", lab.gain)
   local reflectionSource = PROGRESSIVE.reflectionSourceProbeTarget or "$backBuffer"
   if traceEffect:getField("texture", 2) ~= reflectionSource then traceEffect:setField("texture", 2, reflectionSource) end
   local colorSourceEffect = findObject(PROGRESSIVE.reflectionColor.halfEffectName)
@@ -1546,6 +1533,9 @@ local function applyReflectionShaderConsts()
     colorSourceEffect:setField("texture", 0, reflectionSource)
   end
   traceEffect:setShaderConst("$reflectionConvergenceEnabled", PROGRESSIVE.reflectionConvergenceEnabled and 1 or 0)
+  traceEffect:setShaderConst("$reflectionSourceReconstructionEnabled",
+    PROGRESSIVE.reflectionSourceReconstruction.enabled and not PROGRESSIVE.reflectionConvergenceEnabled
+      and not frozen and not lab.raw and 1 or 0)
   traceEffect:setShaderConst("$reflectionSampleCellPixels", PROGRESSIVE.reflectionTuning.sampleCellPixels)
   traceEffect:setShaderConst("$reflectionNoiseSeed", PROGRESSIVE.reflectionTuning.noiseSeed)
   traceEffect:setShaderConst("$reflectionSourceFootprintScale", PROGRESSIVE.reflectionTuning.sourceFootprintScale)
@@ -1555,25 +1545,30 @@ local function applyReflectionShaderConsts()
   local varianceActive = PROGRESSIVE.reflectionVariance.enabled and PROGRESSIVE.reflectionSampling.mode > 0
     and PROGRESSIVE.reflectionReconstruction.mode > 0
     and PROGRESSIVE.reflectionDiagnostic.mode == 0
-    and not PROGRESSIVE.reflectionConvergenceEnabled
+    and not PROGRESSIVE.reflectionConvergenceEnabled and not frozen and not lab.raw
   for _, name in ipairs({PROGRESSIVE.reflectionVariance.momentsEffectName,
-      PROGRESSIVE.reflectionVariance.atrousEffectName, PROGRESSIVE.reflectionVariance.momentsCopyEffectName}) do
+      PROGRESSIVE.reflectionVariance.momentsCopyEffectName}) do
     local varianceEffect = findObject(name)
     if varianceEffect then varianceEffect.skip = false end
   end
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionHistoryValid", reflectionHistoryValid)
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionHistoryDepthTolerance", reflectionHistoryDepthTolerance)
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionCameraMotion", PROGRESSIVE.cameraMotion)
-  setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionMaxRoughness", reflectionMaxRoughness)
+  setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionMaxRoughness", effectiveRoughness)
   setIfPresent(PROGRESSIVE.reflectionVariance.momentsEffectName, "$reflectionMomentsMaxHistory", 32)
-  setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionVarianceStrength", PROGRESSIVE.reflectionVariance.strength)
-  setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionVarianceScale", PROGRESSIVE.reflectionVariance.scale)
-  setIfPresent(PROGRESSIVE.reflectionVariance.atrousEffectName, "$reflectionMaxRoughness", reflectionMaxRoughness)
-  local colorFilter = PROGRESSIVE.reflectionColor.configured()
+  for index, name in ipairs(PROGRESSIVE.reflectionVariance.atrousEffectNames) do
+    setIfPresent(name, "$reflectionVarianceStrength", varianceActive and PROGRESSIVE.reflectionVariance.strength or 0)
+    setIfPresent(name, "$reflectionVarianceScale", PROGRESSIVE.reflectionVariance.scale)
+    setIfPresent(name, "$reflectionMaxRoughness", effectiveRoughness)
+    setIfPresent(name, "$reflectionAtrousStep", 2 ^ (index - 1))
+  end
+  local colorFilter = PROGRESSIVE.reflectionColor.configured() and not lab.raw
   traceEffect:setShaderConst("$reflectionColorFilterEnabled", colorFilter and 1 or 0)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionColorFilterEnabled", colorFilter and 1 or 0)
   PROGRESSIVE.reflectionColor.updateSizes()
-  local hitAware = PROGRESSIVE.reflectionHit.configured()
+  local hitAware = PROGRESSIVE.reflectionHit.configured() and PROGRESSIVE.reflectionHit.sizeValid
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionReceiverHistoryEnabled",
+    hitAware and PROGRESSIVE.reflectionReceiverHistory.enabled and 1 or 0)
   local desiredFormat = (hitAware or PROGRESSIVE.reflectionConvergenceEnabled) and "GFXFormatR32G32B32A32F" or "GFXFormatR16G16B16A16F"
   if traceEffect:getField("targetFormat", 0) ~= desiredFormat then
     traceEffect:setField("targetFormat", 0, desiredFormat)
@@ -1605,29 +1600,40 @@ local function applyReflectionShaderConsts()
   traceEffect:setShaderConst("$reflectionNormalBias", reflectionNormalBias)
   traceEffect:setShaderConst("$reflectionMaxSteps", reflectionMaxSteps)
   traceEffect:setShaderConst("$reflectionMaxDistance", reflectionMaxDistance)
-  traceEffect:setShaderConst("$reflectionMaxRoughness", reflectionMaxRoughness)
+  traceEffect:setShaderConst("$reflectionMaxRoughness", effectiveRoughness)
   traceEffect:setShaderConst("$reflectionDebugMode", PROGRESSIVE.reflectionDiagnostic.mode)
   traceEffect:setShaderConst("$reflectionSamplingMode", PROGRESSIVE.reflectionSampling.mode)
   traceEffect:setShaderConst("$reflectionSampleIndex", frozen and 0 or PROGRESSIVE.reflectionSampling.sampleIndex)
-  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionTemporalBlend", PROGRESSIVE.reflectionDiagnostic.mode > 0 and 1 or reflectionTemporalBlend)
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionTemporalBlend",
+    (PROGRESSIVE.reflectionDiagnostic.mode > 0 or frozen or lab.raw) and 1
+      or lab.settled and 0.04 or reflectionTemporalBlend)
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionLabCurrentWeight",
+    lab.settled and not frozen and PROGRESSIVE.reflectionDiagnostic.mode == 0 and 0.04 or 0)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionHistoryDepthTolerance", reflectionHistoryDepthTolerance)
-  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionDenoiseStrength", PROGRESSIVE.reflectionDiagnostic.mode > 0 and 0 or reflectionDenoiseStrength)
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionDenoiseStrength",
+    (PROGRESSIVE.reflectionDiagnostic.mode > 0 or frozen or lab.raw) and 0
+      or lab.settled and 0.65 or reflectionDenoiseStrength)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionHistoryValid", reflectionHistoryValid)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionCameraMotion", PROGRESSIVE.cameraMotion)
-  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionMaxRoughness", reflectionMaxRoughness)
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionMaxRoughness", effectiveRoughness)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionSamplingMode", PROGRESSIVE.reflectionSampling.mode)
-  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionReconstructionMode", frozen
+  setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionReconstructionMode", (frozen or lab.raw)
     and 0 or PROGRESSIVE.reflectionReconstruction.mode)
   setIfPresent(REFLECTION_TEMPORAL_EFFECT_NAME, "$reflectionFrameDelta", PROGRESSIVE.reflectionReconstruction.frameDelta)
   setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionStrength", reflectionStrength)
-  setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionMaxRoughness", reflectionMaxRoughness)
+  setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionMaxRoughness", effectiveRoughness)
   setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionDebugMode", PROGRESSIVE.reflectionDiagnostic.mode)
   setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionSamplingMode", PROGRESSIVE.reflectionSampling.mode)
+  setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionLocalResolveEnabled",
+    PROGRESSIVE.reflectionLocalResolve.enabled and PROGRESSIVE.reflectionSampling.mode == 1
+      and PROGRESSIVE.reflectionReconstruction.mode == 1 and not frozen
+      and not PROGRESSIVE.reflectionConvergenceEnabled and not lab.raw and 1 or 0)
+  setIfPresent(REFLECTION_COMPOSE_EFFECT_NAME, "$reflectionLocalResolveStrength", PROGRESSIVE.reflectionLocalResolve.strength)
   local composeEffect = findObject(REFLECTION_COMPOSE_EFFECT_NAME)
   if composeEffect then
     composeEffect:setField("texture", 1, PROGRESSIVE.reflectionDiagnostic.mode > 0
       and "#BeamRT_CurrentReflection" or (varianceActive
-        and "#BeamRT_VarianceReflection" or "#BeamRT_TemporalReflection"))
+        and PROGRESSIVE.reflectionVariance.atrousTargets[PROGRESSIVE.reflectionVariance.passes] or "#BeamRT_TemporalReflection"))
   end
   return true
 end
@@ -1754,6 +1760,11 @@ local function resetReflectionHistory(reason, shouldLog)
 end
 
 local function resetTemporalHistory(reason, shouldLog)
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    -- Coherent samples GI-lit scene color. A changed GI signal must not retain
+    -- reflections accumulated from the previous lighting configuration.
+    M._coherentRenderer.resetHistory()
+  end
   giFrameIndex = 0
   historyValid = 0
   historyWarmupFrames = 0
@@ -1932,6 +1943,9 @@ local function createShaders()
   createShader(GI_TRACE_SHADER_NAME, GI_TRACE_SHADER_ENTRY, {
     "prepassTex", "prepassDepthTex", "backBufferTex", "lightInfoTex", "auxiliaryTex", "materialSpecTex"
   })
+  createShader(M.sharedMeshGI.shaderName,M.sharedMeshGI.shaderEntry,{
+    "prepassTex","prepassDepthTex","backBufferTex","lightInfoTex","auxiliaryTex","meshDataTex"
+  })
   createShader(TEMPORAL_SHADER_NAME, TEMPORAL_SHADER_ENTRY, {
     "currentGITex", "prepassTex", "prepassDepthTex", "velocityTex", "historyTex", "historyMomentsTex"
   })
@@ -1955,11 +1969,14 @@ local function createShaders()
   createShader(REFLECTION_TRACE_SHADER_NAME, REFLECTION_TRACE_SHADER_ENTRY, {
     "prepassTex", "prepassDepthTex", "backBufferTex", "materialSpecTex", "reflectionRadianceTex"
   })
+  createShader(PROGRESSIVE.sssrFork.shaderName, PROGRESSIVE.sssrFork.shaderEntry, {
+    "prepassTex", "prepassDepthTex", "backBufferTex", "materialSpecTex", "reflectionRadianceTex"
+  })
   createShader(REFLECTION_TEMPORAL_SHADER_NAME, REFLECTION_TEMPORAL_SHADER_ENTRY, {
     "currentReflectionTex", "prepassTex", "prepassDepthTex", "velocityTex", "historyReflectionTex", "materialSpecTex"
   })
   createShader(REFLECTION_COMPOSE_SHADER_NAME, REFLECTION_COMPOSE_SHADER_ENTRY, {
-    "backBufferTex", "temporalReflectionTex", "prepassTex", "materialSpecTex"
+    "backBufferTex", "temporalReflectionTex", "prepassTex", "materialSpecTex", "prepassDepthTex"
   })
   createShader(PROGRESSIVE.reflectionVariance.momentsShaderName, PROGRESSIVE.reflectionVariance.momentsShaderEntry, {
     "currentReflectionTex", "prepassTex", "prepassDepthTex", "velocityTex", "historyMomentsTex"
@@ -1968,11 +1985,12 @@ local function createShaders()
     "inputReflectionTex", "prepassTex", "prepassDepthTex", "reflectionMomentsTex", "materialSpecTex"
   })
   createShader(BUFFER_DIAGNOSTIC_SHADER_NAME, BUFFER_DIAGNOSTIC_SHADER_ENTRY, {"inputTex"})
+  createShader(PROGRESSIVE.waterPreview.shaderName, PROGRESSIVE.waterPreview.shaderEntry, {"sceneTex", "prepassDepthTex"})
   createShader(PROGRESSIVE.reflectionHit.inputsShaderName, PROGRESSIVE.reflectionHit.inputsShaderEntry, {
     "velocityTex", "historyHitTex"
   })
   createShader(PROGRESSIVE.reflectionHit.copyShaderName, PROGRESSIVE.reflectionHit.copyShaderEntry, {
-    "currentReflectionTex", "prepassDepthTex", "hitInputsTex", "temporalReflectionTex"
+    "currentReflectionTex", "prepassDepthTex", "hitInputsTex", "temporalReflectionTex", "prepassTex", "materialSpecTex"
   })
   createShader(PROGRESSIVE.reflectionColor.halfShaderName, PROGRESSIVE.reflectionColor.halfShaderEntry, {"sceneTex", "depthTex"})
   createShader(PROGRESSIVE.reflectionColor.atlasShaderName, PROGRESSIVE.reflectionColor.atlasShaderEntry, {"halfRadianceTex"})
@@ -2244,10 +2262,10 @@ function PROGRESSIVE.inputPrep.createEffects()
   auxiliary:setField("texture", 0, "#BeamRT_HistoryGI")
   auxiliary:setField("texture", 1, "#BeamRT_HistoryMoments")
   auxiliary:setField("texture", 2, "#VelocityBuffer")
-  -- Match the shipped native RGB32 DDS layout; the loader rejects both DX10
-  -- and alpha-format headers. BGRX storage preserves the decoded R/G samples.
-  auxiliary:setField("texture", 3, "/shaders/beamrt/beamrtSTBN_128x128x64_rgb_atlas_linear_v094.dds")
-  auxiliary:setField("texture", 4, "/shaders/common/postFx/gtao/noiseBlue.png")
+  -- The v094 RGB-only DDS is still rejected. Its inactive bank is cleared by
+  -- v002; normal startup must not load that broken optional dependency.
+  auxiliary:setField("texture", 3, M.noiseSourcePolicy.atlasBinding())
+  auxiliary:setField("texture", 4, M.noiseSourcePolicy.nativeTexture)
   auxiliary:setField("texture", 5, "#BeamRT_SurfelRadianceCurrent")
   auxiliary:setField("target", 0, PROGRESSIVE.inputPrep.auxiliaryTarget)
   auxiliary:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
@@ -2307,7 +2325,9 @@ local function createGIEffect()
   momentsEffect:setField("texture", 3, "#VelocityBuffer")
   momentsEffect:setField("texture", 4, "#BeamRT_HistoryMoments")
   momentsEffect:setField("target", 0, "#BeamRT_CurrentMoments")
-  momentsEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
+  -- Squared HDR luminance can exceed half-float even for finite R16F GI.
+  -- Preserve its statistics rather than clamping the incoming lighting.
+  momentsEffect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
   momentsEffect:setField("targetScale", 0, giScaleText)
   momentsEffect:registerObject(PROGRESSIVE.svgf.effectName)
 
@@ -2367,7 +2387,7 @@ local function createGIEffect()
   momentsCopyEffect:setField("stateBlock", 0, STATE_NAME)
   momentsCopyEffect:setField("texture", 0, "#BeamRT_CurrentMoments")
   momentsCopyEffect:setField("target", 0, "#BeamRT_HistoryMoments")
-  momentsCopyEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
+  momentsCopyEffect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
   momentsCopyEffect:setField("targetScale", 0, giScaleText)
   momentsCopyEffect:registerObject(PROGRESSIVE.svgf.copyEffectName)
 
@@ -2439,6 +2459,7 @@ function PROGRESSIVE.reflectionHit.createInputs()
   effect:setField("target", 0, hit.inputsTarget)
   effect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
   effect:setField("targetScale", 0, "1 1")
+  effect:setField("targetSize", 0, "1 2")
   -- Named targets must exist at native onAdd/registration time. Registering
   -- first leaves this motion-data pass without its off-screen target and can
   -- send its output into the scene instead. Reload to recreate old objects.
@@ -2448,19 +2469,25 @@ end
 function PROGRESSIVE.reflectionHit.createCopy(parent)
   local hit = PROGRESSIVE.reflectionHit
   local effect = findObject(hit.copyEffectName)
+  local isNew = not effect
   if not effect then
     effect = createObject("PostEffect")
     effect.isEnabled = false
-    effect:setField("shader", 0, hit.copyShaderName)
     effect.allowReflectPass = false
-    effect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
-    effect:setField("texture", 0, "#BeamRT_CurrentReflection")
-    effect:setField("texture", 1, "#prepass[Depth]")
-    effect:setField("texture", 2, hit.inputsTarget)
-    effect:setField("texture", 3, "#BeamRT_TemporalReflection")
-    effect:setField("target", 0, hit.historyTarget)
-    effect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
-    effect:setField("targetScale", 0, "1 1")
+  end
+  effect:setField("shader", 0, hit.copyShaderName)
+  effect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
+  effect:setField("texture", 0, "#BeamRT_CurrentReflection")
+  effect:setField("texture", 1, "#prepass[Depth]")
+  effect:setField("texture", 2, hit.inputsTarget)
+  effect:setField("texture", 3, "#BeamRT_TemporalReflection")
+  effect:setField("texture", 4, "#prepass[RT0]")
+  effect:setField("texture", 5, "#prepass[RT1]")
+  effect:setField("target", 0, hit.historyTarget)
+  effect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
+  effect:setField("targetScale", 0, "1 1")
+  effect:setField("targetSize", 0, "1 2")
+  if isNew then
     effect:registerObject(hit.copyEffectName)
     parent:add(effect)
   end
@@ -2470,13 +2497,19 @@ local function createReflectionEffect()
   PROGRESSIVE.reflectionColor.createEffects()
   PROGRESSIVE.reflectionHit.createInputs()
   local effect = findObject(REFLECTION_EFFECT_NAME)
-  if effect and not findObject(PROGRESSIVE.reflectionVariance.momentsEffectName) then
-    -- A prior extension reload can retain the old four-stage PostEffect tree.
-    -- Recreate the reflection tree when installing these new child passes.
+  if effect and (PROGRESSIVE.reflectionVariance.enabled ~= (findObject(PROGRESSIVE.reflectionVariance.momentsEffectName)~=nil)
+      or (PROGRESSIVE.reflectionVariance.enabled and
+        (not findObject(PROGRESSIVE.reflectionVariance.atrousEffectNames[PROGRESSIVE.reflectionVariance.passes])
+        or (PROGRESSIVE.reflectionVariance.passes == 1 and findObject(PROGRESSIVE.reflectionVariance.atrousEffectNames[2]))))) then
+    -- OFF restores the original graph. Rebuild when the selected scale count
+    -- changes, including a retained old one-scale graph after a Lua reload.
     for _, name in ipairs({PROGRESSIVE.reflectionHit.copyEffectName,
+        PROGRESSIVE.reflectionVariance.momentsCopyEffectName,PROGRESSIVE.reflectionVariance.atrousEffectName,
+        PROGRESSIVE.reflectionVariance.atrousEffectNames[2], PROGRESSIVE.reflectionVariance.atrousEffectNames[3],
+        PROGRESSIVE.reflectionVariance.momentsEffectName,
         REFLECTION_COPY_EFFECT_NAME, REFLECTION_COMPOSE_EFFECT_NAME,
         REFLECTION_TEMPORAL_EFFECT_NAME, REFLECTION_EFFECT_NAME}) do
-      deleteObject(name)
+      local old=findObject(name);if old then old:delete() end
     end
     effect = nil
   end
@@ -2496,8 +2529,9 @@ local function createReflectionEffect()
       composeEffect:setField("targetScale", 0, "1 1")
       composeEffect:setField("texture", 1, PROGRESSIVE.reflectionDiagnostic.mode > 0
         and "#BeamRT_CurrentReflection" or (PROGRESSIVE.reflectionVariance.enabled
-          and "#BeamRT_VarianceReflection" or "#BeamRT_TemporalReflection"))
+          and PROGRESSIVE.reflectionVariance.atrousTargets[PROGRESSIVE.reflectionVariance.passes] or "#BeamRT_TemporalReflection"))
       composeEffect:setField("texture", 3, "#prepass[RT1]")
+      composeEffect:setField("texture", 4, "#prepass[Depth]")
     end
     local copyEffect = findObject(REFLECTION_COPY_EFFECT_NAME)
     if copyEffect then PROGRESSIVE.reflectionHit.createCopy(copyEffect) end
@@ -2520,7 +2554,9 @@ local function createReflectionEffect()
   effect:setField("targetScale", 0, "1 1")
   effect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
 
-  local momentsEffect = createObject("PostEffect")
+  local momentsEffect
+  if PROGRESSIVE.reflectionVariance.enabled then
+  momentsEffect = createObject("PostEffect")
   momentsEffect:setField("shader", 0, PROGRESSIVE.reflectionVariance.momentsShaderName)
   momentsEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
   momentsEffect:setField("texture", 0, "#BeamRT_CurrentReflection")
@@ -2532,6 +2568,7 @@ local function createReflectionEffect()
   momentsEffect:setField("targetScale", 0, "1 1")
   momentsEffect:setField("targetFormat", 0, "GFXFormatR32G32B32A32F")
   momentsEffect:registerObject(PROGRESSIVE.reflectionVariance.momentsEffectName)
+  end
 
   local temporalEffect = createObject("PostEffect")
   temporalEffect:setField("shader", 0, REFLECTION_TEMPORAL_SHADER_NAME)
@@ -2547,18 +2584,25 @@ local function createReflectionEffect()
   temporalEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
   temporalEffect:registerObject(REFLECTION_TEMPORAL_EFFECT_NAME)
 
-  local atrousEffect = createObject("PostEffect")
-  atrousEffect:setField("shader", 0, PROGRESSIVE.reflectionVariance.atrousShaderName)
-  atrousEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
-  atrousEffect:setField("texture", 0, "#BeamRT_TemporalReflection")
-  atrousEffect:setField("texture", 1, "#prepass[RT0]")
-  atrousEffect:setField("texture", 2, "#prepass[Depth]")
-  atrousEffect:setField("texture", 3, "#BeamRT_CurrentReflectionMoments")
-  atrousEffect:setField("texture", 4, "#prepass[RT1]")
-  atrousEffect:setField("target", 0, "#BeamRT_VarianceReflection")
-  atrousEffect:setField("targetScale", 0, "1 1")
-  atrousEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
-  atrousEffect:registerObject(PROGRESSIVE.reflectionVariance.atrousEffectName)
+  local atrousEffects = {}
+  if PROGRESSIVE.reflectionVariance.enabled then
+    for index = 1, PROGRESSIVE.reflectionVariance.passes do
+      local atrousEffect = createObject("PostEffect")
+      atrousEffect:setField("shader", 0, PROGRESSIVE.reflectionVariance.atrousShaderName)
+      atrousEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
+      atrousEffect:setField("texture", 0, index == 1 and "#BeamRT_TemporalReflection"
+        or PROGRESSIVE.reflectionVariance.atrousTargets[index - 1])
+      atrousEffect:setField("texture", 1, "#prepass[RT0]")
+      atrousEffect:setField("texture", 2, "#prepass[Depth]")
+      atrousEffect:setField("texture", 3, "#BeamRT_CurrentReflectionMoments")
+      atrousEffect:setField("texture", 4, "#prepass[RT1]")
+      atrousEffect:setField("target", 0, PROGRESSIVE.reflectionVariance.atrousTargets[index])
+      atrousEffect:setField("targetScale", 0, "1 1")
+      atrousEffect:setField("targetFormat", 0, "GFXFormatR16G16B16A16F")
+      atrousEffect:registerObject(PROGRESSIVE.reflectionVariance.atrousEffectNames[index])
+      atrousEffects[index] = atrousEffect
+    end
+  end
 
   local composeEffect = createObject("PostEffect")
   composeEffect:setField("shader", 0, REFLECTION_COMPOSE_SHADER_NAME)
@@ -2566,9 +2610,10 @@ local function createReflectionEffect()
   composeEffect:setField("texture", 0, "$backBuffer")
   composeEffect:setField("texture", 1, PROGRESSIVE.reflectionDiagnostic.mode > 0
     and "#BeamRT_CurrentReflection" or (PROGRESSIVE.reflectionVariance.enabled
-      and "#BeamRT_VarianceReflection" or "#BeamRT_TemporalReflection"))
+      and PROGRESSIVE.reflectionVariance.atrousTargets[PROGRESSIVE.reflectionVariance.passes] or "#BeamRT_TemporalReflection"))
   composeEffect:setField("texture", 2, "#prepass[RT0]")
   composeEffect:setField("texture", 3, "#prepass[RT1]")
+  composeEffect:setField("texture", 4, "#prepass[Depth]")
   composeEffect:setField("target", 0, "$backBuffer")
   composeEffect:setField("targetScale", 0, "1 1")
   composeEffect:registerObject(REFLECTION_COMPOSE_EFFECT_NAME)
@@ -2582,6 +2627,7 @@ local function createReflectionEffect()
   copyEffect:registerObject(REFLECTION_COPY_EFFECT_NAME)
   PROGRESSIVE.reflectionHit.createCopy(copyEffect)
 
+  if PROGRESSIVE.reflectionVariance.enabled then
   local momentsCopyEffect = createObject("PostEffect")
   momentsCopyEffect:setField("shader", 0, COPY_SHADER_NAME)
   momentsCopyEffect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
@@ -2594,10 +2640,18 @@ local function createReflectionEffect()
   -- Moment history must copy only after all readers use the old history.
   copyEffect:add(momentsCopyEffect)
   composeEffect:add(copyEffect)
-  atrousEffect:add(composeEffect)
-  temporalEffect:add(atrousEffect)
+  atrousEffects[PROGRESSIVE.reflectionVariance.passes]:add(composeEffect)
+  for index = PROGRESSIVE.reflectionVariance.passes - 1, 1, -1 do
+    atrousEffects[index]:add(atrousEffects[index + 1])
+  end
+  temporalEffect:add(atrousEffects[1])
   momentsEffect:add(temporalEffect)
   effect:add(momentsEffect)
+  else
+    composeEffect:add(copyEffect)
+    temporalEffect:add(composeEffect)
+    effect:add(temporalEffect)
+  end
   effect:registerObject(REFLECTION_EFFECT_NAME)
   beamrtLog("I", "created " .. REFLECTION_EFFECT_NAME .. " with premultiplied radiance, temporal reconstruction, conservative additive compose and history copy; native environment reflections retained")
   return effect
@@ -2791,6 +2845,11 @@ giCallbacks.onDisabled = function()
 end
 
 giCallbacks.preProcess = function()
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer']
+  if not M._visibilityPreparing and buffer and buffer.getStatus().active then
+    if buffer.consumePreparedFrame()then return true end
+    buffer.invalidateFrame()
+  end
   -- Keep the off-screen lighting cache centered around the player without
   -- raycasting every frame. This makes the beauty mode usable while driving.
   surfelRefreshCheckFrames = surfelRefreshCheckFrames + 1
@@ -2811,12 +2870,21 @@ giCallbacks.preProcess = function()
     PROGRESSIVE.reflectionSampling.sampleIndex = 0
     applyGIShaderConsts()
     applyReflectionShaderConsts()
-    return
+    return false, 'current GI camera unavailable'
   end
   historyValid = historyWarmupFrames > 0 and 1 or 0
   historyWarmupFrames = historyWarmupFrames + 1
   giFrameIndex = (giFrameIndex + 1) % 4096
   applyGIShaderConsts()
+  return true
+end
+
+function M._prepareGIFrame()
+  M._visibilityPreparing=true
+  local ok,prepared,why=pcall(giCallbacks.preProcess)
+  M._visibilityPreparing=false
+  if not ok then error(prepared)end
+  return prepared,why
 end
 
 giCallbacks.setShaderConsts = function()
@@ -2831,6 +2899,42 @@ PROGRESSIVE.inputPrep.callbacks.setShaderConsts = function()
   PROGRESSIVE.inputPrep.applyConsts()
 end
 
+function PROGRESSIVE.waterPreview.createEffect()
+  local water = PROGRESSIVE.waterPreview
+  local effect = findObject(water.effectName)
+  if effect then return effect end
+  effect = createObject("PostEffect")
+  effect.isEnabled = false
+  effect.allowReflectPass = false
+  effect.renderPriority = 9990
+  effect:setField("renderTime", 0, "PFXAfterDiffuse")
+  effect:setField("shader", 0, water.shaderName)
+  effect:setField("stateBlock", 0, "BeamRT_ReflectionTemporalState")
+  effect:setField("texture", 0, "$backBuffer")
+  effect:setField("texture", 1, "#prepass[Depth]")
+  effect:setField("target", 0, "$backBuffer")
+  effect:setField("targetScale", 0, "1 1")
+  effect:registerObject(water.effectName)
+  return effect
+end
+
+function PROGRESSIVE.waterPreview.applyConsts()
+  local water = PROGRESSIVE.waterPreview
+  local effect = findObject(water.effectName)
+  if not effect then return false end
+  local ok, camera = pcall(getCurrentCameraPosition)
+  local valid = ok and camera and finiteComponent(camera.x) and finiteComponent(camera.y) and finiteComponent(camera.z)
+  effect:setShaderConst("$waterReceiverPreviewEnabled", water.enabled and valid and 1 or 0)
+  if not valid then return false end
+  effect:setShaderConst("$eyePosWorld", string.format("%.9g %.9g %.9g", camera.x, camera.y, camera.z))
+  for name, value in pairs(water.provider.getShaderConstants()) do effect:setShaderConst("$" .. name, value) end
+  return true
+end
+
+PROGRESSIVE.waterPreview.callbacks.preProcess = function()
+  return PROGRESSIVE.waterPreview.applyConsts()
+end
+
 local function installCallbacks()
   rawset(_G, DEBUG_CALLBACKS_NAME, debugCallbacks)
   rawset(_G, GI_CALLBACKS_NAME, giCallbacks)
@@ -2840,6 +2944,7 @@ local function installCallbacks()
   rawset(_G, PROGRESSIVE.reflectionColor.halfEffectName .. "Callbacks", PROGRESSIVE.reflectionColor.callbacks)
   rawset(_G, PROGRESSIVE.inputPrep.callbacksName, PROGRESSIVE.inputPrep.callbacks)
   rawset(_G, PROGRESSIVE.voxel.callbacksName, PROGRESSIVE.voxel.callbacks)
+  rawset(_G, PROGRESSIVE.waterPreview.effectName .. "Callbacks", PROGRESSIVE.waterPreview.callbacks)
   for _, source in pairs(BUFFER_DIAGNOSTIC_SOURCES) do
     rawset(_G, source.effectName .. "Callbacks", bufferDiagnosticCallbacks)
   end
@@ -2857,6 +2962,7 @@ local function createObjects()
   PROGRESSIVE.inputPrep.createEffects()
   createGIEffect()
   createReflectionEffect()
+  PROGRESSIVE.waterPreview.createEffect()
   PROGRESSIVE.voxel.createEffect()
   markSurfelGeometryDirty()
   applyShaderConsts()
@@ -2881,35 +2987,508 @@ local function setEffectEnabled(name, shouldEnable)
 end
 
 function PROGRESSIVE.reflectionHit.sync()
-  local selected = enabledRequested and (debugMode == MODE_IDS.reflections
+  local selected = enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested)
+    and (debugMode == MODE_IDS.reflections
     or debugMode == MODE_IDS.diffusegi and reflectionOverlayEnabled
       and PROGRESSIVE.rayDebugMode < 0.5 and PROGRESSIVE.lightingDiagnostic.mode < 0.5)
-  local active = selected and PROGRESSIVE.reflectionHit.configured()
+  local active = selected and PROGRESSIVE.reflectionHit.configured() and PROGRESSIVE.reflectionHit.sizeValid
   setEffectEnabled(PROGRESSIVE.reflectionHit.inputsEffectName, active)
   setEffectEnabled(PROGRESSIVE.reflectionHit.copyEffectName, active)
   setEffectEnabled(PROGRESSIVE.reflectionColor.halfEffectName, selected and PROGRESSIVE.reflectionColor.configured())
 end
 
+function PROGRESSIVE.waterPreview.sync()
+  local water = PROGRESSIVE.waterPreview
+  local selected = water.enabled and enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested)
+    and not materialCachePublication and not CLEAN_RADIANCE.build
+    and not PROGRESSIVE.reflectionSourceProbeTarget
+    and (debugMode == MODE_IDS.diffusegi or debugMode == MODE_IDS.reflections)
+    and PROGRESSIVE.rayDebugMode < 0.5 and PROGRESSIVE.lightingDiagnostic.mode < 0.5
+    and not PROGRESSIVE.reflectionSampling.isFrozen() and not PROGRESSIVE.reflectionConvergenceEnabled
+    and water.provider.getStatus().available
+  setEffectEnabled(water.effectName, selected and water.applyConsts() or false)
+end
+
 local function syncEffectEnablement()
-  local useGI = enabledRequested and debugMode == MODE_IDS.diffusegi
+  -- 0.40 native SSR replaces RT1's F0/retro data before our late passes.
+  -- Until an early producer is verified, pause our shading, not native SSR.
+  local renderRequested = enabledRequested and PROGRESSIVE.rendererCompatibility.check().safe
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    renderRequested = renderRequested and M._coherentRenderer.getStatus().active
+      and PROGRESSIVE.rayDebugMode < 0.5 and PROGRESSIVE.lightingDiagnostic.mode < 0.5
+      and not materialCachePublication and not CLEAN_RADIANCE.build
+  end
+  local useGI = renderRequested and debugMode == MODE_IDS.diffusegi
   local useGIDiagnostic = useGI and (PROGRESSIVE.rayDebugMode > 0.5
     or PROGRESSIVE.lightingDiagnostic.mode > 0.5)
   local useSurfelCache = useGI and giSourceMode ~= 1 and PROGRESSIVE.rayDebugMode < 0.5
-  local useReflections = enabledRequested and (
+  local useReflections = renderRequested
+    and not (M._coherentRenderer and M._coherentRenderer.getStatus().requested) and (
     debugMode == MODE_IDS.reflections
     or (debugMode == MODE_IDS.diffusegi and reflectionOverlayEnabled and not useGIDiagnostic))
-  local useBufferDiagnostic = enabledRequested and debugMode == MODE_IDS.bufferdiag
-  local useVoxelDDA = enabledRequested and debugMode == MODE_IDS.voxeldda
-  setEffectEnabled(DEBUG_EFFECT_NAME, enabledRequested and not useGI and not useReflections and not useBufferDiagnostic and not useVoxelDDA)
+  local useBufferDiagnostic = renderRequested and debugMode == MODE_IDS.bufferdiag
+  local useVoxelDDA = renderRequested and debugMode == MODE_IDS.voxeldda
+  setEffectEnabled(DEBUG_EFFECT_NAME, renderRequested and not useGI and not useReflections and not useBufferDiagnostic and not useVoxelDDA)
   setEffectEnabled(SURFEL_CACHE_EFFECT_NAME, useSurfelCache)
   setEffectEnabled(PROGRESSIVE.inputPrep.receiverEffectName, useGI)
   setEffectEnabled(GI_EFFECT_NAME, useGI)
+  if not useGI then
+    local pack=package.loaded['ge/extensions/beamrt/meshSceneInputs']
+    if pack then pack.disable() end
+    local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('GI is not rendering')end
+    if M.sharedMeshGI.bound then
+      local trace=findObject(GI_EFFECT_NAME)
+      if trace then
+        trace:setField('shader',0,GI_TRACE_SHADER_NAME)
+        trace:setField('texture',3,'#lightinfo[RT0]');trace:setField('texture',5,'#prepass[RT1]')
+      end
+      M.sharedMeshGI.bound=false
+    end
+    M.sharedMeshGI.bufferEffective=false
+    M.sharedMeshGI.effective=false;M.sharedMeshGI.key='';M.sharedMeshGI.reason='GI is not rendering'
+  end
   setEffectEnabled(REFLECTION_EFFECT_NAME, useReflections)
   PROGRESSIVE.reflectionHit.sync()
   setEffectEnabled(PROGRESSIVE.voxel.effectName, useVoxelDDA)
+  if PROGRESSIVE.waterPreview then PROGRESSIVE.waterPreview.sync() end
   for sourceKey, source in pairs(BUFFER_DIAGNOSTIC_SOURCES) do
     setEffectEnabled(source.effectName, useBufferDiagnostic and sourceKey == bufferDiagnosticSource)
   end
+end
+
+function PROGRESSIVE.refreshRendererCompatibility()
+  local changed, status = PROGRESSIVE.rendererCompatibility.update()
+  if changed then
+    resetTemporalHistory("renderer compatibility changed", false)
+    resetReflectionHistory("renderer compatibility changed", false)
+    if not status.safe then
+      -- An object-level native toggle need not emit onSettingsChanged. Do not
+      -- let a running audit label paused BeamRT frames as GI/SSR comparisons.
+      PROGRESSIVE.lightingAudit.cancel(M, "renderer compatibility changed")
+    end
+    if not status.safe and CLEAN_RADIANCE.build then
+      CLEAN_RADIANCE.finishBuild("renderer compatibility changed", false)
+    end
+    if enabledRequested then
+      beamrtLog(status.safe and "I" or "W", status.reason)
+      -- Material publication deliberately isolates a producer RenderView and
+      -- pauses normal effects. Its finish path owns restoring that selection.
+      if not materialCachePublication then syncEffectEnablement() end
+    end
+  end
+  return status.safe
+end
+
+function M.getRendererCompatibilityStatus()
+  local status = PROGRESSIVE.rendererCompatibility.check()
+  status.requested = enabledRequested
+  status.normalEffectsAllowed = status.safe and enabledRequested
+  status.earlyMaterialCaptureImplemented = false
+  return status
+end
+
+function M.setReflectionLabProfile(value)
+  local lab = PROGRESSIVE.reflectionLab
+  if not lab.policy.resolve(value) then return false, "Unknown reflection lab comparison." end
+  if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
+    or PROGRESSIVE.reflectionSourceProbeTarget or PROGRESSIVE.lightingAudit.getStatus().active then
+    return false, "Finish the reflection diagnostic/capture before changing the lab comparison."
+  end
+  if lab.mode == value then return true end
+  lab.mode = value
+  resetReflectionHistory("reflection lab comparison changed", false)
+  applyReflectionShaderConsts()
+  beamrtLog("I", "reflection lab: " .. value .. "; transient comparison, not a quality preset or accuracy claim")
+  return true
+end
+
+function M.getReflectionLabStatus()
+  local lab = PROGRESSIVE.reflectionLab
+  local result = lab.policy.resolve(lab.mode)
+  result.backend = PROGRESSIVE.sssrFork.backend
+  result.suspended = PROGRESSIVE.reflectionConvergenceEnabled == true or PROGRESSIVE.reflectionSourceProbeTarget ~= nil
+  result.effectiveProfile = result.suspended and "normal" or lab.mode
+  result.nativeSettingsChanged = false
+  result.saved = false
+  return result
+end
+
+function M.setReflectionTraceBackend(value)
+  if value ~= "fork" and value ~= "experimental" then
+    return false, "Trace backend must be fork or experimental."
+  end
+  if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
+    or PROGRESSIVE.reflectionSourceProbeTarget then
+    return false, "Finish the reflection diagnostic/capture before changing trace backend."
+  end
+  if PROGRESSIVE.sssrFork.backend == value then return true end
+  local shaderName = value == "fork" and PROGRESSIVE.sssrFork.shaderName or REFLECTION_TRACE_SHADER_NAME
+  if not findObject(shaderName) then createObjects() end
+  if not findObject(shaderName) then return false, "Requested BeamRT trace shader is unavailable." end
+  PROGRESSIVE.sssrFork.backend = value
+  resetReflectionHistory("BeamRT trace backend changed", false)
+  applyReflectionShaderConsts()
+  beamrtLog("I", "BeamRT trace backend: " .. value .. "; not the integrated native SSR renderer")
+  return true
+end
+
+function M.setSsrForkEnabled(value)
+  if type(value) ~= "boolean" then return false, "Fork enabled must be boolean." end
+  if not value then
+    if PROGRESSIVE.sssrFork.backend == "fork" then
+      if debugMode == MODE_IDS.reflections then return M.disable() end
+      return M.setReflectionsEnabled(false)
+    end
+    return true
+  end
+  local compatibility = PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then
+    return false, "Turn integrated native SSR off before testing the independent BeamRT fork. " .. compatibility.reason
+  end
+  local selected, reason = M.setReflectionTraceBackend("fork")
+  if not selected then return false, reason end
+  if not M.setMode("reflections") then return false, "Could not select BeamRT reflections mode." end
+  M.openTuner()
+  return M.enable()
+end
+
+function M.setCoherentSsrEnabled(value)
+  if type(value) ~= "boolean" then return false, "Coherent SSR enabled must be boolean." end
+  if not value then
+    if M._ptgiCoherent and M._ptgiCoherent.requested then return M.disable() end
+    return M._coherentRenderer.disable("Coherent SSR disabled by user")
+  end
+  if M._ptgiCoherent and (M._ptgiCoherent.requested or effectIsEnabled(GI_EFFECT_NAME)) then
+    if M._ptgiCoherent.requested and M.getPtgiCoherentStatus().active then return true end
+    return M.setPtgiCoherentEnabled(true)
+  end
+  return M._enableCoherentBackend()
+end
+
+-- Shared startup implementation, not the public switch that joins active GI.
+-- Keeps combined startup non-recursive and all capture/compatibility guards.
+function M._enableCoherentBackend(beauty)
+  if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
+    or PROGRESSIVE.reflectionSourceProbeTarget or materialCachePublication or CLEAN_RADIANCE.build
+    or CLEAN_RADIANCE.materialBatch
+    or PROGRESSIVE.reflectionDiagnostic.mode ~= 0 or PROGRESSIVE.lightingAudit.getStatus().active then
+    return false, "Finish the active BeamRT diagnostic/capture before switching pipelines."
+  end
+  local compatibility = PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then return false, compatibility.reason end
+  local stopped = M.disable()
+  if not stopped then return false, "Could not safely release the previous rendering experiment." end
+  if beauty then
+    -- Starting combined beauty must not inherit a ray/debug display from the
+    -- previous session. Do this only after capture guards and safe teardown.
+    if PROGRESSIVE.rayDebugMode>0 and not M.setRayHitDiagnostic('off') then return false,'Could not restore GI ray beauty.' end
+    if PROGRESSIVE.lightingDiagnostic.mode>0 and not M.setLightingDiagnostic('off') then return false,'Could not restore GI lighting beauty.' end
+    local restored,why=M._coherentRenderer.setParameter('debugView',0)
+    if not restored then return false,why end
+    -- Coherent releases/recreates its graph on every restart. PTGI must not
+    -- carry cached child targets/shader requirements across that teardown.
+    local rebuilt,why=M._rebuildPtgiPassGraph()
+    if not rebuilt then return false,why end
+  end
+  local ok, reason = M._coherentRenderer.enable()
+  if ok and M._startAutomaticLampShadows then M._startAutomaticLampShadows() end
+  beamrtLog(ok and "I" or "W", "Coherent SSR: " .. tostring(reason or M._coherentRenderer.getStatus().reason))
+  M.openTuner()
+  return ok, reason
+end
+
+function M.getCoherentSsrStatus()
+  return M._coherentRenderer.getStatus()
+end
+
+function M.setCoherentSsrParameter(name, value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested
+    and ((name == 'hdrComposite' and value ~= true) or (name == 'debugView' and value ~= 0)) then
+    return false, 'Disable combined rendering before changing reflection stage or diagnostic view.'
+  end
+  return M._coherentRenderer.setParameter(name, value)
+end
+
+function M.getPtgiCoherentStatus()
+  return M._ptgiCoherent.getStatus(M)
+end
+
+function M.setPtgiNamedHandoffEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if M._ptgiCoherent.requested or M._ptgiCoherent.hasLease() then
+    return false,'Disable combined rendering before changing the scene-source experiment.'
+  end
+  M._ptgiCoherent.namedHandoff=value
+  return true
+end
+
+function M.logPtgiCoherentStatus()
+  local report={combined=M.getPtgiCoherentStatus(),reflections=M.getCoherentSsrStatus(),
+    rayDebugMode=PROGRESSIVE.rayDebugMode,lightingDiagnostic=PROGRESSIVE.lightingDiagnostic.mode,
+    volumes=M._localVolumes and M._localVolumes.getStatus() or nil,passes={}}
+  for _,name in ipairs({'BeamRT_GIFx','BeamRT_ComposeFx','BeamRTCoherentPostEffectHiZ0Pass',
+    'BeamRTCoherentPostEffectColorMip1Pass','BeamRTCoherentPostEffectTracePass',
+    'BeamRTCoherentPostEffectNativeResolvePass','BeamRTCoherentPostEffectApplyPass','BeamRT_LocalVolumeFx'}) do
+    local ok,pass=pcall(function()
+      local object=findObject(name)
+      if not object then return {name=name,missing=true} end
+      return {name=name,enabled=object:isEnabled(),time=object:getField('renderTime',0),
+        bin=object:getField('renderBin',0),priority=object.renderPriority,
+        target=object:getField('target',0),format=object:getField('targetFormat',0),
+        source=object:getField('texture',0),aux=object:getField('texture',3),skip=object:getField('skip',0),
+        shader=object:getField('shader',0)}
+    end)
+    report.passes[#report.passes+1]=ok and pass or {name=name,error=tostring(pass)}
+  end
+  beamrtLog('I','Combined pipeline CPU bindings (not GPU texture contents): '..jsonEncode(report))
+  return report
+end
+
+function M.getLocalVolumeStatus() return M._localVolumes.getStatus() end
+function M.getGlassShadowProbeStatus() return M._glassShadowProbe.getStatus() end
+function M.getGlassSunShadowStatus() return M._glassSunShadow.getStatus() end
+function M.listLightVisibilityCandidates()
+  local report,why=M._lightVisibilityDiagnostic.list()
+  if report then
+    beamrtLog('I','Light visibility: '..report.total..' scene lights; nearest '..#report.lights..' listed. '..report.scope)
+    for _,row in ipairs(report.lights)do
+      beamrtLog('I','ID '..tostring(row.id)..' | '..tostring(row.name)..' | '..(row.rejected or
+        (tostring(row.type)..' | '..string.format('%.1f m',row.distance or 0)..' | enabled='..tostring(row.enabled)
+        ..' | shadow requested='..tostring(row.castShadows))))
+    end
+  else beamrtLog('W','Light visibility candidates: '..tostring(why))end
+  return report,why
+end
+function M.inspectNativeShadowInputs(token)
+  local report=M._nativeShadowDiagnostic.inspect(token)
+  beamrtLog('I','Native shadow input contract: '..jsonEncode(report));return report
+end
+function M.stopNativeShadowDiagnostic()return M._nativeShadowDiagnostic.disable()end
+function M.startNativeShadowDiagnostic(token,probe)
+  if probe~=nil and probe~='visibility'and probe~='dispatch'and probe~='selector'then
+    return false,'Use visibility, dispatch or selector probe.'
+  end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen()then
+    return false,'Finish captures before starting native shadow diagnostics.'
+  end
+  if M._nativeShadowDiagnostic.getStatus().enabled then
+    local stopped,why=M._nativeShadowDiagnostic.disable();if not stopped then return false,why end
+  end
+  local report=M.inspectNativeShadowInputs(token);if not report.canStart then return false,report.reason end
+  if not M.disable()then return false,'Previous renderer ownership could not be restored.'end
+  local ok,why=M._nativeShadowDiagnostic.enable(token,probe)
+  beamrtLog(ok and'I'or'W','Native shadow diagnostic: '..tostring(why));return ok,why
+end
+function M.getNativeShadowDiagnosticStatus()
+  local report=M._nativeShadowDiagnostic.getStatus();beamrtLog('I','Native shadow diagnostic status: '..jsonEncode(report));return report
+end
+function M.setLightVisibilityDiagnostic(view,id)
+  if view=='off'then return M._lightVisibilityDiagnostic.disable()end
+  if M._nativeShadowDiagnostic.getStatus().enabled then return false,'Stop the native shadow diagnostic before starting the screen-space one.'end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen() then
+    return false,'Finish captures before starting the light visibility diagnostic.'
+  end
+  if id~=nil then return M._lightVisibilityDiagnostic.enable(id,view)end
+  if not M._lightVisibilityDiagnostic.getStatus().enabled then return false,'Choose an explicit native light ID first.'end
+  return M._lightVisibilityDiagnostic.setMode(view)
+end
+function M.getLightVisibilityDiagnosticStatus()
+  local report=M._lightVisibilityDiagnostic.getStatus()
+  beamrtLog('I','Light visibility diagnostic: '..jsonEncode(report));return report
+end
+function M.inspectGlassSunMaterials()
+  local report=M._glassSunShadow.inspectMaterials()
+  beamrtLog('I','Window material inspection: '..report.reason)
+  for _,row in ipairs(report.materials) do
+    beamrtLog('I',row.name..': '..tostring(row.reason)..' | live fields '..jsonEncode(row.fields))
+  end
+  return report
+end
+function M.setGlassSunShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._glassSunShadow.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before capturing window shadows.' end
+  local restored,why=M._glassShadowProbe.disable()
+  if not restored then return false,why end
+  return M._glassSunShadow.enable()
+end
+function M.setGlassSunShadowStrength(value) return M._glassSunShadow.setStrength(value) end
+function M.startGlassTest()
+  local targetOK,targetWhy=M._glassSunShadow.checkTarget()
+  if not targetOK then return false,targetWhy end
+  if not simTimeAuthority or not simTimeAuthority.getPause() then
+    return false,'Park in sunlight and pause physics with J, then run startGlassTest() again.'
+  end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before starting the glass test.' end
+  local compatibility=PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then return false,compatibility.reason end
+  if not M.disable() then return false,'Previous render ownership could not be restored.' end
+  local ok,why=M.setPtgiNamedHandoffEnabled(false);if not ok then return false,why end
+  for _,setting in ipairs({{'hdrComposite',true},{'terrainMaskEnable',false},{'nativeMaterialResponse',true},
+    {'debugView',0},{'stochasticSSR',true},{'stochasticRayCount',8},{'temporalDenoising',true}}) do
+    ok,why=M.setCoherentSsrParameter(setting[1],setting[2]);if not ok then return false,why end
+  end
+  ok,why=M.setPtgiCoherentEnabled(true);if not ok then return false,why end
+  ok,why=M.setAutomaticLampShadowsEnabled(true);if not ok then return false,why end
+  M._glassSunShadow.setStrength(1)
+  ok,why=M.setGlassSunShadowsEnabled(true)
+  if not ok then beamrtLog('W','Glass test: '..tostring(why));return false,why end
+  beamrtLog('I','Glass test: PTGI + Coherent, native material response, 8 reflection rays, temporal accumulation, automatic lamp shadows. Haze/debug/named HDR off. GI tuning retained. '..tostring(why))
+  M.openTuner();return true,why
+end
+function M.inspectGlassShadowMaterials() return M._glassShadowProbe.inspect() end
+function M.setGlassShadowProbeEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._glassShadowProbe.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before trying window shadows.' end
+  return M._glassShadowProbe.enable()
+end
+function M.setLocalVolumesEnabled(value)
+  if type(value)~='boolean' then return false,'Expected boolean.' end
+  if not value then return M._localVolumes.disable() end
+  if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+    or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+    or PROGRESSIVE.reflectionSampling.isFrozen() then return false,'Finish captures before enabling local haze.' end
+  if not effectIsEnabled(GI_EFFECT_NAME) and not M._coherentRenderer.getStatus().active then
+    return false,'Start GI or Coherent before enabling local haze.'
+  end
+  if M._coherentRenderer.getStatus().active and not M._coherentRenderer.getOptions().hdrComposite then
+    return false,'Local haze requires the Coherent HDR stage.'
+  end
+  return M._localVolumes.enable()
+end
+function M.setLocalVolumeParameter(key,value) return M._localVolumes.setParameter(key,value) end
+function M.setEmissiveVolumesEnabled(value) return M._localVolumes.setEmissiveEnabled(value) end
+function M.setVehicleVolumesEnabled(value) return M._localVolumes.setVehicleEnabled(value) end
+
+function M.setPtgiCoherentEnabled(value)
+  if type(value) ~= 'boolean' then return false, 'Combined rendering enabled must be boolean.' end
+  if not value then return M.disable() end
+  if M.getPtgiCoherentStatus().active then return true end
+  if M._coherentRenderer.getOptions().hdrComposite ~= true then
+    return false, 'Combined rendering requires Coherent HDR composition.'
+  end
+  local ok, reason=M._enableCoherentBackend(true)
+  if not ok then return false, reason end
+  local selected, modeOK=pcall(M.setMode,'lighting')
+  if not selected or not modeOK then
+    pcall(M.disable)
+    return false,'Could not select PTGI lighting: '..tostring(modeOK)
+  end
+  M._ptgiCoherent.requested=true
+  local called
+  called, ok, reason=pcall(M.enable)
+  if not called or not ok then
+    pcall(M.disable)
+    return false,called and reason or tostring(ok)
+  end
+  if not M.getPtgiCoherentStatus().active then
+    pcall(M.logPtgiCoherentStatus)
+    M.disable()
+    return false,'Combined CPU pass graph did not become ready.'
+  end
+  M._ptgiCoherent.reason=M._ptgiCoherent.namedHandoff
+    and 'Experimental named HDR source; GPU execution and appearance unverified.'
+    or 'Baseline ordered PTGI + Coherent route. Named HDR source and local haze are off on startup; GPU appearance unverified.'
+  beamrtLog('I','Combined route enabled: '..M._ptgiCoherent.getSceneSource()..'; local haze off at startup.')
+  M.openTuner()
+  return true
+end
+
+function M.startReflectionCaptureProbe(mode, height)
+  if mode ~= "mirror" and mode ~= "rear" then return false, "Probe mode must be mirror or rear." end
+  if height ~= nil and (type(height) ~= "number" or height ~= height or math.abs(height) == math.huge) then
+    return false, "Probe plane height must be finite."
+  end
+  if PROGRESSIVE.reflectionSampling.isFrozen() or PROGRESSIVE.reflectionConvergenceEnabled
+    or PROGRESSIVE.reflectionSourceProbeTarget or materialCachePublication or CLEAN_RADIANCE.build
+    or PROGRESSIVE.reflectionDiagnostic.mode ~= 0 or PROGRESSIVE.lightingAudit.getStatus().active then
+    return false, "Finish the active diagnostic/capture before starting another camera."
+  end
+  if not M.disable() then return false, "Could not release the previous renderer/capture." end
+  local ok, reason = M._planarCapture.start(height, mode)
+  beamrtLog(ok and "I" or "W", "Reflection camera probe: " .. tostring(reason or M._planarCapture.getStatus().reason))
+  M.openTuner()
+  return ok, reason
+end
+
+function M.stopReflectionCaptureProbe()
+  return M._planarCapture.stop("Extra-camera probe stopped by user")
+end
+
+function M.getReflectionCaptureProbeStatus()
+  return M._planarCapture.getStatus()
+end
+
+function M.logReflectionCaptureCapabilities()
+  local report = M._planarCapture.inspect()
+  beamrtLog("I", "Read-only extra-camera bindings; not GPU output/clipping proof")
+  if type(dump) == "function" then dump(report) end
+  return report
+end
+
+function M.getSsrForkStatus()
+  local fork = PROGRESSIVE.sssrFork
+  local compatibility = PROGRESSIVE.rendererCompatibility.check()
+  local selected = fork.backend == "fork"
+  local requested = selected and enabledRequested and (debugMode == MODE_IDS.reflections
+    or debugMode == MODE_IDS.diffusegi and reflectionOverlayEnabled)
+  local trace = findObject(REFLECTION_EFFECT_NAME)
+  local bound = trace and trace:getField("shader", 0) == fork.shaderName or false
+  local active = requested and compatibility.safe and bound and effectIsEnabled(REFLECTION_EFFECT_NAME)
+  return {backend = fork.backend, requested = requested, active = active == true,
+    shaderBound = bound, shaderEntry = fork.shaderEntry, ownsTraceShader = true,
+    integratedNativeRendererUsed = false, nativeSettingsChanged = false,
+    mipLevels = 1, waterReceivers = false, nativeDenoiserParity = false,
+    materialReplacement = false, gameAppearanceVerified = false,
+    reason = not compatibility.safe and compatibility.reason
+      or active and "Owned mip-0 SSSR traversal running with BeamRT sampling/filtering/composition; native parity is not claimed."
+      or "Fork is not rendering. Enable it explicitly; previous experimental SSR remains available."}
+end
+
+-- Native tuning is independent of the experimental custom GI/SSR renderer.
+-- None of these calls enables native SSR or relaxes the RT1 compatibility gate.
+function M.enableNativeSsrEnhancement()
+  local ok, result = M._nativeSsrEnhancement.enable()
+  local status = M._nativeSsrEnhancement.getStatus()
+  beamrtLog(ok and "I" or "W", "native SSR experiment: " .. tostring(status.reason))
+  return ok, result
+end
+
+function M.disableNativeSsrEnhancement()
+  local ok, result = M._nativeSsrEnhancement.disable("native SSR experiment stopped")
+  local status = M._nativeSsrEnhancement.getStatus()
+  beamrtLog(ok and "I" or "W", "native SSR experiment: " .. tostring(status.reason)
+    .. "; " .. tostring(status.restoration))
+  return ok, result
+end
+
+function M.setNativeSsrComparison(mode)
+  local ok, result = M._nativeSsrEnhancement.setComparisonMode(mode)
+  local status = M._nativeSsrEnhancement.getStatus()
+  beamrtLog(ok and "I" or "W", "native SSR comparison: " .. tostring(status.reason))
+  return ok, result
+end
+
+function M.getNativeSsrEnhancementStatus()
+  return M._nativeSsrEnhancement.getStatus()
+end
+
+function M.logNativeSsrDiagnostics()
+  local report = M._nativeSsrEnhancement.inspect()
+  beamrtLog("I", "native SSR read-only binding/route diagnostics follow (not GPU execution proof)")
+  if type(dump) == "function" then dump(report) end
+  return report
 end
 
 local function setNormalBeamRTEffectsEnabled(shouldEnableFromState)
@@ -2917,6 +3496,8 @@ local function setNormalBeamRTEffectsEnabled(shouldEnableFromState)
     syncEffectEnablement()
     return
   end
+
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('BeamRT disabled')end
 
   setEffectEnabled(DEBUG_EFFECT_NAME, false)
   setEffectEnabled(SURFEL_CACHE_EFFECT_NAME, false)
@@ -2927,6 +3508,7 @@ local function setNormalBeamRTEffectsEnabled(shouldEnableFromState)
   setEffectEnabled(PROGRESSIVE.reflectionHit.copyEffectName, false)
   setEffectEnabled(PROGRESSIVE.reflectionColor.halfEffectName, false)
   setEffectEnabled(PROGRESSIVE.voxel.effectName, false)
+  if PROGRESSIVE.waterPreview then setEffectEnabled(PROGRESSIVE.waterPreview.effectName, false) end
   for _, source in pairs(BUFFER_DIAGNOSTIC_SOURCES) do
     setEffectEnabled(source.effectName, false)
   end
@@ -2939,7 +3521,49 @@ local function deleteObject(name)
   end
 end
 
+function M._rebuildPtgiPassGraph()
+  if enabledRequested or M._ptgiCoherent.hasLease() then
+    return false,'Stop rendering and release PTGI staging before rebuilding its passes.'
+  end
+  local roots={GI_EFFECT_NAME,PROGRESSIVE.inputPrep.receiverEffectName,SURFEL_CACHE_EFFECT_NAME}
+  local names={GI_EFFECT_NAME,PROGRESSIVE.inputPrep.receiverEffectName,
+    PROGRESSIVE.inputPrep.auxiliaryEffectName,TEMPORAL_EFFECT_NAME,COMPOSE_EFFECT_NAME,COPY_EFFECT_NAME,
+    PROGRESSIVE.svgf.effectName,PROGRESSIVE.svgf.copyEffectName,
+    SURFEL_CACHE_EFFECT_NAME,SURFEL_CACHE_COPY_EFFECT_NAME}
+  for _,name in ipairs(PROGRESSIVE.svgf.atrousEffectNames) do names[#names+1]=name end
+  local ok,why=pcall(function()
+    for _,name in ipairs(roots) do assert(not effectIsEnabled(name),'PTGI root still enabled: '..name) end
+    -- Validate before deleting anything. ShaderData, materials, native lights,
+    -- settings, geometry and the frozen material publications are not rebuilt.
+    for _,name in ipairs(names) do
+      local object=findObject(name)
+      assert(not object or tostring(object:getField('shader',0)):match('^BeamRT_'),
+        'Unrecognized PTGI pass: '..name)
+    end
+    for _,name in ipairs(names) do
+      deleteObject(name) -- parent deletion may already have removed its children
+      assert(not findObject(name),'PTGI pass could not be released: '..name)
+    end
+    M.sharedMeshGI.bound=false
+    createSurfelCacheEffect()
+    PROGRESSIVE.inputPrep.createEffects()
+    createGIEffect()
+    for _,name in ipairs(names) do assert(findObject(name),'PTGI pass missing after rebuild: '..name) end
+  end)
+  if not ok then
+    for _,name in ipairs(roots) do pcall(setEffectEnabled,name,false) end
+    beamrtLog('E','PTGI restart failed: '..tostring(why))
+    return false,'PTGI pass rebuild failed: '..tostring(why)
+  end
+  resetTemporalHistory('PTGI pass graph rebuilt for combined startup',false)
+  beamrtLog('I','PTGI pass graph rebuilt for combined startup; tuning retained.')
+  return true
+end
+
 local function destroyObjects()
+  setEffectEnabled(PROGRESSIVE.waterPreview.effectName, false)
+  deleteObject(PROGRESSIVE.waterPreview.effectName)
+  deleteObject(PROGRESSIVE.waterPreview.shaderName)
   setEffectEnabled(PROGRESSIVE.reflectionColor.halfEffectName, false)
   setEffectEnabled(PROGRESSIVE.reflectionHit.inputsEffectName, false)
   setEffectEnabled(PROGRESSIVE.reflectionHit.copyEffectName, false)
@@ -2979,6 +3603,8 @@ local function destroyObjects()
   deleteObject(REFLECTION_COPY_EFFECT_NAME)
   deleteObject(PROGRESSIVE.reflectionVariance.momentsEffectName)
   deleteObject(PROGRESSIVE.reflectionVariance.atrousEffectName)
+  deleteObject(PROGRESSIVE.reflectionVariance.atrousEffectNames[2])
+  deleteObject(PROGRESSIVE.reflectionVariance.atrousEffectNames[3])
   deleteObject(PROGRESSIVE.reflectionVariance.momentsCopyEffectName)
   deleteObject(DEBUG_EFFECT_NAME)
   deleteObject(PROGRESSIVE.voxel.effectName)
@@ -3032,6 +3658,7 @@ local function destroyObjects()
   rawset(_G, PROGRESSIVE.reflectionColor.halfEffectName .. "Callbacks", nil)
   rawset(_G, PROGRESSIVE.inputPrep.callbacksName, nil)
   rawset(_G, PROGRESSIVE.voxel.callbacksName, nil)
+  rawset(_G, PROGRESSIVE.waterPreview.effectName .. "Callbacks", nil)
   for _, source in pairs(BUFFER_DIAGNOSTIC_SOURCES) do
     rawset(_G, source.effectName .. "Callbacks", nil)
   end
@@ -3079,6 +3706,7 @@ function PROGRESSIVE.inputPrep.applyConsts()
   end
   setIfPresent(GI_EFFECT_NAME, "$giAuxImageSize", PROGRESSIVE.inputPrep.imageSize)
   setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverTint", giReceiverTint)
+  setIfPresent(PROGRESSIVE.inputPrep.receiverEffectName, "$giReceiverDeLight", PROGRESSIVE.receiverDeLight)
 end
 
 local function getOrCreateRenderView(name)
@@ -3776,6 +4404,9 @@ function M.setMode(requestedMode)
     beamrtLog("E", "unknown mode '" .. tostring(requestedMode) .. "'; expected off, lighting, reflections, bufferdiag, voxeldda, normals, depth, roughness, position, raymarch, geometry, orientedgeometry, surfels, surfelcompare, surfelradiance, or hybridcoverage")
     return false
   end
+  if M._ptgiCoherent and M._ptgiCoherent.requested and modeId ~= MODE_IDS.diffusegi then
+    if not M.disable() then return false end
+  end
   if PROGRESSIVE.reflectionDiagnostic.mode > 0 and modeId ~= MODE_IDS.reflections then
     M.setReflectionDiagnostic("off", false)
   end
@@ -3985,6 +4616,9 @@ function M._copyMaterialCacheResult(key)
 end
 
 function M.publishMaterialCache(requestedKey)
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before producer-view material captures.'
+  end
   local key = M._normalizeMaterialCacheKey(requestedKey)
   local config = key and MATERIAL_CACHE_CONFIGS[key] or nil
   if not config then
@@ -4086,6 +4720,9 @@ function M.publishMaterialCache(requestedKey)
 end
 
 function M.publishMaterialV2Caches()
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before producer-view material captures.'
+  end
   if materialCachePublication or CLEAN_RADIANCE.materialBatch then
     beamrtLog("W", "a material-cache publication or Material V2 batch is already active")
     return false
@@ -4250,6 +4887,14 @@ function M.invalidateMaterialCaches(reason)
 end
 
 function M.refreshCleanRadianceDiagnostics()
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false,'Disable Coherent/combined rendering before legacy clean-radiance captures.'
+  end
+  local compatibility = PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then
+    beamrtLog("W", compatibility.reason)
+    return false, compatibility.reason
+  end
   if materialCachePublication then
     beamrtLog("E", "finish the active material-cache publication before building clean radiance")
     return false
@@ -4762,6 +5407,83 @@ function M.setGIReceiverTint(value)
   return true
 end
 
+function M.setGIReceiverDeLight(value)
+  local amount = finiteNumber(value)
+  if not amount or amount < 0 or amount > 1 then return false end
+  PROGRESSIVE.receiverDeLight = amount
+  resetTemporalHistory("receiver color experiment changed", false)
+  applyGIShaderConsts()
+  return true
+end
+
+function M.setNearbyLampShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected a boolean.' end
+  if value and (PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch) then
+    return false,'Finish the active audit/material capture before changing lamp shadows.'
+  end
+  local ok, reason
+  if value then ok,reason=M._nearbyLampShadows.enable()
+  else ok,reason=M._nearbyLampShadows.disable() end
+  resetTemporalHistory('native lamp shadow settings changed',false)
+  if M._coherentRenderer then M._coherentRenderer.resetHistory() end
+  return ok,reason
+end
+
+function M.getNearbyLampShadowStatus()
+  local status=M._nearbyLampShadows.getStatus()
+  status.automaticPreference=M._automaticLampShadows~=false
+  return status
+end
+
+function M.setNearbyLampPriorityAssistEnabled(value)
+  return M._nearbyLampShadows.setPriorityAssist(value)
+end
+
+function M.logNearbyLampShadowInputs()
+  local report=M._nearbyLampShadows.getNearbyReport()
+  beamrtLog('I','Nearby native shadow inputs (CPU fields, NOT GPU atlas assignment): '..jsonEncode(report))
+  return report
+end
+
+function M._startAutomaticLampShadows()
+  if not M._nearbyLampShadows or M._automaticLampShadows==false then return true end
+  if PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch then return true end
+  local ok,reason=M._nearbyLampShadows.enableAutomatic()
+  if not ok then beamrtLog('W','Automatic lamp shadows: '..tostring(reason)) end
+  return ok,reason
+end
+
+function M.setAutomaticLampShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'Expected a boolean.' end
+  if value and (PROGRESSIVE.lightingAudit.getStatus().active or materialCachePublication
+    or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch) then
+    return false,'Finish the active capture before changing automatic lamp shadows.'
+  end
+  M._automaticLampShadows=value
+  if value then return M._startAutomaticLampShadows() end
+  return M.setNearbyLampShadowsEnabled(false)
+end
+
+function M.setGIWideDdaExperiment(enabled)
+  if type(enabled) ~= "boolean" then return false, "Expected a boolean." end
+  if enabled then
+    if PROGRESSIVE.marcherName ~= "screendda" then
+      return false, "Select Screen DDA first; linear traversal is unchanged."
+    end
+    if M._giDdaCoverageRestore then return true end
+    M._giDdaCoverageRestore = {stride = PROGRESSIVE.screenRayStride}
+    -- Same number of depth samples; more screen reach, but thin geometry may
+    -- be skipped. Keep world reach, hit validation and all light gains intact.
+    M.setScreenRayStride(math.min(8, PROGRESSIVE.screenRayStride * 2))
+  elseif M._giDdaCoverageRestore then
+    if not M.setScreenRayStride(M._giDdaCoverageRestore.stride) then return false end
+    M._giDdaCoverageRestore = nil
+  end
+  return true
+end
+
 function M.setGIContrast(value)
   local numericValue = finiteNumber(value)
   if not numericValue or numericValue < 0.25 or numericValue > 4 then
@@ -5024,26 +5746,15 @@ function M.setBlueNoiseStrength(value)
 end
 
 function M.setBlueNoiseSource(value)
-  if type(value) ~= "string" then
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
+  local selected, reason = M.noiseSourcePolicy.resolve(value)
+  if not selected then
+    beamrtLog("W", reason)
     return false
   end
-  local token = string.lower(value):gsub("[%s_%-]", "")
-  if token == "stbn" or token == "beamrt" or token == "spatiotemporal" then
-    PROGRESSIVE.blueNoiseMode = 1
-    PROGRESSIVE.blueNoiseSource = "stbn"
-  elseif token == "beamng" or token == "gtao" or token == "native" then
-    PROGRESSIVE.blueNoiseMode = 0
-    PROGRESSIVE.blueNoiseSource = "beamng"
-  else
-    beamrtLog("E", "blue-noise source must be 'stbn' or 'beamng'")
-    return false
-  end
+  PROGRESSIVE.blueNoiseMode = selected.mode
+  PROGRESSIVE.blueNoiseSource = selected.name
   resetTemporalHistory("blue-noise source changed", false)
   beamrtLog("I", "blue-noise source set to " .. PROGRESSIVE.blueNoiseSource)
-  if PROGRESSIVE.blueNoiseMode == 1 then
-    beamrtLog("W", "custom scalar atlas is experimental; directional STBN quality is not validated")
-  end
   return true
 end
 
@@ -5148,6 +5859,7 @@ function M.setEchoHistoryGuard(value)
 end
 
 function M.setRayHitDiagnostic(value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested and value ~= 'off' then return false end
   if type(value) ~= "string" then
     beamrtLog("E", "ray-hit diagnostic must be off, hits, steps, distance, normals, confidence, error, rejection, direction, or viewalignment")
     return false
@@ -5367,6 +6079,7 @@ function M.getProgressiveStatus()
 end
 
 function M.setLightingDiagnostic(value)
+  if M._ptgiCoherent and M._ptgiCoherent.requested and value ~= 'off' then return false end
   local name = type(value) == "string" and string.lower(value) or ""
   local modes = {off = 0, raw = 1, filtered = 2, contribution = 3, receiver = 4,
     direct = 5, roughness = 6, f0 = 7, reflectance = 8,
@@ -5402,6 +6115,10 @@ function M.setLightingDiagnostic(value)
 end
 
 function M.setReflectionDiagnostic(value, restorePrevious)
+  if M._planarCapture and M._planarCapture.getStatus().requested then return false, "Stop the extra-camera probe first." end
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false, "Use the Coherent SSR debug views, or disable it before legacy diagnostics."
+  end
   local token = type(value) == "string" and string.lower(value):gsub("[%s_%-]", "") or value
   local aliases = {off = 0, none = 0, receiver = 1, normal = 1, normals = 1,
     validity = 2, valid = 2, hits = 2, hit = 2, hituv = 3, uv = 3,
@@ -5517,6 +6234,12 @@ function M.getTextureBindingStatus()
 end
 
 function M.runLightingAudit(includeInputs)
+  if M._planarCapture and M._planarCapture.getStatus().requested then return false, "Stop the extra-camera probe before legacy captures." end
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false, "The legacy audit does not capture Coherent SSR. Disable it before this audit."
+  end
+  local compatibility = PROGRESSIVE.rendererCompatibility.check()
+  if not compatibility.safe then return false, compatibility.reason end
   if extensions and extensions.beamrt_reflectionSourceProbe
     and extensions.beamrt_reflectionSourceProbe.getStatus().active then
     return false, "reflection source diagnostic is running"
@@ -5549,8 +6272,8 @@ end
 
 function M.setGIRenderScale(value)
   local numericValue = finiteNumber(value)
-  if not numericValue or numericValue < 0.5 or numericValue > 1.0 then
-    beamrtLog("E", "GI render scale must be a finite number from 0.5 through 1.0")
+  if not numericValue or numericValue < 0.05 or numericValue > 1.0 then
+    beamrtLog("E", "GI render scale must be a finite number from 0.05 through 1.0 (below 0.5 is experimental)")
     return false
   end
   giRenderScale = numericValue
@@ -5709,6 +6432,7 @@ function M.getSettings()
     giExposure = giExposure,
     giShadowFocus = giShadowFocus,
     giReceiverTint = giReceiverTint,
+    giReceiverDeLight = PROGRESSIVE.receiverDeLight,
     giContrast = giContrast,
     giEnergyLimit = giEnergyLimit,
     giHighlightRolloff = giHighlightRolloff,
@@ -5738,6 +6462,8 @@ function M.getSettings()
     reflectionNoiseSeed = PROGRESSIVE.reflectionTuning.noiseSeed,
     reflectionFilterRadiusScale = PROGRESSIVE.reflectionTuning.filterRadiusScale,
     reflectionSourceFootprintScale = PROGRESSIVE.reflectionTuning.sourceFootprintScale,
+    reflectionLocalResolveEnabled = PROGRESSIVE.reflectionLocalResolve.enabled,
+    reflectionLocalResolveStrength = PROGRESSIVE.reflectionLocalResolve.strength,
     reflectionStrength = reflectionStrength,
     reflectionMaxRoughness = reflectionMaxRoughness,
     reflectionStepSize = reflectionStepSize,
@@ -5776,9 +6502,12 @@ function M.settingsCommand()
     PROGRESSIVE.screenDdaMaxPaths, PROGRESSIVE.screenDdaMaxSteps,
     CLEAN_RADIANCE.selectedPTGISource, modeName)
     .. "; beamrt_main.setReflectionColorFilterEnabled(" .. tostring(PROGRESSIVE.reflectionColor.enabled) .. ")"
+    .. "; beamrt_main.setGIReceiverDeLight(" .. tostring(PROGRESSIVE.receiverDeLight) .. ")"
     .. string.format("; beamrt_main.setReflectionSampleCellPixels(%.4g); beamrt_main.setReflectionNoiseSeed(%d); beamrt_main.setReflectionFilterRadiusScale(%.4g); beamrt_main.setReflectionSourceFootprintScale(%.4g)",
       PROGRESSIVE.reflectionTuning.sampleCellPixels, PROGRESSIVE.reflectionTuning.noiseSeed,
       PROGRESSIVE.reflectionTuning.filterRadiusScale, PROGRESSIVE.reflectionTuning.sourceFootprintScale)
+    .. string.format("; beamrt_main.setReflectionLocalResolveEnabled(%s); beamrt_main.setReflectionLocalResolveStrength(%.4g)",
+      tostring(PROGRESSIVE.reflectionLocalResolve.enabled), PROGRESSIVE.reflectionLocalResolve.strength)
 end
 
 function M.printSettings()
@@ -5834,6 +6563,7 @@ function M.applySettings(settings)
     {"giExposure", M.setGIExposure},
     {"giShadowFocus", M.setGIShadowFocus},
     {"giReceiverTint", M.setGIReceiverTint},
+    {"giReceiverDeLight", M.setGIReceiverDeLight},
     {"giContrast", M.setGIContrast},
     {"giEnergyLimit", M.setGIEnergyLimit},
     {"giHighlightRolloff", M.setGIHighlightRolloff},
@@ -5859,6 +6589,13 @@ function M.applySettings(settings)
     {"reflectionReconstruction", M.setReflectionReconstruction},
     {"reflectionHitAwareEnabled", M.setReflectionHitAwareEnabled},
     {"reflectionColorFilterEnabled", M.setReflectionColorFilterEnabled},
+    {"reflectionReceiverHistoryEnabled", M.setReflectionReceiverHistoryEnabled},
+    {"reflectionSourceReconstructionEnabled", M.setReflectionSourceReconstructionEnabled},
+    {"reflectionVarianceEnabled", M.setReflectionVarianceEnabled},
+    {"reflectionVariancePasses", M.setReflectionVariancePasses},
+    {"reflectionVarianceStrength", M.setReflectionVarianceStrength},
+    {"reflectionLocalResolveEnabled", M.setReflectionLocalResolveEnabled},
+    {"reflectionLocalResolveStrength", M.setReflectionLocalResolveStrength},
     {"reflectionSampleCellPixels", M.setReflectionSampleCellPixels},
     {"reflectionNoiseSeed", M.setReflectionNoiseSeed},
     {"reflectionFilterRadiusScale", M.setReflectionFilterRadiusScale},
@@ -5875,7 +6612,11 @@ function M.applySettings(settings)
   local success = true
   for _, entry in ipairs(setters) do
     local value = settings[entry[1]]
-    if value ~= nil and not entry[2](value) then
+    -- The four existing presets also contain legacy SSR tuning. In combined
+    -- mode apply their GI portion only; never touch either reflection backend.
+    local skipLegacyReflection = M._ptgiCoherent and M._ptgiCoherent.requested
+      and entry[1]:match('^reflection')
+    if value ~= nil and not skipLegacyReflection and not entry[2](value) then
       success = false
     end
   end
@@ -5892,19 +6633,45 @@ function M.applySettings(settings)
 end
 
 function M.applyPreset(name)
-  local normalizedName = type(name) == "string" and string.lower(name) or ""
-  local preset = TUNING_PRESETS[normalizedName]
+  local preset, normalizedName = TUNING_PRESETS.resolve(name)
   if not preset then
-    beamrtLog("E", "unknown tuning preset '" .. tostring(name) .. "'; expected experimental, userbest, cinematic, maxquality, beautymax, beautyreflect, ptgiplay, ptgiplayreflect, ptgimax, ptgimaxreflect, ultra, showcase, balanced, clean, or performance")
+    beamrtLog("E", "unknown tuning preset '" .. tostring(name) .. "'; expected performance, balanced, quality, or cinematic")
     return false
   end
-  -- Presets remain reflection-free unless their name explicitly includes the
-  -- reflection overlay.
-  if preset.reflectionsEnabled == nil then
-    M.setReflectionsEnabled(false)
-  end
   local result = M.applySettings(preset)
+  if result then PROGRESSIVE.lastPresetId = normalizedName end
   beamrtLog("I", "applied " .. normalizedName .. " tuning preset")
+  return result
+end
+
+function M.getPresets()
+  return TUNING_PRESETS.list()
+end
+
+function M.refreshWaterReceiverPreview()
+  local ok, reason = PROGRESSIVE.waterPreview.provider.refresh({maxDistance = 250})
+  PROGRESSIVE.waterPreview.sync()
+  beamrtLog(ok and "I" or "W", "water receiver preview: " .. tostring(reason))
+  return ok, reason
+end
+
+function M.setWaterReceiverPreviewEnabled(value)
+  if type(value) ~= "boolean" then return false end
+  local water = PROGRESSIVE.waterPreview
+  if value and not water.provider.getStatus().available then
+    local ok, reason = water.provider.refresh({maxDistance = 250})
+    if not ok then return false, reason end
+  end
+  water.enabled = value
+  water.sync()
+  return true
+end
+
+function M.getWaterReceiverPreviewStatus()
+  local result = PROGRESSIVE.waterPreview.provider.getStatus()
+  result.requested = PROGRESSIVE.waterPreview.enabled
+  result.active = effectIsEnabled(PROGRESSIVE.waterPreview.effectName)
+  result.gameAppearanceVerified = false
   return result
 end
 
@@ -5939,6 +6706,14 @@ function M.loadTuning()
 end
 
 function M.resetHistory()
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    resetTemporalHistory('manual combined history reset', true)
+    return true
+  end
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    M._coherentRenderer.resetHistory()
+    return true
+  end
   resetTemporalHistory("manual request", true)
   if reflectionOverlayEnabled or debugMode == MODE_IDS.reflections then
     resetReflectionHistory("manual request", true)
@@ -5947,6 +6722,9 @@ function M.resetHistory()
 end
 
 function M.setReflectionsEnabled(value)
+  if value == true and M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    return false, 'Coherent owns reflections; the legacy SSR overlay must remain off.'
+  end
   if type(value) ~= "boolean" then
     beamrtLog("E", "reflections enabled must be a boolean")
     return false
@@ -6031,6 +6809,71 @@ function M.getReflectionHitState()
     smoothMirrorThreshold = 0.035}
 end
 
+-- Session-only A/B switches. Keep the atlas layout fixed across toggles so
+-- stale one-plane contents can never be interpreted as receiver descriptors.
+function M.setReflectionReceiverHistoryEnabled(value)
+  if type(value) ~= "boolean" then
+    beamrtLog("E", "reflection receiver history must be true/false")
+    return false
+  end
+  if PROGRESSIVE.reflectionReceiverHistory.enabled == value then return true end
+  PROGRESSIVE.reflectionReceiverHistory.enabled = value
+  resetReflectionHistory("reflection receiver history changed", false)
+  beamrtLog("I", "reflection receiver-surface history " .. (value and "enabled" or "disabled"))
+  return true
+end
+
+function M.setReflectionSourceReconstructionEnabled(value)
+  if type(value) ~= "boolean" then
+    beamrtLog("E", "reflection source reconstruction must be true/false")
+    return false
+  end
+  if PROGRESSIVE.reflectionSourceReconstruction.enabled == value then return true end
+  PROGRESSIVE.reflectionSourceReconstruction.enabled = value
+  resetReflectionHistory("reflection source reconstruction changed", false)
+  beamrtLog("I", "reflection source-depth reconstruction " .. (value and "enabled" or "disabled"))
+  return true
+end
+
+function M.getReflectionQualityState()
+  local hit = PROGRESSIVE.reflectionHit
+  return {receiverHistoryEnabled = PROGRESSIVE.reflectionReceiverHistory.enabled,
+    receiverHistoryConfigured = PROGRESSIVE.reflectionReceiverHistory.enabled and hit.configured(),
+    receiverHistoryActive = PROGRESSIVE.reflectionReceiverHistory.enabled and hit.configured() and hit.sizeValid
+      and effectIsEnabled(hit.inputsEffectName),
+    sourceReconstructionEnabled = PROGRESSIVE.reflectionSourceReconstruction.enabled,
+    sourceReconstructionActive = PROGRESSIVE.reflectionSourceReconstruction.enabled
+      and not PROGRESSIVE.reflectionConvergenceEnabled and not PROGRESSIVE.reflectionSampling.isFrozen()
+      and effectIsEnabled(REFLECTION_EFFECT_NAME),
+    localResolveEnabled = PROGRESSIVE.reflectionLocalResolve.enabled,
+    localResolveStrength = PROGRESSIVE.reflectionLocalResolve.strength,
+    localResolveActive = PROGRESSIVE.reflectionLocalResolve.enabled
+      and PROGRESSIVE.reflectionSampling.mode == 1 and PROGRESSIVE.reflectionReconstruction.mode == 1
+      and not PROGRESSIVE.reflectionConvergenceEnabled and not PROGRESSIVE.reflectionSampling.isFrozen()
+      and effectIsEnabled(REFLECTION_EFFECT_NAME),
+    receiverWidth = hit.receiverWidth, receiverHeight = hit.receiverHeight,
+    receiverSizeValid = hit.sizeValid,
+    additionalAtlasBytes = 32 * hit.receiverWidth * hit.receiverHeight,
+    atlasLayout = "two RGBA32F planes; validation OFF retains allocation",
+    gameAppearanceVerified = false}
+end
+
+function M.setReflectionLocalResolveEnabled(value)
+  if type(value) ~= "boolean" then return false end
+  PROGRESSIVE.reflectionLocalResolve.enabled = value
+  -- Display-only reconstruction must not clear or feed temporal/GI history.
+  applyReflectionShaderConsts()
+  return true
+end
+
+function M.setReflectionLocalResolveStrength(value)
+  local number = finiteNumber(value)
+  if not number or number < 0 or number > 1 then return false end
+  PROGRESSIVE.reflectionLocalResolve.strength = number
+  applyReflectionShaderConsts()
+  return true
+end
+
 function M.setReflectionColorFilterEnabled(value)
   if type(value) ~= "boolean" then
     beamrtLog("E", "reflection color filter must be true/false")
@@ -6081,6 +6924,8 @@ end
 -- Transient diagnostic gate; deliberately not saved as a gameplay setting.
 -- The companion convergence module owns mean/moment passes and restoration.
 function M.setReflectionConvergenceEnabled(value)
+  if value and M._planarCapture and M._planarCapture.getStatus().requested then return false end
+  if value and M._coherentRenderer and M._coherentRenderer.getStatus().requested then return false end
   if type(value) ~= "boolean" then return false end
   if value == PROGRESSIVE.reflectionConvergenceEnabled then return true end
   PROGRESSIVE.reflectionConvergenceEnabled = value
@@ -6093,6 +6938,8 @@ function M.getReflectionConvergenceEnabled() return PROGRESSIVE.reflectionConver
 -- Only the three owned diagnostic targets may replace the source, never a
 -- shader sampler index or an arbitrary external filename. Not a saved setting.
 function M.setReflectionSourceProbeTarget(target)
+  if target ~= nil and M._planarCapture and M._planarCapture.getStatus().requested then return false end
+  if target ~= nil and M._coherentRenderer and M._coherentRenderer.getStatus().requested then return false end
   if target ~= nil and target ~= "#BeamRT_SourceProbeNative" and target ~= "#BeamRT_SourceProbeLive"
     and target ~= "#BeamRT_SourceProbeFrozen" then return false end
   if target == PROGRESSIVE.reflectionSourceProbeTarget then return true end
@@ -6190,17 +7037,40 @@ end
 -- Opt-in, reversible variance-guided GGX filtering. Mirror, diagnostic,
 -- and convergence tests always stay on the original output path.
 function M.setReflectionVarianceEnabled(enabled)
-  PROGRESSIVE.reflectionVariance.enabled = not not enabled
+  if type(enabled)~='boolean' then return false end
+  PROGRESSIVE.reflectionVariance.enabled = enabled
+  createReflectionEffect()
+  syncEffectEnablement()
   resetReflectionHistory("reflection variance experiment changed", true)
-  return PROGRESSIVE.reflectionVariance.enabled
+  beamrtLog("I", "reflection variance filter " .. (enabled and "enabled" or "disabled")
+    .. "; scales=" .. tostring(PROGRESSIVE.reflectionVariance.passes))
+  return true
 end
 
 function M.setReflectionVarianceStrength(value)
-  local n = tonumber(value)
+  local n = finiteNumber(value)
   if not n then return false end
   PROGRESSIVE.reflectionVariance.strength = math.max(0.0, math.min(1.0, n))
   resetReflectionHistory("reflection variance strength changed", false)
   return PROGRESSIVE.reflectionVariance.strength
+end
+
+-- One pass retains the small-footprint comparison; three uses steps 1/2/4.
+-- Transient, opt-in controls: no changes to presets or saved tuning.
+function M.setReflectionVariancePasses(value)
+  if value ~= 1 and value ~= 3 then return false end
+  if value == PROGRESSIVE.reflectionVariance.passes then return true end
+  PROGRESSIVE.reflectionVariance.passes = value
+  createReflectionEffect()
+  syncEffectEnablement()
+  resetReflectionHistory("reflection variance pass count changed", true)
+  beamrtLog("I", "reflection variance scales set to " .. tostring(value))
+  return true
+end
+
+function M.getReflectionVarianceState()
+  return {enabled = PROGRESSIVE.reflectionVariance.enabled, passes = PROGRESSIVE.reflectionVariance.passes,
+    strength = PROGRESSIVE.reflectionVariance.strength, scale = PROGRESSIVE.reflectionVariance.scale}
 end
 
 function M.resetReflectionHistory()
@@ -6392,93 +7262,20 @@ local function tuningSliderInt(label, pointer, minimum, maximum, setter, tooltip
   im.PopItemWidth()
 end
 
-local function drawTuningWindow()
-  if not tuningWindowOpen[0] then return end
+M._tunerPanels = {}
 
-  im.SetNextWindowSize(im.ImVec2(650, 850), im.Cond_FirstUseEver)
-  if not im.Begin("BeamRT PTGI Tuner v" .. VERSION, tuningWindowOpen) then
-    im.End()
-    return
-  end
-
-  im.TextColored(im.ImVec4(0.35, 0.85, 1.0, 1.0), "LIVE BEAUTY TUNING")
-  im.TextUnformatted("Hover any control for guidance. Changes are applied immediately.")
-  im.Separator()
-
-  local lightingActive = enabledRequested and debugMode == MODE_IDS.diffusegi
-  im.TextColored(
-    lightingActive and im.ImVec4(0.3, 1.0, 0.45, 1.0) or im.ImVec4(1.0, 0.65, 0.25, 1.0),
-    lightingActive and "Status: PTGI lighting active" or "Status: PTGI lighting not active"
-  )
-  if im.Button("Start / Apply PTGI") then M.start() end
+function M._tunerPanels.lighting()
+  im.TextWrapped("Combined PTGI + Coherent is available above. Standalone GI below selects the older rendering route.")
+  if im.Button("Standalone GI / legacy route") then M.start() end
   im.SameLine()
-  if im.Button("Disable BeamRT") then M.disable() end
-  im.SameLine()
-  if im.Button("Reset History") then M.resetHistory() end
-  if im.Button("Capture Lighting Audit") then M.runLightingAudit() end
-  tuningTooltip("Keep the camera still. Saves six local views of the current lighting stages, then restores your settings automatically.")
-  im.SameLine()
-  if im.Button("Capture Reflection Audit") then M.runReflectionAudit() end
-  tuningTooltip("Keep the camera still. Saves native, SSR beauty, receiver, validity, hit UV, hit depth, raw color, and composite views; restores all BeamRT settings afterward.")
-  if im.CollapsingHeader1("Reflection diagnostics") then
-    im.TextUnformatted("Current SSR view: " .. PROGRESSIVE.reflectionDiagnostic.name)
-    for index, view in ipairs({{"Receiver", "receiver"}, {"Validity", "validity"},
-      {"Hit UV", "hituv"}, {"Hit depth", "hitdepth"}, {"Raw color", "rawcolor"},
-      {"Composite", "composite"}, {"Source UV", "sourceuv"},
-      {"Rejection", "rejection"}, {"Direction", "direction"}}) do
-      if index % 3 ~= 1 then im.SameLine() end
-      if im.Button(view[1] .. "##SSRDiagnostic") then M.setReflectionDiagnostic(view[2]) end
-    end
-    if im.Button("Restore previous view##SSRDiagnostic") then M.setReflectionDiagnostic("off") end
-    tuningTooltip("Diagnostics use the current full-resolution SSR trace with temporal display and denoising bypassed. Off restores the preceding mode, enabled state, overlay, and GI diagnostic.")
-  end
-
+  if im.Button("Reset lighting history") then M.resetHistory() end
   im.TextUnformatted("Presets")
-  if im.Button("SCREEN DDA AUDIT") then M.applyPreset("experimental"); syncTuningPointers() end
-  tuningTooltip("Intersection experiment, not a beauty preset: half resolution, one path, and a bounded 32-step Screen DDA. Use Balanced or Cinematic for normal rendering.")
-  im.SameLine()
-  if im.Button("YOUR BEST") then M.applyPreset("userbest"); syncTuningPointers() end
-  tuningTooltip("Recreates what the loaded v0.040 shader actually rendered from your supplied values: full resolution, 16 paths, and 128 steps. The old shader capped the accepted 32/512 uniforms internally.")
-  im.SameLine()
-  if im.Button("CINEMATIC") then M.applyPreset("cinematic"); syncTuningPointers() end
-  tuningTooltip("The new recommended beauty preset: shaped, shadow-focused bounce at a saner 16-path/128-step workload.")
-  im.SameLine()
-  if im.Button("MAX 32x200") then M.applyPreset("maxquality"); syncTuningPointers() end
-  tuningTooltip("Laboratory stress preset: 32 paths, full resolution, 200 steps. It can be roughly 100x the old v0.030 trace workload and may stall slower GPUs.")
-  im.SameLine()
-  if im.Button("BEAUTY MAX") then M.applyPreset("beautymax"); syncTuningPointers() end
-  tuningTooltip("Accuracy-first screenshot preset: 32 paths at full resolution, corrected estimator, native noise plus a long Weyl sequence, confidence-aware reconstruction, and the linear screen path. Intentionally excludes experimental DDA and coarse world surfels.")
-  im.SameLine()
-  if im.Button("BEAUTY + REFLECTIONS") then M.applyPreset("beautyreflect"); syncTuningPointers() end
-  tuningTooltip("Beauty Max plus conservative SSR augmentation. Preserves native base lighting and fallback; not an exact native cubemap replacement.")
-
-  if im.Button("PTGI DDA") then M.applyPreset("ptgiplay"); syncTuningPointers() end
-  tuningTooltip("Playable full-resolution Screen DDA preset with visible color transport, guarded second bounce, and direct-diffuse source cleanup. One path converges temporally instead of brute-forcing linear samples.")
-  im.SameLine()
-  if im.Button("PTGI DDA + REFL") then M.applyPreset("ptgiplayreflect"); syncTuningPointers() end
-  tuningTooltip("PTGI DDA plus SSR augmentation with near-plane-correct tracing. Native reflections remain as fallback; exact lobe replacement is not yet available.")
-  im.SameLine()
-  if im.Button("PTGI DDA MAX") then M.applyPreset("ptgimax"); syncTuningPointers() end
-  tuningTooltip("Quality-oriented Screen DDA: two 48-step paths, fixed motion-aware second bounce, and the new three-scale edge-aware reconstruction. No reflection overlay.")
-  im.SameLine()
-  if im.Button("PTGI MAX + REFL") then M.applyPreset("ptgimaxreflect"); syncTuningPointers() end
-  tuningTooltip("PTGI DDA Max plus close-range SSR, finite history and native specular weighting. Additive augmentation preserves base lighting; native environment reflections remain.")
-  im.SameLine()
-  if im.Button("ULTRA") then M.applyPreset("ultra"); syncTuningPointers() end
-  tuningTooltip("16 paths at full resolution with 96 steps. This is the maximum-beauty stress preset and can be dramatically slower.")
-  
-  if im.Button("Showcase") then M.applyPreset("showcase"); syncTuningPointers() end
-  tuningTooltip("8 paths at 75% resolution: a visible quality jump without using the full Ultra workload.")
-  im.SameLine()
-  if im.Button("Balanced") then M.applyPreset("balanced"); syncTuningPointers() end
-  tuningTooltip("The v0.031 defaults: moderate cost and a restrained image.")
-  im.SameLine()
-  if im.Button("Clean / Stable") then M.applyPreset("clean"); syncTuningPointers() end
-  tuningTooltip("Lower temporal current-frame weight and subtler contact shading. Best for still shots and slow camera movement.")
-  im.SameLine()
-  if im.Button("Performance") then M.applyPreset("performance"); syncTuningPointers() end
-  tuningTooltip("Shorter, fewer ray steps and lighter contact shading. Use this to establish a fast baseline.")
-
+  for index, preset in ipairs(M.getPresets()) do
+    if index == 2 or index == 4 then im.SameLine() end
+    if im.Button(preset.label .. "##BeamRTPreset") then M.applyPreset(preset.id); syncTuningPointers() end
+    tuningTooltip(preset.description)
+  end
+  im.TextUnformatted("Last preset: " .. (PROGRESSIVE.lastPresetId or "custom / loaded tuning"))
   if im.CollapsingHeader1("Beauty and lighting", im.TreeNodeFlags_DefaultOpen) then
     im.PushItemWidth(-1)
     tuningSliderFloat("GI intensity", tuningPointers.giStrength, 0.0, 4.0, "%.2f", M.setGIStrength,
@@ -6503,62 +7300,96 @@ local function drawTuningWindow()
       "Blends hard clipping into a smooth filmic shoulder. High values suppress fireflies and harsh neon clipping without flattening all GI.")
     tuningSliderFloat("Radiance clamp", tuningPointers.giClamp, 0.5, 32.0, "%.2f", M.setGIClamp,
       "Maximum sampled HDR bounce radiance. Higher values preserve bright colored lights but may expose fireflies.")
-    im.Separator()
-    im.TextUnformatted("Screen-space reflections: " .. (reflectionOverlayEnabled and "ON" or "OFF"))
-    im.TextUnformatted("SSR augments native reflections; it does not replace the cubemap.")
-    if im.Button(reflectionOverlayEnabled and "Disable reflections" or "Enable reflections") then
-      M.setReflectionsEnabled(not reflectionOverlayEnabled)
-    end
-    tuningTooltip("Adds the BeamRT reflection pass after GI. Manual GI ray/lighting diagnostics temporarily suppress this overlay and restore the selected preference when switched off. Screen-space reflections cannot show off-screen objects or the back side of geometry.")
-    im.TextUnformatted("Reflection sampling: " .. PROGRESSIVE.reflectionSampling.name)
-    if im.Button("Mirror SSR") then M.setReflectionSamplingMode("mirror") end
-    tuningTooltip("Uses the existing mirror ray. Mirror is the startup default; existing tuning presets preserve your selected reflection sampling mode.")
-    im.SameLine()
-    if im.Button("GGX SSR") then M.setReflectionSamplingMode("ggx") end
-    tuningTooltip("Samples a material roughness lobe over rendered frames. Switching sampling clears SSR history; GI history stays intact. Reflection diagnostics and reflection audits freeze sample zero for consistent hit inspection.")
-    im.TextUnformatted("GGX reconstruction: " .. PROGRESSIVE.reflectionReconstruction.name)
-    if im.Button("Playable filter") then M.setReflectionReconstruction("playable") end
-    tuningTooltip("Uses a short, bounded average to reduce GGX noise while moving. No long exposure or extra rays. Existing presets preserve your selected filter; mirror SSR keeps its existing reconstruction.")
-    im.SameLine()
-    if im.Button("Legacy filter") then M.setReflectionReconstruction("legacy") end
-    tuningTooltip("Restores the previous GGX reconstruction for a quick comparison. Switching filters resets SSR history and keeps GI history intact.")
-    if im.Button(PROGRESSIVE.reflectionHit.enabled and "Hit-aware ON" or "Hit-aware OFF") then
-      M.setReflectionHitAwareEnabled(not PROGRESSIVE.reflectionHit.enabled)
-    end
-    tuningTooltip("Playable GGX checks reflected-source depth and motion, and protects near-polished hit layers. Almost mirror-smooth surfaces use a stable mirror approximation. Uses the same ray count but adds two geometry helper passes and 32-bit buffers. Turn off to compare with v0.096; legacy/mirror and frozen audits bypass this path.")
-    if im.Button(PROGRESSIVE.reflectionColor.enabled and "Color filter ON" or "Color filter OFF") then
-      M.setReflectionColorFilterEnabled(not PROGRESSIVE.reflectionColor.enabled)
-    end
-    tuningTooltip("Playable GGX: depth-aware 2x/4x/8x source color levels and subpixel valid history color. Rough surfaces get softer cleanup; polished reflections keep source detail. Adds two color passes, no rays or long exposure. OFF restores v0.098 color filtering; hit/depth metadata stays point sampled.")
-    tuningSliderFloat("Reflection intensity", tuningPointers.reflectionStrength, 0.0, 1.25, "%.2f", M.setReflectionStrength,
-      "Scales material response, including the trace's GGX weight when GGX sampling is selected. Reduce this if the pass competes with BeamNG's native probes.")
-    tuningSliderFloat("Reflection roughness cutoff", tuningPointers.reflectionMaxRoughness, 0.08, 0.55, "%.2f", M.setReflectionMaxRoughness,
-      "Only surfaces smoother than this receive SSR augmentation. The conservative presets stay near 0.32-0.35; native environment response and clearcoat remain available.")
-    tuningSliderFloat("Reflection step length", tuningPointers.reflectionStepSize, 0.10, 0.75, "%.2f m", M.setReflectionStepSize,
-      "Coarse search distance before five-step hit refinement. Smaller finds thin geometry more reliably but costs more.")
-    tuningSliderFloat("Reflection hit thickness", tuningPointers.reflectionThickness, 0.05, 0.75, "%.2f m", M.setReflectionThickness,
-      "Maximum refined depth mismatch. The old 0.55 m default accepted unrelated rear geometry; keep this near 0.22-0.28 m.")
-    tuningSliderFloat("Reflection normal bias", tuningPointers.reflectionNormalBias, 0.0, 0.15, "%.3f m", M.setReflectionNormalBias,
-      "Offsets the ray origin to avoid self hits. Too much detaches the reflection from the receiver.")
-    tuningSliderFloat("Reflection current-frame weight", tuningPointers.reflectionTemporalBlend, 0.05, 1.0, "%.2f", M.setReflectionTemporalBlend,
-      "Higher reacts faster and trails less; lower is steadier. Playable GGX treats this as a 60 FPS response control and keeps a short, frame-time-corrected rolling history. Mirror misses receive one finite grace frame; legacy GGX keeps its previous averaging.")
-    tuningSliderFloat("Rough-reflection reconstruction", tuningPointers.reflectionDenoiseStrength, 0.0, 1.0, "%.2f", M.setReflectionDenoiseStrength,
-      "Blends toward the depth/normal/roughness/F0-aware filter. Playable GGX doubles this blend up to full reconstruction without adding samples; zero still disables spatial filtering. Rougher receivers use a broader reconstruction footprint.")
-    im.TextUnformatted("Reflection pattern controls (GGX)")
-    tuningSliderFloat("Reflection noise cell", tuningPointers.reflectionSampleCellPixels, 0.25, 4.0, "%.2f px", M.setReflectionSampleCellPixels,
-      "Noise seed grid only, not ray resolution or GI world cells. 1 px keeps independent per-pixel seeds. Larger values share GGX samples across pixels and can make checker patches WORSE. Below 1 changes the seed pattern; it does not add subpixel rays. Polished mirror approximations are unaffected.")
-    tuningSliderInt("Reflection noise seed", tuningPointers.reflectionNoiseSeed, 0, 255, M.setReflectionNoiseSeed,
-      "Changes GGX's spatial random pattern without adding rays or changing material roughness. Seed 0 is the original pattern. If patches move with the seed, sampling contributes; this alone cannot prove the cause. Exact entry accepts 0..65535.")
-    tuningSliderFloat("Reflection filter radius", tuningPointers.reflectionFilterRadiusScale, 0.25, 3.0, "%.2fx", M.setReflectionFilterRadiusScale,
-      "Playable GGX only: scales the existing 13-tap edge-aware footprint, not tap count. 1 is original; try 1.5. Larger can soften details or create sparse-filter artifacts. Depth, normal, material and hit-layer gates remain. No extra rays or long exposure.")
-    tuningSliderFloat("Reflected color softness", tuningPointers.reflectionSourceFootprintScale, 0.0, 2.0, "%.2fx", M.setReflectionSourceFootprintScale,
-      "Playable GGX with Color filter ON: scales the depth-aware source-color footprint. 0 uses raw hit color, 1 is original, 2 is broader (still capped at 8 source pixels). Nearly polished surfaces keep source detail. No geometry, hit metadata or native reflection changes.")
-    if im.Button("Reset reflection pattern controls") then M.resetReflectionTuning(); syncTuningPointers() end
-    tuningTooltip("Resets only these four controls: noise cell 1 px, seed 0, filter radius 1x, color softness 1x. Keeps all other tuning and GI history.")
     im.PopItemWidth()
   end
 
-  if im.CollapsingHeader1("Noise and temporal stability", im.TreeNodeFlags_DefaultOpen) then
+  if im.CollapsingHeader1("Mesh visibility and shadows (experimental)") then
+    im.PushItemWidth(-1)
+    do
+      local glass=M.getGlassSunShadowStatus()
+      if im.Button('Start glass sunlight test preset##BeamRTGlassSun') then
+        local ok,why=M.startGlassTest();if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if im.Button('Explain glass material rejection##BeamRTGlassSun') then M.inspectGlassSunMaterials() end
+      if im.Button(glass.requested and 'Disable glass sunlight transmission##BeamRTGlassSun' or 'Capture paused window sunlight##BeamRTGlassSun') then
+        local ok,why=M.setGlassSunShadowsEnabled(not glass.requested);if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if glass.pendingRestore and im.Button('Retry sunlight restoration##BeamRTGlassSun') then M.setGlassSunShadowsEnabled(false) end
+      im.TextWrapped('Pause physics with J first. Actual exterior window triangles + opacity maps, including _glass_tint. Sunlight only; neutral attenuation, not RGB tint or new window reflections. Resume/switch/reset/material changes stop the snapshot. GPU appearance unverified.')
+      im.TextWrapped(glass.reason)
+      if not glass.enabled and glass.materialInspection then
+        for _,row in ipairs(glass.materialInspection.materials) do
+          im.TextWrapped(row.name..': '..tostring(row.reason))
+        end
+      end
+      if glass.enabled then
+        local strength=im.FloatPtr(glass.strength)
+        im.TextUnformatted('Window extinction (0 = native baseline, 1 = opacity-map transmission)')
+        if im.SliderFloat('##BeamRTGlassSunStrength',strength,0,1,'%.2f') then M.setGlassSunShadowStrength(strength[0]) end
+        for _,name in ipairs(glass.materials) do im.TextUnformatted('  '..name) end
+      end
+    end
+    do
+      local glass=M.getGlassShadowProbeStatus()
+      if im.Button(glass.enabled and 'Restore window shadows##BeamRTGlass' or 'Try native window shadows##BeamRTGlass') then
+        local ok,why=M.setGlassShadowProbeEnabled(not glass.enabled)
+        if not ok then beamrtLog('W',tostring(why)) end
+      end
+      if glass.pendingRestore>0 then
+        if im.Button('Retry window restoration##BeamRTGlass') then M.setGlassShadowProbeEnabled(false) end
+      elseif not glass.enabled then
+        im.SameLine()
+        if im.Button('Inspect window materials##BeamRTGlass') then M.inspectGlassShadowMaterials() end
+      end
+      im.TextWrapped('Native window shadow PROBE, not tinted/partial transmission. Try beside a shadow-casting light or in sunlight. If the windows cast solid shadows, restore them; a separate transmission pass is needed.')
+      im.TextWrapped('Only castShadows changes. Glass opacity, textures, reflections and body materials stay untouched. Materials are shared: other vehicles using the same window material are also affected. Default OFF; session-only.')
+      im.TextWrapped(glass.reason)
+      im.TextUnformatted(string.format('Window materials: %d | changed: %d | pending restore: %d',#glass.candidates,glass.owned,glass.pendingRestore))
+      for _,name in ipairs(glass.candidates) do im.TextUnformatted('  '..name) end
+    end
+    if im.Button(M.sharedMeshGI.enabled and "Full-mesh GI visibility ON" or "Full-mesh GI visibility OFF") then
+      local ok,why=M.setSharedMeshVisibilityEnabled(not M.sharedMeshGI.enabled)
+      if not ok then beamrtLog('E',tostring(why)) end
+    end
+    tuningTooltip("Uses the prepared world mesh to reject blocked WORLD-surfel bounce paths. Screen GI and native lighting are unchanged. Unknown, alpha-tested and blended materials fall back; alpha textures are not yet supported. Requires hybrid/world GI and nonzero world contribution.")
+    im.TextUnformatted("Mesh visibility: "..M.sharedMeshGI.reason)
+    if im.Button(M.sharedMeshGI.backend=='buffer' and 'Use inline GI visibility' or 'Use GPU visibility buffer')then
+      M.setSharedMeshVisibilityBackend(M.sharedMeshGI.backend=='buffer' and 'inline' or 'buffer')
+    end
+    tuningTooltip('Opt-in real-mesh GPU visibility target consumed by GI, not a darkening filter. First buffer workload is bounded; normal resolution can fall back to inline tracing. No native DLL is loaded.')
+    im.TextUnformatted('GI visibility backend: '..(M.sharedMeshGI.bufferEffective and 'buffer scheduled (GPU unverified)' or 'inline / inactive'))
+    if im.Button('Select nearby underground GI geometry')then
+      local ok,why=M.setSharedMeshVisibilitySource('underground');if not ok then beamrtLog('E',tostring(why))end
+    end
+    tuningTooltip('Selects one prepared underground instance within 30 m. Connects its actual mesh to GI only; does not activate the unsupported clustered/headlight hook.')
+    if im.Button(M.getMeshSunShadowStatus().enabled and "Real-mesh sun shadows ON" or "Real-mesh sun shadows OFF") then
+      local ok,why=M.setMeshSunShadowsEnabled(not M.getMeshSunShadowStatus().enabled)
+      if not ok then beamrtLog("E",tostring(why)) end
+    end
+    tuningTooltip("Opt-in full guardhouse mesh in native direct-sun shading. Native shadows/reflections/emissive remain intact; unknown/alpha materials retain fallback. Full receiver resolution; GPU cost not yet measured.")
+    if im.Button("Compare native / BeamRT sun shadows") then
+      local ok,why=M.setMeshSunShadowComparison('split');if not ok then beamrtLog('E',tostring(why)) end
+    end
+    im.SameLine()
+    if im.Button("Restore hybrid sun shadows") then M.setMeshSunShadowComparison('hybrid') end
+    tuningTooltip("Same-frame direct-sun comparison: LEFT native shadows, RIGHT BeamRT-only mesh shadows. Not two independent GI/reflection renders. Ambient, local-light shadows and cloud lighting remain unchanged. Disable restores native shading.")
+    if M.getMeshSunShadowStatus().error then im.TextUnformatted("Mesh sun: "..M.getMeshSunShadowStatus().error) end
+    local localLights=M.getMeshLocalLightStatus()
+    if localLights.enabled or localLights.canEnable then
+      if im.Button(localLights.enabled and "Underground local-light visibility ON" or "Underground local-light visibility OFF") then
+        local ok,why=M.setMeshLocalLightsEnabled(not localLights.enabled)
+        if not ok then beamrtLog('E',tostring(why)) end
+      end
+      tuningTooltip("Opt-in one imported sewer/underground section on the supported legacy point/spot path. Does not suppress ambient lighting or support alpha textures. Native worker output is not connected to BeamNG yet.")
+      if localLights.error then im.TextUnformatted('Mesh local: '..localLights.error) end
+    else
+      im.TextUnformatted("Underground local-light visibility: unavailable")
+      im.TextUnformatted(localLights.unavailableReason)
+    end
+    im.PopItemWidth()
+  end
+
+  if im.CollapsingHeader1("Noise and temporal stability") then
     im.TextColored(im.ImVec4(0.35, 0.85, 1.0, 1.0), string.format(
       "Long exposure: %s | %s | %d / %d samples | next-frame weight %.6f",
       PROGRESSIVE.enabled and "ON" or "OFF", PROGRESSIVE.runtimeMode,
@@ -6583,8 +7414,8 @@ local function drawTuningWindow()
     tuningSliderFloat("Blue-noise sampling", tuningPointers.blueNoiseStrength, 0.0, 1.0, "%.2f", M.setBlueNoiseStrength,
       "Zero restores legacy hash directions. One uses only the selected noise sequence. Intermediate values choose between complete strategies without interpolating ray coordinates.")
     im.TextUnformatted("Noise source: " .. PROGRESSIVE.blueNoiseSource)
-    if im.Button("EXPERIMENTAL ATLAS") then M.setBlueNoiseSource("stbn"); syncTuningPointers() end
-    tuningTooltip("Custom scalar RG atlas, not validated directional STBN. Its 64 slices now receive a fresh phase each cycle. Native noise remains the recommended baseline.")
+    im.TextUnformatted("Experimental atlas unavailable (DDS rejected)")
+    tuningTooltip(M.noiseSourcePolicy.atlasReason .. ". No change to native noise or reflection filtering.")
     im.SameLine()
     if im.Button("NATIVE NOISE") then M.setBlueNoiseSource("beamng"); syncTuningPointers() end
     tuningTooltip("Recommended: BeamNG's 2D blue-noise mask with integer Weyl phases over 4096 frames. Better transformed-direction metrics than the custom atlas; game appearance settings are unchanged.")
@@ -6601,7 +7432,7 @@ local function drawTuningWindow()
     im.PopItemWidth()
   end
 
-  if im.CollapsingHeader1("Radiance source cleanup", im.TreeNodeFlags_DefaultOpen) then
+  if im.CollapsingHeader1("Radiance source cleanup") then
     im.TextColored(im.ImVec4(0.35, 0.85, 1.0, 1.0),
       "PTGI input: " .. CLEAN_RADIANCE.selectedPTGISource .. " | legacy estimator input: " .. radianceSourceName)
     if im.Button("PTGI: LIVE LEGACY") then M.setPTGIRadianceSource("legacy") end
@@ -6660,31 +7491,10 @@ local function drawTuningWindow()
     im.PopItemWidth()
   end
 
-  if im.CollapsingHeader1("Ray quality and cost", im.TreeNodeFlags_DefaultOpen) then
+  if im.CollapsingHeader1("Ray quality and cost") then
     im.TextColored(im.ImVec4(1.0, 0.65, 0.25, 1.0),
       "Sliders cover practical ranges; type exact values in the right-hand boxes and press Enter."
     )
-    im.TextUnformatted("Stable single-ray diagnostic: " .. PROGRESSIVE.rayDebugName)
-    if im.Button("RAY DEBUG OFF") then M.setRayHitDiagnostic("off") end
-    im.SameLine()
-    if im.Button("HITS") then M.setRayHitDiagnostic("hits") end
-    im.SameLine()
-    if im.Button("STEPS") then M.setRayHitDiagnostic("steps") end
-    im.SameLine()
-    if im.Button("DISTANCE") then M.setRayHitDiagnostic("distance") end
-    im.SameLine()
-    if im.Button("HIT NORMALS") then M.setRayHitDiagnostic("normals") end
-    im.SameLine()
-    if im.Button("CONFIDENCE") then M.setRayHitDiagnostic("confidence") end
-    im.SameLine()
-    if im.Button("DEPTH ERROR") then M.setRayHitDiagnostic("error") end
-    im.SameLine()
-    if im.Button("REJECT REASON") then M.setRayHitDiagnostic("rejection") end
-    im.SameLine()
-    if im.Button("RAY DIRECTION") then M.setRayHitDiagnostic("direction") end
-    im.SameLine()
-    if im.Button("VIEW ALIGNMENT") then M.setRayHitDiagnostic("viewalignment") end
-    tuningTooltip("Bypasses temporal denoising and composition. v0.071 uses one deterministic world-oriented ray. RAY DIRECTION must remain world-stable; VIEW ALIGNMENT shows rear-facing red, forward-facing green, and transverse blue.")
     im.TextUnformatted("Marcher: " .. PROGRESSIVE.marcherName)
     if im.Button("LINEAR WORLD STEPS") then M.setRayMarcher("linear") end
     tuningTooltip("Accepted v0.062 path with the new crossing bracket/refinement layered on top. Use as the A/B baseline.")
@@ -6737,7 +7547,7 @@ local function drawTuningWindow()
     im.PopItemWidth()
   end
 
-  if im.CollapsingHeader1("Persistent world cache", im.TreeNodeFlags_DefaultOpen) then
+  if im.CollapsingHeader1("Persistent world cache") then
     im.TextUnformatted("GI source: " .. M.getGISource())
     if im.Button("Hybrid") then M.setGISource("hybrid") end
     tuningTooltip("Use visible screen hits first and persistent world surfels as fallback. Recommended.")
@@ -6769,6 +7579,7 @@ local function drawTuningWindow()
   end
 
   im.Separator()
+  im.TextWrapped("Save/load applies to GI and legacy reflections only. Current reflection controls are session-only.")
   if im.Button("Save My Tuning") then M.saveTuning() end
   tuningTooltip("Saves the current values to " .. TUNING_FILE .. " in the BeamNG user folder.")
   im.SameLine()
@@ -6779,9 +7590,296 @@ local function drawTuningWindow()
   im.SameLine()
   if im.Button("Refresh Sliders") then syncTuningPointers() end
 
-  im.TextColored(im.ImVec4(1.0, 0.78, 0.3, 1.0),
-    "CINEMATIC is the recommended next test. YOUR BEST preserves your exact baseline; 32x512 is a stress test, not the main beauty lever."
+end
+
+function M._tunerPanels.diagnostics()
+  if im.CollapsingHeader1("Legacy GI ray diagnostics") then
+    im.TextWrapped("These views belong to the older GI backend, not the current reflection stages above.")
+    im.TextUnformatted("Stable single-ray diagnostic: " .. PROGRESSIVE.rayDebugName)
+    if im.Button("RAY DEBUG OFF") then M.setRayHitDiagnostic("off") end
+    im.SameLine()
+    if im.Button("HITS") then M.setRayHitDiagnostic("hits") end
+    im.SameLine()
+    if im.Button("STEPS") then M.setRayHitDiagnostic("steps") end
+    im.SameLine()
+    if im.Button("DISTANCE") then M.setRayHitDiagnostic("distance") end
+    im.SameLine()
+    if im.Button("HIT NORMALS") then M.setRayHitDiagnostic("normals") end
+    im.SameLine()
+    if im.Button("CONFIDENCE") then M.setRayHitDiagnostic("confidence") end
+    im.SameLine()
+    if im.Button("DEPTH ERROR") then M.setRayHitDiagnostic("error") end
+    im.SameLine()
+    if im.Button("REJECT REASON") then M.setRayHitDiagnostic("rejection") end
+    im.SameLine()
+    if im.Button("RAY DIRECTION") then M.setRayHitDiagnostic("direction") end
+    im.SameLine()
+    if im.Button("VIEW ALIGNMENT") then M.setRayHitDiagnostic("viewalignment") end
+    tuningTooltip("Bypasses temporal denoising and composition. v0.071 uses one deterministic world-oriented ray. RAY DIRECTION must remain world-stable; VIEW ALIGNMENT shows rear-facing red, forward-facing green, and transverse blue.")
+  end
+  if im.CollapsingHeader1("Legacy capture audits") then
+    im.TextWrapped("These captures require the legacy renderer. They do not capture Coherent SSR output.")
+    if im.Button("Capture Lighting Audit") then M.runLightingAudit() end
+    tuningTooltip("Keep the camera still. Saves six local views of the current lighting stages, then restores your settings automatically.")
+    im.SameLine()
+    if im.Button("Capture Reflection Audit") then M.runReflectionAudit() end
+    tuningTooltip("Keep the camera still. Saves native, SSR beauty, receiver, validity, hit UV, hit depth, raw color, and composite views; restores all BeamRT settings afterward.")
+    if im.CollapsingHeader1("Reflection diagnostics") then
+      im.TextUnformatted("Current SSR view: " .. PROGRESSIVE.reflectionDiagnostic.name)
+      for index, view in ipairs({{"Receiver", "receiver"}, {"Validity", "validity"},
+        {"Hit UV", "hituv"}, {"Hit depth", "hitdepth"}, {"Raw color", "rawcolor"},
+        {"Composite", "composite"}, {"Source UV", "sourceuv"},
+        {"Rejection", "rejection"}, {"Direction", "direction"}}) do
+        if index % 3 ~= 1 then im.SameLine() end
+        if im.Button(view[1] .. "##SSRDiagnostic") then M.setReflectionDiagnostic(view[2]) end
+      end
+      if im.Button("Restore previous view##SSRDiagnostic") then M.setReflectionDiagnostic("off") end
+      tuningTooltip("Diagnostics use the current full-resolution SSR trace with temporal display and denoising bypassed. Off restores the preceding mode, enabled state, overlay, and GI diagnostic.")
+    end
+
+  end
+  if im.CollapsingHeader1("Extra reflection camera (capture probe only)") then
+    im.TextWrapped("A separate 512px mirror/rear camera, not a finished reflection fallback. Starting it stops custom GI/SSR. Plane clipping, depth availability and final compositing remain unverified; the preview may show underwater geometry or different exposure.")
+    if im.Button("Probe water mirror (auto plane)") then
+      local ok, reason = M.startReflectionCaptureProbe("mirror")
+      if not ok then beamrtLog("W", tostring(reason)) end
+    end
+    im.SameLine()
+    if im.Button("Probe rear camera") then
+      local ok, reason = M.startReflectionCaptureProbe("rear")
+      if not ok then beamrtLog("W", tostring(reason)) end
+    end
+    im.SameLine()
+    if im.Button("Stop camera probe") then M.stopReflectionCaptureProbe() end
+    if im.Button("Log camera capabilities") then M.logReflectionCaptureCapabilities() end
+    local capture = M.getReflectionCaptureProbeStatus()
+    im.TextWrapped(capture.reason .. " Scheduled frames: " .. tostring(capture.framesScheduled))
+    if capture.target then im.TextUnformatted("Preview target: " .. capture.target) end
+    M._planarCapture.drawPreview(im)
+  end
+
+  if im.CollapsingHeader1("Experimental water surface preview") then
+    local waterStatus = M.getWaterReceiverPreviewStatus()
+    im.TextWrapped("Geometry preview only: cyan planes / blue bounded water. This does not render water reflections or verify water pixel ownership.")
+    if im.Button(waterStatus.requested and "Disable water preview" or "Enable water preview") then
+      local ok, reason = M.setWaterReceiverPreviewEnabled(not waterStatus.requested)
+      if not ok then beamrtLog("W", tostring(reason)) end
+    end
+    im.SameLine()
+    if im.Button("Refresh nearby water") then M.refreshWaterReceiverPreview() end
+    im.TextWrapped(waterStatus.reason)
+    tuningTooltip("Experimental first step: one nearby horizontal WaterPlane and one axis-aligned WaterBlock, within 250 m. Foreground opaque geometry blocks the preview. Does not change water materials, waves, stock SSR or GI. Refresh explicitly after moving/changing water; unsupported transforms fail closed.")
+  end
+
+end
+
+function M._tunerPanels.legacy()
+  im.TextWrapped("Archived reflection backends for explicit A/B and rollback. No backend starts merely by opening this tab.")
+  if im.CollapsingHeader1("BeamRT SSSR fork (prototype)") then
+    local forkStatus = M.getSsrForkStatus()
+    im.TextWrapped("Owned shader fork, not a renamed native SSR object. Integrated SSR must be off; BeamRT owns this trace pass and its toggle.")
+    if im.Button("Enable BeamRT fork##SssrFork") then
+      local ok, reason = M.setSsrForkEnabled(true)
+      if not ok then beamrtLog("W", tostring(reason)) end
+    end
+    im.SameLine()
+    if im.Button("Disable BeamRT fork##SssrFork") then M.setSsrForkEnabled(false) end
+    im.SameLine()
+    if im.Button("Use experimental tracer##SssrFork") then
+      local ok, reason = M.setReflectionTraceBackend("experimental")
+      if not ok then beamrtLog("W", tostring(reason)) end
+    end
+    forkStatus = M.getSsrForkStatus()
+    im.TextWrapped("Trace backend: " .. forkStatus.backend .. "; " .. forkStatus.reason)
+    im.TextWrapped("First port: opaque mip-0 pixel-plane traversal plus existing BeamRT reconstruction. No native Hi-Z, water capture, native denoiser or material replacement yet. Not visually verified.")
+    tuningTooltip("Disable turns off the owned reflection path, not the game's SSR setting. The fork does not create PostFxSSSR objects or write native fields. Backend selection is transient; it does not add presets or auto-enable on load.")
+  end
+
+  if im.CollapsingHeader1("Reflection comparison lab") then
+    local lab = M.getReflectionLabStatus()
+    im.TextWrapped("Temporary exaggeration, not extra presets. Select your tracer above; these buttons do not enable rendering or native SSR.")
+    for index, profile in ipairs(PROGRESSIVE.reflectionLab.policy.list()) do
+      if index > 1 and index ~= 4 then im.SameLine() end
+      if im.Button(profile.label .. "##ReflectionLab") then
+        local ok, reason = M.setReflectionLabProfile(profile.id)
+        if not ok then beamrtLog("W", tostring(reason)) end
+      end
+      tuningTooltip(profile.description)
+    end
+    lab = M.getReflectionLabStatus()
+    im.TextWrapped("Lab: " .. lab.label .. "; tracer: " .. lab.backend .. ". " .. lab.description)
+    if lab.suspended then im.TextWrapped("Lab overrides are suspended during the source/convergence capture.") end
+    im.TextWrapped("Coverage changes apply only to the fork; gain/filter comparisons apply to either tracer. 8x gain is artificial. Settled may ghost or soften detail. Extended work may cause severe frame-time spikes.")
+    im.TextWrapped("Use Normal to remove every lab override. Native SSR must remain off. Four gameplay presets are unchanged.")
+  end
+
+  if im.CollapsingHeader1("Native SSR: dense-ray comparison") then
+    im.TextWrapped("Legacy integrated-SSR tuning diagnostic, NOT the BeamRT-owned fork above. This remains available for comparison only.")
+    local nativeStatus = M.getNativeSsrEnhancementStatus()
+    im.TextWrapped("Native tracing, denoising, water and material composition remain in use. This experiment only changes native ray density; it does not enable the custom BeamRT renderer.")
+    if im.Button("Use dense native rays##NativeSSR") then
+      if nativeStatus.requested then M.setNativeSsrComparison("enhanced")
+      else M.enableNativeSsrEnhancement() end
+    end
+    im.SameLine()
+    if im.Button("Use native baseline##NativeSSR") then M.setNativeSsrComparison("native") end
+    if nativeStatus.requested or nativeStatus.restorePending then
+      im.SameLine()
+      if im.Button("Restore / stop##NativeSSR") then M.disableNativeSsrEnhancement() end
+    end
+    nativeStatus = M.getNativeSsrEnhancementStatus()
+    im.TextWrapped(nativeStatus.reason)
+    im.TextWrapped("Restoration: " .. tostring(nativeStatus.restoration))
+    if nativeStatus.baselineSamplesPerQuad then
+      im.TextUnformatted("Base rays per eligible 2x2 quad: baseline " .. tostring(nativeStatus.baselineSamplesPerQuad)
+        .. "; current " .. tostring(nativeStatus.currentSamplesPerQuad or "unknown"))
+    end
+    if nativeStatus.baselineSameAsEnhanced then
+      im.TextWrapped("Your baseline already uses dense rays: this toggle makes no sampling change.")
+    end
+    im.TextWrapped("Experimental, not visually verified. Dense mode is one independent ray per eligible trace pixel, not four samples per pixel. It can increase tracing cost substantially. Let history settle after each switch.")
+    tuningTooltip("Native SSR must already be enabled in graphics settings. Only a verified native samplesPerQuad accessor with validated readback is changed; typed Lua properties are distinct from SimObject fields. Stop, settings/mission changes and unload restore the owned baseline when safe; external edits are preserved.")
+    if im.Button("Log native SSR details##NativeSSR") then M.logNativeSsrDiagnostics() end
+    tuningTooltip("Read-only receipt of native property bindings and CPU route/denoiser status. Does not change native settings, invoke a setter, or prove GPU execution. Saves the details to beamng.log without a long console command.")
+  end
+  if im.CollapsingHeader1("Archived BeamRT reflection controls") then
+    im.PushItemWidth(-1)
+    im.TextUnformatted("Screen-space reflections: " .. (reflectionOverlayEnabled and "ON" or "OFF"))
+    im.TextUnformatted("SSR augments native reflections; it does not replace the cubemap.")
+    if im.Button(reflectionOverlayEnabled and "Disable reflections" or "Enable reflections") then
+      M.setReflectionsEnabled(not reflectionOverlayEnabled)
+    end
+    tuningTooltip("Adds the BeamRT reflection pass after GI. Manual GI ray/lighting diagnostics temporarily suppress this overlay and restore the selected preference when switched off. Screen-space reflections cannot show off-screen objects or the back side of geometry.")
+    im.TextUnformatted("Reflection sampling: " .. PROGRESSIVE.reflectionSampling.name)
+    if im.Button("Mirror SSR") then M.setReflectionSamplingMode("mirror") end
+    tuningTooltip("Uses the existing mirror ray. Mirror is the startup default; existing tuning presets preserve your selected reflection sampling mode.")
+    im.SameLine()
+    if im.Button("GGX SSR") then M.setReflectionSamplingMode("ggx") end
+    tuningTooltip("Samples a material roughness lobe over rendered frames. Switching sampling clears SSR history; GI history stays intact. Reflection diagnostics and reflection audits freeze sample zero for consistent hit inspection.")
+    im.TextUnformatted("GGX reconstruction: " .. PROGRESSIVE.reflectionReconstruction.name)
+    if im.Button("Playable filter") then M.setReflectionReconstruction("playable") end
+    tuningTooltip("Uses a short, bounded average to reduce GGX noise while moving. No long exposure or extra rays. Existing presets preserve your selected filter; mirror SSR keeps its existing reconstruction.")
+    im.SameLine()
+    if im.Button("Legacy filter") then M.setReflectionReconstruction("legacy") end
+    tuningTooltip("Restores the previous GGX reconstruction for a quick comparison. Switching filters resets SSR history and keeps GI history intact.")
+    if im.Button(PROGRESSIVE.reflectionHit.enabled and "Hit-aware ON" or "Hit-aware OFF") then
+      M.setReflectionHitAwareEnabled(not PROGRESSIVE.reflectionHit.enabled)
+    end
+    tuningTooltip("Playable GGX checks reflected-source depth and motion, and protects near-polished hit layers. Almost mirror-smooth surfaces use a stable mirror approximation. Uses the same ray count but adds two geometry helper passes and 32-bit buffers. Turn off to compare with v0.096; legacy/mirror and frozen audits bypass this path.")
+    if im.Button(PROGRESSIVE.reflectionReceiverHistory.enabled and "Receiver history ON" or "Receiver history OFF") then
+      M.setReflectionReceiverHistoryEnabled(not PROGRESSIVE.reflectionReceiverHistory.enabled)
+    end
+    tuningTooltip("Playable hit-aware GGX: rejects old color from mismatched receiver normals, roughness or F0, including each subpixel history tap. No wider blur or extra rays/passes. Two extra RGBA32F planes cost 32 bytes per screen pixel (about 106 MiB at 2560x1353); OFF bypasses validation but retains that allocation. Session-only comparison; game appearance still needs testing.")
+    if im.Button(PROGRESSIVE.reflectionSourceReconstruction.enabled and "Source depth validation ON" or "Source depth validation OFF") then
+      M.setReflectionSourceReconstructionEnabled(not PROGRESSIVE.reflectionSourceReconstruction.enabled)
+    end
+    tuningTooltip("Validates each of four source-color taps against the accepted reflection surface before blending. Rejects unvalidated bright foreground color across an edge. Bypasses the rough source mip atlas (not temporal color reconstruction) while ON: this can expose more grain on rough surfaces. OFF restores prior source sampling; resets reflections only. Frozen audits and convergence keep their existing reference path.")
+    if im.Button(PROGRESSIVE.reflectionColor.enabled and "Color filter ON" or "Color filter OFF") then
+      M.setReflectionColorFilterEnabled(not PROGRESSIVE.reflectionColor.enabled)
+    end
+    tuningTooltip("Playable GGX: subpixel valid history color and depth-aware 2x/4x/8x source color levels. Source depth validation ON bypasses these source levels because their averaged tiles cannot certify original surface ownership; history color still benefits. Adds two color passes, no rays or long exposure. Hit/depth metadata stays point sampled.")
+    if im.Button(PROGRESSIVE.reflectionLocalResolve.enabled and "Local cleanup ON (experimental)" or "Local cleanup OFF (experimental)") then
+      M.setReflectionLocalResolveEnabled(not PROGRESSIVE.reflectionLocalResolve.enabled)
+    end
+    tuningTooltip("A narrow five-tap display-only cross for playable GGX. Preserves polished detail and rejects different depth/normal/roughness/F0 surfaces. Does not fill missing hits, change ray count or feed history. Valid black and zero GGX samples remain in the mean. Quality/Cinematic enable it at 0.35; compare in game before increasing strength.")
+    if im.Button(PROGRESSIVE.reflectionVariance.enabled and "Variance filter ON" or "Variance filter OFF") then
+      M.setReflectionVarianceEnabled(not PROGRESSIVE.reflectionVariance.enabled)
+    end
+    tuningTooltip("Opt-in variance-guided reflection cleanup, adapted from GI filtering. GGX playable only; no extra rays or long exposure. Three scales add two full-resolution color targets beyond one scale. Near-polished surfaces bypass wider scales. OFF removes these experiment passes; GI settings stay unchanged. Game appearance and performance need comparison.")
+    im.SameLine()
+    if im.Button(PROGRESSIVE.reflectionVariance.passes == 3 and "Use one filter scale" or "Use three filter scales") then
+      M.setReflectionVariancePasses(PROGRESSIVE.reflectionVariance.passes == 3 and 1 or 3)
+    end
+    tuningTooltip("One scale uses a small 3x3 footprint. Three scales chain steps 1, 2 and 4 with depth, normal, roughness and F0 gates. This resets reflection history, not GI history; neither selection changes ray count or reflection intensity.")
+    im.TextUnformatted("Variance filter effective: " .. ((PROGRESSIVE.reflectionVariance.enabled
+      and PROGRESSIVE.reflectionSampling.mode == 1 and PROGRESSIVE.reflectionReconstruction.mode == 1
+      and not PROGRESSIVE.reflectionSampling.isFrozen() and not PROGRESSIVE.reflectionConvergenceEnabled)
+      and "playable GGX" or "bypassed in current mode"))
+    tuningSliderFloat("Reflection intensity", tuningPointers.reflectionStrength, 0.0, 1.25, "%.2f", M.setReflectionStrength,
+      "Scales material response, including the trace's GGX weight when GGX sampling is selected. Reduce this if the pass competes with BeamNG's native probes.")
+    tuningSliderFloat("Reflection roughness cutoff", tuningPointers.reflectionMaxRoughness, 0.08, 0.55, "%.2f", M.setReflectionMaxRoughness,
+      "Only surfaces smoother than this receive SSR augmentation. The conservative presets stay near 0.32-0.35; native environment response and clearcoat remain available.")
+    tuningSliderFloat("Reflection step length", tuningPointers.reflectionStepSize, 0.10, 0.75, "%.2f m", M.setReflectionStepSize,
+      "Coarse search distance before five-step hit refinement. Smaller finds thin geometry more reliably but costs more.")
+    tuningSliderFloat("Reflection hit thickness", tuningPointers.reflectionThickness, 0.05, 0.75, "%.2f m", M.setReflectionThickness,
+      "Maximum refined depth mismatch. The old 0.55 m default accepted unrelated rear geometry; keep this near 0.22-0.28 m.")
+    tuningSliderFloat("Reflection normal bias", tuningPointers.reflectionNormalBias, 0.0, 0.15, "%.3f m", M.setReflectionNormalBias,
+      "Offsets the ray origin to avoid self hits. Too much detaches the reflection from the receiver.")
+    tuningSliderFloat("Reflection current-frame weight", tuningPointers.reflectionTemporalBlend, 0.05, 1.0, "%.2f", M.setReflectionTemporalBlend,
+      "Higher reacts faster and trails less; lower is steadier. Playable GGX treats this as a 60 FPS response control and keeps a short, frame-time-corrected rolling history. Mirror misses receive one finite grace frame; legacy GGX keeps its previous averaging.")
+    tuningSliderFloat("Rough-reflection reconstruction", tuningPointers.reflectionDenoiseStrength, 0.0, 1.0, "%.2f", M.setReflectionDenoiseStrength,
+      "Blends toward the depth/normal/roughness/F0-aware filter. Playable GGX doubles this blend up to full reconstruction without adding samples; zero still disables spatial filtering. Rougher receivers use a broader reconstruction footprint.")
+    im.TextUnformatted("Reflection pattern controls (GGX)")
+    tuningSliderFloat("Reflection noise cell", tuningPointers.reflectionSampleCellPixels, 0.25, 4.0, "%.2f px", M.setReflectionSampleCellPixels,
+      "Noise seed grid only, not ray resolution or GI world cells. 1 px keeps independent per-pixel seeds. Larger values share GGX samples across pixels and can make checker patches WORSE. Below 1 changes the seed pattern; it does not add subpixel rays. Polished mirror approximations are unaffected.")
+    tuningSliderInt("Reflection noise seed", tuningPointers.reflectionNoiseSeed, 0, 255, M.setReflectionNoiseSeed,
+      "Changes GGX's spatial random pattern without adding rays or changing material roughness. Seed 0 is the original pattern. If patches move with the seed, sampling contributes; this alone cannot prove the cause. Exact entry accepts 0..65535.")
+    tuningSliderFloat("Reflection filter radius", tuningPointers.reflectionFilterRadiusScale, 0.25, 3.0, "%.2fx", M.setReflectionFilterRadiusScale,
+      "Playable GGX only: scales the existing 13-tap edge-aware footprint, not tap count. 1 is original; try 1.5. Larger can soften details or create sparse-filter artifacts. Depth, normal, material and hit-layer gates remain. No extra rays or long exposure.")
+    tuningSliderFloat("Reflected color softness", tuningPointers.reflectionSourceFootprintScale, 0.0, 2.0, "%.2fx", M.setReflectionSourceFootprintScale,
+      "Playable GGX with Color filter ON and Source depth validation OFF: scales the depth-aware source-color footprint. Source validation ON deliberately bypasses this footprint. 0 uses raw hit color, 1 is original, 2 is broader (capped at 8 source pixels). No geometry, hit metadata or native reflection changes.")
+    if im.Button("Reset reflection pattern controls") then M.resetReflectionTuning(); syncTuningPointers() end
+    tuningTooltip("Resets only these four controls: noise cell 1 px, seed 0, filter radius 1x, color softness 1x. Keeps all other tuning and GI history.")
+    im.PopItemWidth()
+  end
+  im.Separator()
+  im.TextWrapped("Save/load applies to GI and legacy reflections only. Current reflection controls are session-only.")
+  if im.Button("Save My Tuning") then M.saveTuning() end
+  tuningTooltip("Saves the current values to " .. TUNING_FILE .. " in the BeamNG user folder.")
+  im.SameLine()
+  if im.Button("Load My Tuning") then M.loadTuning(); syncTuningPointers() end
+  im.SameLine()
+  if im.Button("Copy Values") then im.SetClipboardText(M.settingsCommand()) end
+  tuningTooltip("Copies a complete GELUA command so the exact look can be shared or pasted into the handoff.")
+  im.SameLine()
+  if im.Button("Refresh Sliders") then syncTuningPointers() end
+
+end
+
+local function drawTuningWindow()
+  if not tuningWindowOpen[0] then return end
+  im.SetNextWindowSize(im.ImVec2(650, 850), im.Cond_FirstUseEver)
+  if not im.Begin("BeamRT Tuner v" .. VERSION, tuningWindowOpen) then
+    im.End()
+    return
+  end
+  local compatibility = M.getRendererCompatibilityStatus()
+  local lightingActive = effectIsEnabled(GI_EFFECT_NAME)
+  local reflectionActive = effectIsEnabled(REFLECTION_EFFECT_NAME)
+  local customActive = lightingActive or reflectionActive
+  local customStatus = lightingActive and (reflectionActive
+      and (PROGRESSIVE.sssrFork.backend == "fork"
+        and "Custom renderer: PTGI + BeamRT SSSR fork active" or "Custom renderer: PTGI + experimental SSR active")
+      or "Custom renderer: PTGI lighting only; reflections off")
+    or reflectionActive and (PROGRESSIVE.sssrFork.backend == "fork"
+      and "Custom renderer: BeamRT SSSR fork active" or "Custom renderer: experimental SSR active")
+    or "Custom renderer: not rendering"
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    customActive = M._coherentRenderer.getStatus().active
+    customStatus = customActive and "Custom renderer: Coherent SSR passes enabled (visual output unverified)"
+      or "Custom renderer: Coherent SSR requested, required passes unavailable"
+    if M._ptgiCoherent and M._ptgiCoherent.requested then
+      customActive = M.getPtgiCoherentStatus().active
+      customStatus = customActive and 'Custom renderer: PTGI + Coherent SSR (experimental; visual output unverified)'
+        or 'Custom renderer: combined rendering incomplete'
+    end
+  end
+  im.TextColored(
+    customActive and im.ImVec4(0.3, 1.0, 0.45, 1.0) or im.ImVec4(1.0, 0.65, 0.25, 1.0),
+    customStatus
   )
+  if not compatibility.safe then
+    im.TextWrapped("Compatibility: " .. compatibility.reason)
+    im.TextWrapped("Integrated SSR conflicts with the custom renderers. BeamRT does not change its enablement automatically.")
+  end
+  if im.Button("Disable all BeamRT rendering") then M.disable() end
+  local reflectionStatus = M.getCoherentSsrStatus()
+  if reflectionStatus.options.debugView ~= 0 then
+    im.TextWrapped("Reflection diagnostic view active: " .. tostring(reflectionStatus.options.debugView))
+    if im.Button("Restore reflection beauty##TunerHeader") then M.setCoherentSsrParameter("debugView", 0) end
+  end
+  im.Separator()
+  M._tunerUI.draw(im, M, M._tunerPanels)
   im.End()
 end
 
@@ -6803,6 +7901,18 @@ function M.toggleTuner()
 end
 
 function M.enable()
+  if M._ptgiCoherent and not M._ptgiCoherent.requested and M._ptgiCoherent.hasLease() then
+    local restored, reason=M._ptgiCoherent.release()
+    if not restored then return false,reason end
+  end
+  if M._planarCapture then
+    local stopped, reason = M._planarCapture.stop("Switched to the older renderer")
+    if not stopped then return false, reason end
+  end
+  if M._coherentRenderer and not (M._ptgiCoherent and M._ptgiCoherent.requested) then
+    local stopped, reason = M._coherentRenderer.disable("Switched to the older BeamRT renderer")
+    if not stopped then return false, reason end
+  end
   local selectedDiagnostic = BUFFER_DIAGNOSTIC_SOURCES[bufferDiagnosticSource]
   if not findObject(DEBUG_EFFECT_NAME)
     or not findObject(GI_EFFECT_NAME)
@@ -6821,6 +7931,13 @@ function M.enable()
     beamrtLog("W", "BeamRT effects were missing; recreating objects")
     createObjects()
   end
+  if M._ptgiCoherent and M._ptgiCoherent.requested then
+    if not M._coherentRenderer.getStatus().active then return false,'Coherent SSR is not active.' end
+    local staged, reason=M._ptgiCoherent.prepare()
+    if not staged then return false,reason end
+    local bound, bindingReason=M._coherentRenderer.setSceneColorSource(M._ptgiCoherent.getSceneSource())
+    if not bound then return false,bindingReason end
+  end
   enabledRequested = true
   if debugMode == MODE_IDS.diffusegi then
     resetTemporalHistory("enable requested", false)
@@ -6829,25 +7946,47 @@ function M.enable()
   end
   applyShaderConsts()
   syncEffectEnablement()
-  beamrtLog("I", "enable requested; current mode is " .. modeName)
+  local compatibility = M.getRendererCompatibilityStatus()
+  if compatibility.safe and M._startAutomaticLampShadows then M._startAutomaticLampShadows() end
+  beamrtLog(compatibility.safe and "I" or "W", "enable requested; current mode is " .. modeName
+    .. (compatibility.safe and "" or "; " .. compatibility.reason))
   return true
 end
 
 -- One-command entry point for the user-facing beauty mode.
 function M.start()
+  if M._ptgiCoherent and M._ptgiCoherent.requested and not M.disable() then return false end
   M.setMode("lighting")
   M.openTuner()
   return M.enable()
 end
 
 function M.disable()
+  local nativeVisibilityStopped=not M._nativeShadowDiagnostic or M._nativeShadowDiagnostic.disable('BeamRT disabled')
+  local visibilityStopped=not M._lightVisibilityDiagnostic or M._lightVisibilityDiagnostic.disable('BeamRT disabled')
+  local glassSunRestored=not M._glassSunShadow or M._glassSunShadow.disable('BeamRT disabled')
+  local glassRestored=not M._glassShadowProbe or M._glassShadowProbe.disable('BeamRT disabled')
+  local volumesStopped=not M._localVolumes or M._localVolumes.disable('BeamRT disabled')
+  local lampsRestored = not M._nearbyLampShadows or M._nearbyLampShadows.disable('BeamRT disabled')
+  local captureStopped = not M._planarCapture or M._planarCapture.stop("BeamRT disabled")
+  local coherentStopped = not M._coherentRenderer or M._coherentRenderer.disable("BeamRT disabled")
+  local nativeRestored = true
+  if M._nativeSsrEnhancement then nativeRestored = M.disableNativeSsrEnhancement() end
+  M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
   enabledRequested = false
   syncEffectEnablement()
+  local combinedRestored = not M._ptgiCoherent or M._ptgiCoherent.release()
   beamrtLog("I", "disable requested")
-  return true
+  return nativeVisibilityStopped and visibilityStopped and nativeRestored and coherentStopped and captureStopped and combinedRestored and lampsRestored and volumesStopped and glassRestored and glassSunRestored
 end
 
 function M.toggle()
+  if M._planarCapture and M._planarCapture.getStatus().requested then M.disable(); return false end
+  if M._coherentRenderer and M._coherentRenderer.getStatus().requested then
+    M.disable()
+    return false
+  end
   local diagnosticEnabled = false
   for _, source in pairs(BUFFER_DIAGNOSTIC_SOURCES) do
     diagnosticEnabled = diagnosticEnabled or effectIsEnabled(source.effectName)
@@ -6882,12 +8021,248 @@ function M.rebuildSceneDatabase(providerName, options)
   return ok, result
 end
 
+-- Conservative opt-in: secondary GI paths to cached world surfels are
+-- rejected ONLY when a manually verified opaque world triangle intersects.
+-- Legacy GI and screen-space paths are not otherwise reweighted.
+function M.setSceneVisibilityGIEnabled(enabled)
+  if type(enabled) ~= "boolean" then
+    return false,"enabled must be boolean"
+  end
+  M.sceneGIVisibility.enabled=enabled
+  M.sceneGIVisibility.revision=-1
+  applyGIShaderConsts(true)
+  resetTemporalHistory("opaque scene visibility changed", false)
+  beamrtLog("I", "GI opaque-triangle visibility " ..
+    (enabled and "enabled (experimental)" or "disabled"))
+  return true
+end
+
+function M.getSceneVisibilityGIStatus()
+  local worldMeshCasters=require("ge/extensions/beamrt/worldMeshCasters")
+  local provider=M.getSceneProvider("visibility")
+  local status=provider.getStats()
+  status.enabled=M.sceneGIVisibility.enabled
+  status.shader="beamrtGITraceP_v082.hlsl"
+  status.effectiveOpaqueTriangles=M.sceneGIVisibility.enabled
+    and #worldMeshCasters.getOpaqueTriangles() or 0
+  status.scope="cached world surfel bounce rays only"
+  return status
+end
+
+-- CPU inspection path for GI light-source visibility. This does not
+-- override native direct lighting: it reports available segment evidence,
+-- including uncertain alpha geometry and unimported scene limitations.
+function M.auditWorldSurfelLightPath(surfelIndex, lightIndex)
+  local i=tonumber(surfelIndex) or 1
+  local j=tonumber(lightIndex) or 1
+  if i%1~=0 or j%1~=0 or i<1 or j<1 then
+    return {status="invalid",error="indices must be positive integers"}
+  end
+  local surfel=surfels[i]
+  if not surfel then return {status="unavailable",error="world surfel not cached at index "..i} end
+  local lightProvider=sceneDatabase.getProvider("lights")
+  local light=(lightProvider.getRecords() or {})[j]
+  if not light or not light.position then
+    return {status="unavailable",error="light position not in provider cache at index "..j}
+  end
+  local provider=M.getSceneProvider("visibility")
+  local evidence=provider.traceSegment(surfel.position,light.position,
+                                        {includeApproximateBoxes=true})
+  evidence.surfelIndex=i
+  evidence.lightIndex=j
+  evidence.lightType=light.type
+  evidence.lightName=light.name
+  evidence.directLightingModified=false
+  return evidence
+end
+
+function M.querySceneVisibility(fromWorld,toWorld,opts)
+  local provider=M.getSceneProvider("visibility")
+  return provider.traceSegment(fromWorld,toWorld,opts)
+end
+
+-- Static mesh preprocessing input: export shape asset paths and instance
+-- metadata without assuming Lua can access the native graphics mesh buffer.
+function M.exportStaticSceneManifest(path, limit, useCached)
+  return require("ge/extensions/beamrt/sceneAssetManifest").write(
+    path or "/settings/beamrtSceneManifest.json",
+    {limit=limit, cached=useCached==true})
+end
+function M.getStaticSceneManifestStats(limit, useCached)
+  local manifest,err=require("ge/extensions/beamrt/sceneAssetManifest").capture(
+    {limit=limit, cached=useCached==true})
+  if not manifest then return false,err end
+  return manifest.stats
+end
+
 function M.getSceneDatabaseStats()
   return sceneDatabase.getStats()
 end
 
 function M.getSceneProvider(name)
-  return sceneDatabase.getProvider(name)
+  -- Required sceneDatabase modules can survive an extension reload. Resolve
+  -- the already-tested new visibility module if the cached registry predates it.
+  return sceneDatabase.getProvider(name) or (name=="visibility" and require("ge/extensions/beamrt/sceneVisibility") or nil)
+end
+
+function M._applySharedMeshGI(effect)
+  if not effect then return false end
+  local state=M.sharedMeshGI
+  local renderer=extensions and rawget(extensions,'beamrt_meshBVH')
+  local data,reason
+  if state.source=='underground' then
+    renderer=require('ge/extensions/beamrt/meshLocalScene')
+    if state.enabled then
+      state.policyFrame=((state.policyFrame or 0)+1)%30
+      data,reason=renderer.getBinding(state.policyFrame==0)
+    end
+  elseif state.enabled and renderer then data,reason=renderer.getSceneBinding() end
+  local effective=state.enabled and data and data.policy.opaque>0 and giSourceMode~=1 and worldGIStrength>0
+    and effectIsEnabled(GI_EFFECT_NAME)
+  local key=effective and (state.source..':'..tostring(data.objectId)..':'..data.policy.key..':'..data.gpuData.texture) or ''
+  if effective then
+    local ok,result=pcall(require('ge/extensions/beamrt/meshSceneInputs').enable)
+    if not ok or result==false then effective=false;key='';reason='native input packing unavailable' end
+  end
+  if effective then
+    local buffered=false
+    if state.backend=='buffer' and PROGRESSIVE.rayDebugMode<0.5 and PROGRESSIVE.lightingDiagnostic.mode<0.5 then
+      PROGRESSIVE.inputPrep.applyConsts()
+      local buffer=require('ge/extensions/beamrt/giVisibilityBuffer')
+      local ok,result,why=pcall(buffer.configure,{trace=effect,scene=data,applySceneConsts=renderer.applySceneConsts,
+        prepareFrame=M._prepareGIFrame,width=PROGRESSIVE.inputPrep.imageWidth,height=PROGRESSIVE.inputPrep.imageHeight,
+        bias=rayNormalBias,surfels=surfels,viewAvailable=getRenderView('main')~=nil})
+      buffered=ok and result==true
+      state.bufferReason=buffered and 'passes scheduled; GPU appearance unverified' or (ok and why or tostring(result))
+    elseif state.backend=='buffer' then
+      state.bufferReason='GI diagnostic selected; retain inline path'
+    end
+    effect:setField('shader',0,state.shaderName)
+    effect:setField('texture',3,'#BeamRT_GISourceChannels')
+    effect:setField('texture',5,data.gpuData.texture)
+    state.bound=true
+    renderer.applySceneConsts(effect,data,true)
+    state.reason='active for world-surfel bounce segments';state.opaqueMaterials=data.policy.opaque
+    if buffered then
+      local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer']
+      effect:setField('shader',0,buffer.shaderName);effect:setField('texture',5,buffer.target)
+      buffer.applyConsumer()
+      state.reason='GPU visibility-buffer world GI; appearance unverified'
+    else
+      local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable(state.bufferReason)end
+      if state.backend=='buffer' then state.reason='inline fallback: '..tostring(state.bufferReason)end
+    end
+    state.bufferEffective=buffered
+    key=key..':'..(buffered and 'buffer' or 'inline')
+    state.objectId=data.objectId;state.triangles=data.gpuData.triangleCount;state.nodes=data.gpuData.nodeCount
+  else
+    local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable(reason)end
+    state.bufferEffective=false
+    local pack=package.loaded['ge/extensions/beamrt/meshSceneInputs'];if pack then pack.disable() end
+    if state.bound then
+      effect:setField('shader',0,GI_TRACE_SHADER_NAME)
+      effect:setField('texture',3,'#lightinfo[RT0]');effect:setField('texture',5,'#prepass[RT1]')
+      state.bound=false
+    end
+    state.reason=not state.enabled and 'disabled' or reason or not data and 'scene not prepared'
+      or data.policy.opaque==0 and 'no live-declared opaque materials'
+      or giSourceMode==1 and 'screen-only GI; world-surfel guard inactive' or 'world GI strength is zero'
+  end
+  state.effective=not not effective
+  state.opaqueMaterials=data and data.policy.opaque or 0
+  if state.key~=key then
+    state.key=key
+    resetTemporalHistory('shared mesh visibility changed',false)
+  end
+  return state.effective
+end
+function M.setSharedMeshVisibilityEnabled(value)
+  if type(value)~='boolean' then return false,'enabled must be boolean' end
+  if value then
+    if M.sharedMeshGI.source=='underground' then
+      local data,why=require('ge/extensions/beamrt/meshLocalScene').prepare();if not data then return false,why end
+    else
+      if not extensions.beamrt_meshBVH then extensions.load('beamrt_meshBVH') end
+      local renderer=extensions.beamrt_meshBVH
+      if not renderer or type(renderer.prepareScene)~='function' then return false,'reload meshBVH to load the material-aware implementation' end
+      local ok,why=renderer.prepareScene();if not ok then return false,why end
+      -- Data acquisition is not another debugging display.
+      if extensions.beamrt_meshAlignment then extensions.beamrt_meshAlignment.setMode('off') end
+    end
+  end
+  M.sharedMeshGI.enabled=value
+  applyGIShaderConsts();resetTemporalHistory('shared mesh visibility selection changed',false)
+  return true,M.getSharedMeshVisibilityStatus()
+end
+function M.setSharedMeshVisibilityBackend(value)
+  if value~='inline' and value~='buffer' then return false,'backend must be inline or buffer' end
+  M.sharedMeshGI.backend=value;applyGIShaderConsts();resetTemporalHistory('mesh GI backend changed',false)
+  return true,M.getSharedMeshVisibilityStatus()
+end
+function M.setSharedMeshVisibilitySource(value)
+  if value~='guardhouse' and value~='underground' then return false,'source must be guardhouse or underground' end
+  if value=='underground' then
+    local data,why=require('ge/extensions/beamrt/meshLocalScene').prepare();if not data then return false,why end
+  end
+  local previous=M.sharedMeshGI.source
+  M.sharedMeshGI.source=value
+  if M.sharedMeshGI.enabled then
+    local ok,why=M.setSharedMeshVisibilityEnabled(true)
+    if not ok then M.sharedMeshGI.source=previous;applyGIShaderConsts()end
+    return ok,why
+  end
+  applyGIShaderConsts();resetTemporalHistory('mesh GI source changed',false);return true,M.getSharedMeshVisibilityStatus()
+end
+function M.getSharedMeshVisibilityStatus()
+  return {requested=M.sharedMeshGI.enabled,effective=M.sharedMeshGI.effective,reason=M.sharedMeshGI.reason,
+    opaqueMaterials=M.sharedMeshGI.opaqueMaterials or 0,scope='receiver to world-surfel bounce segments',
+    sourceChannelsPacked=M.sharedMeshGI.effective,alphaTexturesSampled=false,nativeShadowsReplaced=false,
+    backendRequested=M.sharedMeshGI.backend,backendActive=M.sharedMeshGI.bufferEffective and 'buffer' or 'inline',
+    geometrySource=M.sharedMeshGI.source,objectId=M.sharedMeshGI.objectId,triangles=M.sharedMeshGI.triangles,nodes=M.sharedMeshGI.nodes,
+    nativeWorkerAttached=false,gpuExecutionVerified=false,appearanceVerified=false}
+end
+
+function M.setMeshSunShadowsEnabled(value)
+  if type(value)~='boolean' then return false,'enabled must be boolean' end
+  if not extensions then return not value,'extensions unavailable' end
+  if value and not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
+  local shadow=extensions.beamrt_meshSunShadow
+  if not shadow then return not value,'mesh sunlight integration unavailable' end
+  if value then return shadow.enable() end
+  return shadow.disable()
+end
+function M.getMeshSunShadowStatus()
+  local shadow=extensions and extensions.beamrt_meshSunShadow
+  return shadow and shadow.getStatus() or {enabled=false}
+end
+function M.setMeshSunShadowComparison(value)
+  if not extensions then return false,'extensions unavailable' end
+  if not extensions.beamrt_meshSunShadow then extensions.load('beamrt_meshSunShadow') end
+  local shadow=extensions.beamrt_meshSunShadow
+  if not shadow or type(shadow.setComparisonMode)~='function' then return false,'reload meshSunShadow for comparison controls' end
+  local ok,why=shadow.setComparisonMode(value);if not ok then return false,why end
+  if not shadow.getStatus().enabled then return shadow.enable() end
+  return true,shadow.getStatus()
+end
+function M.setMeshLocalLightsEnabled(value)
+  if type(value)~='boolean'then return false,'enabled must be boolean'end
+  if not extensions then return not value,'extensions unavailable'end
+  local status=M.getMeshLocalLightStatus()
+  if value and not status.enabled and not status.canEnable then return false,status.unavailableReason end
+  if value and not rawget(extensions,'beamrt_meshLocalLights') then extensions.load('beamrt_meshLocalLights')end
+  local lights=rawget(extensions,'beamrt_meshLocalLights')
+  if not lights then return not value,'local mesh-light integration unavailable'end
+  if value then return lights.enable()end
+  return lights.disable()
+end
+function M.getMeshLocalLightStatus()
+  -- Reading tuner availability must not trigger extensions.__index auto-load.
+  local lights=extensions and rawget(extensions,'beamrt_meshLocalLights')
+  local status=lights and lights.getStatus()or{enabled=false}
+  local availability=M.localLightAvailability.resolve(status,ClusterShading~=nil or ClusteredShading~=nil)
+  status.canEnable=availability.canEnable; status.canDisable=availability.canDisable
+  status.unavailableReason=availability.reason
+  return status
 end
 
 function M.captureVehicleGeometry(vehicleId)
@@ -6988,9 +8363,61 @@ local function validateCleanRadianceLifetimes()
 end
 
 function M.onPreRender(dtReal, dtSim, dtRaw)
+  if M._nativeShadowDiagnostic then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen()
+      or effectIsEnabled(GI_EFFECT_NAME)or (M._coherentRenderer and M._coherentRenderer.getStatus().requested)then
+      if M._nativeShadowDiagnostic.getStatus().enabled then M._nativeShadowDiagnostic.disable('Native diagnostic stopped for rendering/capture')end
+    else M._nativeShadowDiagnostic.update()end
+  end
+  if M._lightVisibilityDiagnostic then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or PROGRESSIVE.lightingAudit.getStatus().active or PROGRESSIVE.reflectionSampling.isFrozen() then
+      if M._lightVisibilityDiagnostic.getStatus().enabled then M._lightVisibilityDiagnostic.disable('Capture started')end
+    else M._lightVisibilityDiagnostic.update()end
+  end
+  if M._glassSunShadow then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+      or PROGRESSIVE.reflectionSampling.isFrozen() then
+      if M._glassSunShadow.getStatus().requested then M._glassSunShadow.disable('Glass sunlight stopped for capture') end
+    else M._glassSunShadow.update(dtReal) end
+  end
+  if M._nearbyLampShadows and not materialCachePublication and not CLEAN_RADIANCE.build
+    and not CLEAN_RADIANCE.materialBatch
+    and (not PROGRESSIVE.lightingAudit.getStatus or not PROGRESSIVE.lightingAudit.getStatus().active)
+    and M._nearbyLampShadows.update(dtReal) then
+    resetTemporalHistory('native lamp shadow cohort changed',false)
+    if M._coherentRenderer and not (M._ptgiCoherent and M._ptgiCoherent.requested) then M._coherentRenderer.resetHistory() end
+  end
+  if M._planarCapture then M._planarCapture.update() end
+  if M._nativeSsrEnhancement then M._nativeSsrEnhancement.update() end
+  -- Recheck actual native state before any render, including runtime toggles.
+  -- Keep enabledRequested so an explicit native-SSR OFF can resume our mode.
+  PROGRESSIVE.refreshRendererCompatibility()
+  if PROGRESSIVE.waterPreview then PROGRESSIVE.waterPreview.sync() end
   local frameDelta = finiteNumber(dtReal)
   if not frameDelta or frameDelta <= 0 then frameDelta = finiteNumber(dtRaw) end
   if not frameDelta or frameDelta <= 0 then frameDelta = 1 / 60 end
+  if M._coherentRenderer then M._coherentRenderer.update(frameDelta) end
+  if frameDelta > 0.25 and effectIsEnabled(GI_EFFECT_NAME) then
+    resetTemporalHistory('GI render interrupted', false)
+  end
+  if M._ptgiCoherent and M._ptgiCoherent.requested and not M.getPtgiCoherentStatus().active then
+    beamrtLog('W','Combined rendering stopped: '..tostring(M.getPtgiCoherentStatus().reason)
+      ..'; Coherent: '..tostring(M.getCoherentSsrStatus().reason))
+    pcall(M.logPtgiCoherentStatus)
+    M.disable()
+  end
+  if M._localVolumes and M._localVolumes.requested then
+    if materialCachePublication or CLEAN_RADIANCE.build or CLEAN_RADIANCE.materialBatch
+      or (PROGRESSIVE.lightingAudit.getStatus and PROGRESSIVE.lightingAudit.getStatus().active)
+      or PROGRESSIVE.reflectionSampling.isFrozen()
+      or (M._coherentRenderer and M._coherentRenderer.getStatus().active and not M._coherentRenderer.getOptions().hdrComposite)
+      or (not effectIsEnabled(GI_EFFECT_NAME) and not (M._coherentRenderer and M._coherentRenderer.getStatus().active)) then
+      M._localVolumes.disable('Local haze stopped for capture or inactive rendering; re-enable explicitly.')
+    else M._localVolumes.update(frameDelta) end
+  end
   PROGRESSIVE.reflectionReconstruction.frameDelta = math.min(math.max(frameDelta, 1 / 240), 1 / 15)
   -- Timing belongs to the current render. Shader/UI callbacks only read it;
   -- an interrupted active reflection history must start fresh after the gap.
@@ -7000,6 +8427,7 @@ function M.onPreRender(dtReal, dtSim, dtRaw)
 end
 
 function M.onUpdate(dtReal, dtSim, dtRaw)
+  if M._glassShadowProbe then M._glassShadowProbe.update() end
   processMaterialCachePublication()
   validateMaterialCachePublisherLifetimes()
   CLEAN_RADIANCE.processBuild()
@@ -7012,6 +8440,17 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
 end
 
 function M.onSettingsChanged()
+  if M._nativeShadowDiagnostic then M._nativeShadowDiagnostic.disable('Graphics/settings changed')end
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Graphics/settings changed')end
+  if M._glassSunShadow then M._glassSunShadow.disable('Graphics/settings changed') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Graphics/settings changed') end
+  if M._localVolumes then M._localVolumes.disable('Graphics/settings changed') end
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Graphics/settings changed') end
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
+  if M._planarCapture then M._planarCapture.stop("Graphics settings changed") end
+  if M._coherentRenderer then M._coherentRenderer.disable("Graphics settings changed; re-enable explicitly") end
+  if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("graphics/settings changed") end
+  PROGRESSIVE.refreshRendererCompatibility()
   PROGRESSIVE.lightingAudit.cancel(M, "graphics/settings changed during audit")
   -- Graphics/device changes flow through the general settings hook. Be
   -- conservative: a frozen diagnostic cache is cheap to recapture, while
@@ -7033,6 +8472,10 @@ function M.onFileChanged(filename, changeType)
   end
   local lowerName = string.lower(filename)
   if lowerName:match("%.hlsl$") or lowerName:match("%.materials?%.json$") then
+    if M._nativeShadowDiagnostic then M._nativeShadowDiagnostic.disable('Shader/material source changed')end
+    if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Shader/material source changed')end
+    if M._glassSunShadow then M._glassSunShadow.disable('Shader/material source changed') end
+    if M._glassShadowProbe then M._glassShadowProbe.disable('Shader/material source changed') end
     PROGRESSIVE.lightingAudit.cancel(M, "shader/material changed during audit")
     if materialCachePublication then
       finishMaterialCachePublication("shader/material changed during capture", false)
@@ -7057,6 +8500,22 @@ function M.onExtensionLoaded()
 end
 
 function M.onClientStartMission()
+  if M._nativeShadowDiagnostic then M._nativeShadowDiagnostic.disable('Mission changed')end
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Mission changed')end
+  if M._glassSunShadow then M._glassSunShadow.disable('Mission changed') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Mission changed') end
+  if M._localVolumes then M._localVolumes.disable('Mission changed') end
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission changed') end
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
+  if M._planarCapture then M._planarCapture.stop("Mission changed") end
+  if M._coherentRenderer then M._coherentRenderer.disable("Mission changed; re-enable explicitly") end
+  if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("mission changed") end
+  PROGRESSIVE.waterPreview.enabled = false
+  PROGRESSIVE.waterPreview.provider.clear("mission changed; refresh nearby water explicitly")
+  PROGRESSIVE.waterPreview.sync()
+  M.setSharedMeshVisibilityEnabled(false)
+  local buffer=package.loaded['ge/extensions/beamrt/giVisibilityBuffer'];if buffer then buffer.disable('mission changed')end
+  local underground=package.loaded['ge/extensions/beamrt/meshLocalScene'];if underground then underground.clear()end
   if extensions and extensions.beamrt_reflectionSourceProbe then extensions.beamrt_reflectionSourceProbe.cancel("mission changed") end
   if extensions and extensions.beamrt_reflectionConvergence then
     extensions.beamrt_reflectionConvergence.cancel("mission changed")
@@ -7084,7 +8543,36 @@ function M.onClientStartMission()
   sceneDatabase.scheduleLevelBuild(120)
 end
 
+function M.onClientEndMission()
+  if M._nativeShadowDiagnostic then M._nativeShadowDiagnostic.disable('Mission ended')end
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('Mission ended')end
+  if M._glassSunShadow then M._glassSunShadow.disable('Mission ended') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('Mission ended') end
+  if M._localVolumes then M._localVolumes.disable('Mission ended') end
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('Mission ended') end
+  if M._ptgiCoherent and M._ptgiCoherent.requested then M.disable() end
+  if M._planarCapture then M._planarCapture.stop("Mission ended") end
+  if M._coherentRenderer then M._coherentRenderer.disable("Mission ended") end
+  if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("mission ended") end
+end
+
 function M.onExtensionUnloaded()
+  if M._nativeShadowDiagnostic then M._nativeShadowDiagnostic.disable('BeamRT unloaded')end
+  if M._lightVisibilityDiagnostic then M._lightVisibilityDiagnostic.disable('BeamRT unloaded')end
+  if M._glassSunShadow then M._glassSunShadow.disable('BeamRT unloaded') end
+  if M._glassShadowProbe then M._glassShadowProbe.disable('BeamRT unloaded') end
+  if M._localVolumes then M._localVolumes.disable('BeamRT unloaded') end
+  if M._nearbyLampShadows then M._nearbyLampShadows.disable('BeamRT unloaded') end
+  if M._ptgiCoherent then M.disable() end
+  if M._planarCapture then M._planarCapture.release("BeamRT unloaded") end
+  if M._coherentRenderer then M._coherentRenderer.release("BeamRT unloaded") end
+  if M._nativeSsrEnhancement then M._nativeSsrEnhancement.disable("BeamRT unloaded") end
+  PROGRESSIVE.waterPreview.enabled = false
+  PROGRESSIVE.waterPreview.provider.clear("extension unloaded")
+  if package.loaded['ge/extensions/beamrt/giVisibilityBuffer']then package.loaded['ge/extensions/beamrt/giVisibilityBuffer'].release()end
+  M.setMeshSunShadowsEnabled(false)
+  M.setMeshLocalLightsEnabled(false)
+  if package.loaded['ge/extensions/beamrt/meshSceneInputs'] then package.loaded['ge/extensions/beamrt/meshSceneInputs'].release() end
   if extensions and extensions.beamrt_reflectionSourceProbe then extensions.beamrt_reflectionSourceProbe.cancel("BeamRT unloaded") end
   if extensions and extensions.beamrt_reflectionConvergence then
     extensions.beamrt_reflectionConvergence.cancel("BeamRT unloaded")

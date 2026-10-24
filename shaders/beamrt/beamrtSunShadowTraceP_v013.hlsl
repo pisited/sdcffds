@@ -1,0 +1,689 @@
+// BeamRT independent screen-space directional sunlight shadow tracer v013.
+// Four runtime hit models, including a receiver-plane self-shadow guard.
+// Screen-space results remain uncertain around off-screen/alpha/edge casters.
+// This pass does not modify BeamNG lighting. R = own sun visibility,
+// G = view-path coverage/confidence, B = N.L, A = surface present.
+// Incomplete view paths must NOT be interpreted as definitively sun-lit.
+#include "shaders/common/postFx/postFx.h.hlsl"
+
+uniform_sampler2D(prepassTex, 0);
+uniform_sampler2D(prepassDepthTex, 1);
+
+cbuffer perDraw : register(b0)
+{
+    uniform float3 eyePosWorld; // BeamNG auto-bound main camera world position.
+    uniform float3 sunDirection; // BeamNG auto-bound: world direction toward sun.
+    uniform float shadowRaySteps;
+    uniform float shadowRayDistance; // world metres
+    uniform float shadowNormalBias; // world metres
+    uniform float shadowThickness; // world metres
+    uniform float shadowHitModel; // 0 legacy, 1 refined, 2 validated, 3 geometric
+    uniform float shadowRefineSteps; // 0..6 binary refinement samples
+    uniform float shadowTraceDiagnostic; // 0 normal, 1 model-ID, 2 telemetry, 3 worldbox, 4 worldbox probe
+    uniform float shadowWorldBoxEnabled;
+    uniform float shadowWorldBoxCount;
+    uniform float shadowWorldBoxSunSign; // +1 engine vector, -1 reversed, world geometry
+    uniform float shadowMeshEnabled;
+    uniform float shadowMeshTriangleCount;
+    uniform float4 shadowMeshTri0A;
+    uniform float4 shadowMeshTri0B;
+    uniform float4 shadowMeshTri0C;
+    uniform float4 shadowMeshTri1A;
+    uniform float4 shadowMeshTri1B;
+    uniform float4 shadowMeshTri1C;
+    uniform float4 shadowMeshTri2A;
+    uniform float4 shadowMeshTri2B;
+    uniform float4 shadowMeshTri2C;
+    uniform float4 shadowMeshTri3A;
+    uniform float4 shadowMeshTri3B;
+    uniform float4 shadowMeshTri3C;
+    uniform float4 shadowMeshTri4A;
+    uniform float4 shadowMeshTri4B;
+    uniform float4 shadowMeshTri4C;
+    uniform float4 shadowMeshTri5A;
+    uniform float4 shadowMeshTri5B;
+    uniform float4 shadowMeshTri5C;
+    uniform float4 shadowMeshTri6A;
+    uniform float4 shadowMeshTri6B;
+    uniform float4 shadowMeshTri6C;
+    uniform float4 shadowMeshTri7A;
+    uniform float4 shadowMeshTri7B;
+    uniform float4 shadowMeshTri7C;
+    uniform float4 shadowMeshTri8A;
+    uniform float4 shadowMeshTri8B;
+    uniform float4 shadowMeshTri8C;
+    uniform float4 shadowMeshTri9A;
+    uniform float4 shadowMeshTri9B;
+    uniform float4 shadowMeshTri9C;
+    uniform float4 shadowMeshTri10A;
+    uniform float4 shadowMeshTri10B;
+    uniform float4 shadowMeshTri10C;
+    uniform float4 shadowMeshTri11A;
+    uniform float4 shadowMeshTri11B;
+    uniform float4 shadowMeshTri11C;
+    uniform float4 shadowWorldBoxMin0;
+    uniform float4 shadowWorldBoxMax0;
+    uniform float4 shadowWorldBoxMin1;
+    uniform float4 shadowWorldBoxMax1;
+    uniform float4 shadowWorldBoxMin2;
+    uniform float4 shadowWorldBoxMax2;
+    uniform float4 shadowWorldBoxMin3;
+    uniform float4 shadowWorldBoxMax3;
+    POSTFX_UNIFORMS
+};
+
+#include "shaders/common/postFx/postFx.hlsl"
+
+#ifdef SHADER_STAGE_VS
+    #define mainV main
+#else
+    #define mainP main
+#endif
+
+// Reuses the eye-ray basis used by BeamRT's GI and reflection tracers.
+bool projectShadowPoint(
+    float3 eyeVector, float3 currentEyeRay, float3 eyeRayDu,
+    float3 eyeRayDv, float2 currentUv,
+    out float2 projectedUv, out float projectedDepth)
+{
+    float3 normal = cross(eyeRayDu, eyeRayDv);
+    float determinant = dot(currentEyeRay, normal);
+    if (abs(determinant) < 0.00000001)
+    {
+        projectedUv = 0.0;
+        projectedDepth = 0.0;
+        return false;
+    }
+    projectedDepth = dot(eyeVector, normal) / determinant;
+    float weightedDu = dot(currentEyeRay, cross(eyeVector, eyeRayDv)) / determinant;
+    float weightedDv = dot(currentEyeRay, cross(eyeRayDu, eyeVector)) / determinant;
+    projectedUv = currentUv + float2(weightedDu, weightedDv) /
+                  max(projectedDepth, 0.00000001);
+    return projectedDepth > 0.00000001;
+}
+
+// Mode 2 changes only the explicit diagnostic output, never the visibility
+// stored when the diagnostic mode is disabled.
+float4 beamrtEmptyShadowResult(float4 normalResult)
+{
+    return shadowTraceDiagnostic > 1.5
+        ? float4(0.0, 0.0, 0.0, 0.0) : normalResult;
+}
+
+// Diagnostic channels: R = travel/ray distance, G = depth error / tolerance,
+// B = receiver-plane separation/0.25 metres for matching caster normals,
+//     else 1, A = confirmed(1)/uncertain(.5)/no hit(0).
+float4 beamrtShadowHitResult(
+    float hitTravel, float2 hitUv, float deltaWorld, float tolerance,
+    float reach, float incidence, float confidence, float4 receiver,
+    float3 currentEyeRay, float3 eyeRayDu, float3 eyeRayDv,
+    float2 currentUv)
+{
+    if (shadowTraceDiagnostic < 1.5)
+        return float4(0.0, confidence, incidence, 1.0);
+    float4 caster = decodeGBuffer(
+        TEX_SAMPLER(prepassDepthTex), TEX_SAMPLER(prepassTex),
+        hitUv, projParams);
+    float planeSeparation = 1.0;
+    if (caster.w < 0.9999)
+    {
+        float3 receiverNormal = normalize(receiver.xyz);
+        float3 casterNormal = normalize(caster.xyz);
+        float3 hitEyeRay = currentEyeRay +
+            eyeRayDu * (hitUv.x - currentUv.x) +
+            eyeRayDv * (hitUv.y - currentUv.y);
+        float3 casterOffset = hitEyeRay * caster.w -
+                              currentEyeRay * receiver.w;
+        if (dot(receiverNormal, casterNormal) > 0.965)
+            planeSeparation = saturate(
+                abs(dot(casterOffset, receiverNormal)) / 0.25);
+    }
+    return float4(saturate(hitTravel / max(reach, 0.5)),
+                  saturate(abs(deltaWorld) / max(tolerance, 0.005)),
+                  planeSeparation,
+                  confidence >= 0.75 ? 1.0 : 0.5);
+}
+
+// CPU-supplied world bounds remain available after their TSStatic objects
+// leave the camera. This tests genuinely OFFSCREEN geometry instead of
+// relying on pixels already visible in #prepass.
+// Conservative ray/AABB intersection. Bound geometry is only a coarse proxy.
+bool beamrtRayHitsWorldBox(float3 rayOrigin, float3 rayDir,
+                           float3 boundsMin, float3 boundsMax,
+                           float maxDistance)
+{
+    float tNear = -1e9;
+    float tFar = 1e9;
+    [unroll]
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        float position = rayOrigin[axis];
+        float dir = rayDir[axis];
+        if (abs(dir) < 0.000001)
+        {
+            if (position < boundsMin[axis] ||
+                position > boundsMax[axis]) return false;
+        }
+        else
+        {
+            float t1 = (boundsMin[axis] - position) / dir;
+            float t2 = (boundsMax[axis] - position) / dir;
+            tNear = max(tNear, min(t1, t2));
+            tFar = min(tFar, max(t1, t2));
+            if (tNear > tFar) return false;
+        }
+    }
+    // When receiver starts inside a proxy, there is no valid distant
+    // occluder entry. Otherwise boxes would shadow their own surfaces.
+    return tNear > 0.08 && tNear < maxDistance && tFar > tNear;
+}
+
+bool beamrtHitAnyWorldBox(float3 origin, float3 sunlight, float maxDistance)
+{
+    if (shadowWorldBoxEnabled < 0.5) return false;
+    int count = clamp((int)shadowWorldBoxCount, 0, 4);
+    [loop]
+    for (int index = 0; index < 4; ++index)
+    {
+        if (index >= count) break;
+        float3 boxMin = shadowWorldBoxMin0.xyz;
+        float3 boxMax = shadowWorldBoxMax0.xyz;
+        if (index == 1)
+        {
+            boxMin = shadowWorldBoxMin1.xyz;
+            boxMax = shadowWorldBoxMax1.xyz;
+        }
+        else if (index == 2)
+        {
+            boxMin = shadowWorldBoxMin2.xyz;
+            boxMax = shadowWorldBoxMax2.xyz;
+        }
+        else if (index == 3)
+        {
+            boxMin = shadowWorldBoxMin3.xyz;
+            boxMax = shadowWorldBoxMax3.xyz;
+        }
+        if (beamrtRayHitsWorldBox(origin, sunlight, boxMin, boxMax,
+                                  maxDistance))
+            return true;
+    }
+    return false;
+}
+
+// Actual world-space triangles (not AABBs): Moller-Trumbore, double-sided.
+// 12 triangles fit one closed cuboid, or a small triangulated facade/roof.
+// No backface culling: support double-sided shadows independently of materials.
+bool beamrtRayHitMeshTriangle(float3 origin, float3 dir,
+                              float3 a, float3 b, float3 c,
+                              float limit)
+{
+    float3 e1 = b - a;
+    float3 e2 = c - a;
+    float3 p = cross(dir, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 0.00001) return false;
+    float invDet = 1.0 / det;
+    float3 t = origin - a;
+    float u = dot(t, p) * invDet;
+    if (u < -0.00001 || u > 1.00001) return false;
+    float3 q = cross(t, e1);
+    float v = dot(dir, q) * invDet;
+    if (v < -0.00001 || u + v > 1.00001) return false;
+    float distance = dot(e2, q) * invDet;
+    return distance > 0.08 && distance < limit;
+}
+
+bool beamrtRayHitsWorldMesh(float3 origin, float3 sunlight, float distanceLimit)
+{
+    if (shadowMeshEnabled < 0.5) return false;
+    int triangleCount = clamp((int)shadowMeshTriangleCount, 0, 12);
+    [loop]
+    for (int i = 0; i < 12; ++i)
+    {
+        if (i >= triangleCount) break;
+        float3 a = shadowMeshTri0A.xyz;
+        float3 b = shadowMeshTri0B.xyz;
+        float3 c = shadowMeshTri0C.xyz;
+        if (i == 1)
+        {
+            a = shadowMeshTri1A.xyz;
+            b = shadowMeshTri1B.xyz;
+            c = shadowMeshTri1C.xyz;
+        }
+        else if (i == 2)
+        {
+            a = shadowMeshTri2A.xyz;
+            b = shadowMeshTri2B.xyz;
+            c = shadowMeshTri2C.xyz;
+        }
+        else if (i == 3)
+        {
+            a = shadowMeshTri3A.xyz;
+            b = shadowMeshTri3B.xyz;
+            c = shadowMeshTri3C.xyz;
+        }
+        else if (i == 4)
+        {
+            a = shadowMeshTri4A.xyz;
+            b = shadowMeshTri4B.xyz;
+            c = shadowMeshTri4C.xyz;
+        }
+        else if (i == 5)
+        {
+            a = shadowMeshTri5A.xyz;
+            b = shadowMeshTri5B.xyz;
+            c = shadowMeshTri5C.xyz;
+        }
+        else if (i == 6)
+        {
+            a = shadowMeshTri6A.xyz;
+            b = shadowMeshTri6B.xyz;
+            c = shadowMeshTri6C.xyz;
+        }
+        else if (i == 7)
+        {
+            a = shadowMeshTri7A.xyz;
+            b = shadowMeshTri7B.xyz;
+            c = shadowMeshTri7C.xyz;
+        }
+        else if (i == 8)
+        {
+            a = shadowMeshTri8A.xyz;
+            b = shadowMeshTri8B.xyz;
+            c = shadowMeshTri8C.xyz;
+        }
+        else if (i == 9)
+        {
+            a = shadowMeshTri9A.xyz;
+            b = shadowMeshTri9B.xyz;
+            c = shadowMeshTri9C.xyz;
+        }
+        else if (i == 10)
+        {
+            a = shadowMeshTri10A.xyz;
+            b = shadowMeshTri10B.xyz;
+            c = shadowMeshTri10C.xyz;
+        }
+        else if (i == 11)
+        {
+            a = shadowMeshTri11A.xyz;
+            b = shadowMeshTri11B.xyz;
+            c = shadowMeshTri11C.xyz;
+        }
+        if (beamrtRayHitMeshTriangle(origin, sunlight, a, b, c, distanceLimit))
+            return true;
+    }
+    return false;
+}
+
+float4 mainP(PFXVertToPix IN) : SV_Target0
+{
+    float4 center = decodeGBuffer(
+        TEX_SAMPLER(prepassDepthTex), TEX_SAMPLER(prepassTex),
+        IN.uv0, projParams);
+    // Bypass all ray tracing to verify *independent* pass constants and
+    // preview textures. Visible grayscale values should be:
+    // legacy=.125, refined=.375, validated=.625, geometric=.875.
+    if (shadowTraceDiagnostic > 0.5 && shadowTraceDiagnostic < 1.5)
+        return float4((shadowHitModel + 0.5) * 0.25, 1.0, 1.0, 1.0);
+
+    // Explicit independent world-box diagnostic. Run BEFORE backface and
+    // screen-projection exits so a zero-hit image can be distinguished from
+    // missing GPU uniforms / no boxes. RGB is:
+    // RED  = world box enabled, count nonzero and first box bounds valid
+    // GREEN= ray hit in BeamRT's currently assumed sunlight direction
+    // BLUE = ray hit in the opposite sunlight direction.
+    // The red channel also covers sky so an empty result is not confused with
+    // normal lack of sunlight intersections.
+    if (shadowTraceDiagnostic > 3.5 && shadowTraceDiagnostic < 4.5)
+    {
+        bool boxesAvailable = shadowWorldBoxEnabled > 0.5 &&
+            shadowWorldBoxCount >= 0.5 &&
+            all(shadowWorldBoxMax0.xyz > shadowWorldBoxMin0.xyz);
+        float redStatus = boxesAvailable ? 1.0 : 0.0;
+        float greenForward = 0.0;
+        float blueReverse = 0.0;
+        float3 probeSun = sunDirection;
+        float probeSunLenSq = dot(probeSun, probeSun);
+        if (boxesAvailable && center.w < 0.9999 &&
+            probeSunLenSq > 0.000001)
+        {
+            probeSun *= rsqrt(probeSunLenSq);
+            float3 receiverOrigin = eyePosWorld +
+                IN.wsEyeRay * center.w +
+                normalize(center.xyz) * max(shadowNormalBias, 0.005);
+            float distanceLimit = max(shadowRayDistance, 0.5);
+            greenForward = beamrtHitAnyWorldBox(
+                receiverOrigin, probeSun, distanceLimit) ? 1.0 : 0.0;
+            blueReverse = beamrtHitAnyWorldBox(
+                receiverOrigin, -probeSun, distanceLimit) ? 1.0 : 0.0;
+        }
+        return float4(redStatus, greenForward, blueReverse, 1.0);
+    }
+    // Diagnostic 5 is a stand-alone triangle-hit mask. It intentionally
+    // bypasses camera ray-march and box proxy tests while using only stored
+    // world-space triangle positions and current visible receivers.
+    if (shadowTraceDiagnostic > 4.5)
+    {
+        if (center.w >= 0.9999) return float4(0, 0, 0, 1);
+        float3 direction = sunDirection;
+        float lenSq = dot(direction, direction);
+        if (lenSq < 0.000001) return float4(0, 0, 0, 1);
+        direction *= rsqrt(lenSq);
+        if (shadowWorldBoxSunSign < 0.0) direction = -direction;
+        float facing = dot(normalize(center.xyz), direction);
+        if (facing < 0.0001) return float4(0, 0, 0, 1);
+        float3 origin = eyePosWorld + IN.wsEyeRay * center.w +
+                        center.xyz * max(shadowNormalBias, 0.005);
+        bool meshHit = beamrtRayHitsWorldMesh(
+            origin, direction, max(shadowRayDistance, 0.5));
+        return float4(meshHit ? 1.0 : 0.0, 0, 0, 1);
+    }
+    if (center.w >= 0.9999) return beamrtEmptyShadowResult(float4(1.0, 0.0, 0.0, 0.0));
+
+    float3 sun = sunDirection;
+    float sunLengthSq = dot(sun, sun);
+    if (sunLengthSq < 0.000001)
+        return beamrtEmptyShadowResult(float4(1.0, 0.0, 0.0, 1.0));
+    sun *= rsqrt(sunLengthSq);
+
+    // World-box casters use a separately selectable sunlight orientation.
+    // Crucially, check their surface-facing direction BEFORE the legacy
+    // screen-space backface/derivative exits: otherwise the reverse-direction
+    // hits visible in worldboxprobe are silently discarded.
+    float3 worldBoxSun = shadowWorldBoxSunSign < 0.0 ? -sun : sun;
+    float worldBoxNDotL = saturate(dot(normalize(center.xyz), worldBoxSun));
+    float bias = max(shadowNormalBias, 0.005);
+    float3 rayOrigin = eyePosWorld + IN.wsEyeRay * center.w +
+                       center.xyz * bias;
+    bool worldBoxHit = false;
+    bool meshHit = false;
+    if (worldBoxNDotL >= 0.0001)
+    {
+        if (shadowWorldBoxEnabled > 0.5)
+            worldBoxHit = beamrtHitAnyWorldBox(
+                rayOrigin, worldBoxSun, max(shadowRayDistance, 0.5));
+        if (shadowMeshEnabled > 0.5)
+            meshHit = beamrtRayHitsWorldMesh(
+                rayOrigin, worldBoxSun, max(shadowRayDistance, 0.5));
+    }
+
+    // View 17 now reports actual selectable-direction caster hits, not
+    // hits suppressed by the unrelated screen-space normal check.
+    if (shadowTraceDiagnostic > 2.5)
+        return float4(worldBoxHit ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+    if ((worldBoxHit || meshHit) && shadowTraceDiagnostic < 1.5)
+    {
+        // Isolated box prototype: the original camera-depth tracer below
+        // still uses exactly its previous sun vector and N dot L test.
+        return float4(0.0, 1.0, worldBoxNDotL, 1.0);
+    }
+
+    float nDotL = saturate(dot(normalize(center.xyz), sun));
+    if (nDotL < 0.0001)
+    {
+        // Preserve v011's existing camera-depth tracer behavior if no
+        // opted-in world-space proxy intercepted sunlight.
+        return beamrtEmptyShadowResult(float4(1.0, 0.0, 0.0, 1.0));
+    }
+
+    float dx = ddx(IN.uv0.x);
+    float dy = ddy(IN.uv0.y);
+    if (abs(dx) < 0.00000001 || abs(dy) < 0.00000001)
+        return beamrtEmptyShadowResult(float4(1.0, 0.0, nDotL, 1.0));
+
+    float3 rayDu = ddx(IN.wsEyeRay) / dx;
+    float3 rayDv = ddy(IN.wsEyeRay) / dy;
+
+    int stepCount = clamp((int)shadowRaySteps, 4, 96);
+    float reach = max(shadowRayDistance, 0.5);
+    float thickness = max(shadowThickness, 0.02);
+    float2 farCorner = rtParams0.xy + rtParams0.zw;
+    float2 viewportMin = min(rtParams0.xy, farCorner) + 0.0001;
+    float2 viewportMax = max(rtParams0.xy, farCorner) - 0.0001;
+
+    // A ray hit requires two consecutive depth samples that bracket an
+    // actual front-to-back crossing. Do NOT treat the first positive sample
+    // as a hit: it can be the receiver's own depth (self-shadow/acne).
+    float lastDepthDelta = 0.0;
+    bool hadPreviousValidSample = false;
+    float previousTravel = 0.0;
+    float acceptedSamples = 0.0;
+    bool uncertainDiscontinuity = false;
+
+    [loop]
+    for (int index = 0; index < 96; ++index)
+    {
+        if (index >= stepCount) break;
+        float fraction = ((float)index + 1.0) / (float)stepCount;
+        // Quadratic spacing devotes steps to contacts while reaching distance.
+        float travel = 0.03 + reach * fraction * fraction;
+        float3 worldPoint = rayOrigin + sun * travel;
+        float2 uv;
+        float rayEyeDepth;
+        bool projected = projectShadowPoint(
+            worldPoint - eyePosWorld, IN.wsEyeRay, rayDu, rayDv,
+            IN.uv0, uv, rayEyeDepth);
+
+        if (!projected || rayEyeDepth >= 0.9999 ||
+            rayEyeDepth <= max(projParams.x / max(projParams.y, 0.0001), 0.00000001) ||
+            any(uv <= viewportMin) || any(uv >= viewportMax))
+        {
+            // A ray exiting the view is UNKNOWN, not guaranteed illuminated.
+            return beamrtEmptyShadowResult(float4(1.0, acceptedSamples / (float)stepCount, nDotL, 1.0));
+        }
+
+        float ndc = tex2Dlod(prepassDepthTex, float4(uv, 0.0, 0.0)).r;
+        float sceneDepth = realToEyeLinearDepth(
+            ndcToRealDepth(ndc, projParams.zw), projParams);
+        if (sceneDepth >= 0.9999)
+        {
+            // Missing depth cannot form a valid crossing pair. A later object
+            // silhouette must start a new bracket instead of inheriting an
+            // old front-facing sample from across empty sky.
+            hadPreviousValidSample = false;
+            continue;
+        }
+
+        acceptedSamples += 1.0;
+        // Positive delta means the ray is behind camera-visible geometry.
+        float deltaWorld = (rayEyeDepth - sceneDepth) * projParams.y;
+        float tolerance = max(thickness, reach * fraction * 0.006);
+        // Require transition from in front of a surface toward the rear.
+        // This avoids treating unrelated foreground silhouettes as hits.
+        // Keep the exact v004 acceptance rule available for runtime A/B.
+        if (shadowHitModel < 0.5)
+        {
+            if (hadPreviousValidSample &&
+                lastDepthDelta < -0.008 &&
+                deltaWorld >= 0.0 && deltaWorld <= tolerance)
+                return beamrtShadowHitResult(
+                    travel, uv, deltaWorld, tolerance, reach, nDotL, 1.0,
+                    center, IN.wsEyeRay, rayDu, rayDv, IN.uv0);
+        }
+        else if (hadPreviousValidSample &&
+                 lastDepthDelta < -0.008 &&
+                 deltaWorld >= 0.0)
+        {
+            // The coarse sample may overshoot a thin occluder by far more
+            // than the permitted thickness. Binary-search the travel segment
+            // instead of silently missing it, but never accept a segment
+            // that crosses a missing-depth pixel or the viewport boundary.
+            float lowTravel = previousTravel;
+            float highTravel = travel;
+            bool bracketValid = true;
+            int refinementCount = clamp((int)shadowRefineSteps, 0, 6);
+
+            [loop]
+            for (int refine = 0; refine < 6; ++refine)
+            {
+                if (refine >= refinementCount) break;
+                float middleTravel = 0.5 * (lowTravel + highTravel);
+                float2 middleUv;
+                float middleEyeDepth;
+                bool middleProjected = projectShadowPoint(
+                    rayOrigin + sun * middleTravel - eyePosWorld,
+                    IN.wsEyeRay, rayDu, rayDv, IN.uv0,
+                    middleUv, middleEyeDepth);
+                if (!middleProjected || middleEyeDepth >= 0.9999 ||
+                    middleEyeDepth <= max(projParams.x / max(projParams.y, 0.0001), 0.00000001) ||
+                    any(middleUv <= viewportMin) || any(middleUv >= viewportMax))
+                {
+                    bracketValid = false;
+                    break;
+                }
+                float middleNdc = tex2Dlod(
+                    prepassDepthTex, float4(middleUv, 0.0, 0.0)).r;
+                float middleSceneDepth = realToEyeLinearDepth(
+                    ndcToRealDepth(middleNdc, projParams.zw), projParams);
+                if (middleSceneDepth >= 0.9999)
+                {
+                    bracketValid = false;
+                    break;
+                }
+                float middleDelta = (middleEyeDepth - middleSceneDepth) *
+                                    projParams.y;
+                if (middleDelta >= 0.0)
+                    highTravel = middleTravel;
+                else
+                    lowTravel = middleTravel;
+            }
+
+            // Recheck the *final* hit candidate rather than accepting an
+            // arbitrary coarse sign crossing or depth-buffer discontinuity.
+            if (bracketValid)
+            {
+                float2 hitUv;
+                float hitEyeDepth;
+                bool hitProjected = projectShadowPoint(
+                    rayOrigin + sun * highTravel - eyePosWorld,
+                    IN.wsEyeRay, rayDu, rayDv, IN.uv0, hitUv, hitEyeDepth);
+                if (hitProjected && hitEyeDepth < 0.9999 &&
+                    all(hitUv > viewportMin) && all(hitUv < viewportMax))
+                {
+                    float hitNdc = tex2Dlod(
+                        prepassDepthTex, float4(hitUv, 0.0, 0.0)).r;
+                    float hitSceneDepth = realToEyeLinearDepth(
+                        ndcToRealDepth(hitNdc, projParams.zw), projParams);
+                    float hitDelta = (hitEyeDepth - hitSceneDepth) *
+                                     projParams.y;
+                    // Avoid counting a nearly immediate receiver departure
+                    // or a gross depth disagreement as a cast shadow.
+                    float departure = highTravel;
+                    float minDeparture = max(0.05, bias * 1.5);
+                    if (hitSceneDepth < 0.9999 &&
+                        departure > minDeparture &&
+                        hitDelta >= -0.002 &&
+                        hitDelta <= tolerance)
+                    {
+                        // Model 1 preserves v005 exactly. Model 2 checks
+                        // depth coherence around the candidate caster.
+                        if (shadowHitModel < 1.5)
+                            return beamrtShadowHitResult(
+                                highTravel, hitUv, hitDelta, tolerance,
+                                reach, nDotL, 1.0, center,
+                                IN.wsEyeRay, rayDu, rayDv, IN.uv0);
+
+                        // In the geometric mode, first check for a coplanar
+                        // self-intersection. A depth crossing against the
+                        // receiver's own sidewalk/road plane is not evidence
+                        // of a separate shadow caster.
+                        bool sameReceiverPlane = false;
+                        if (shadowHitModel >= 2.5)
+                        {
+                            float4 hitSurface = decodeGBuffer(
+                                TEX_SAMPLER(prepassDepthTex),
+                                TEX_SAMPLER(prepassTex), hitUv, projParams);
+                            if (hitSurface.w < 0.9999)
+                            {
+                                float3 receiverNormal = normalize(center.xyz);
+                                float3 casterNormal = normalize(hitSurface.xyz);
+                                float3 hitEyeRay = IN.wsEyeRay +
+                                    rayDu * (hitUv.x - IN.uv0.x) +
+                                    rayDv * (hitUv.y - IN.uv0.y);
+                                // Eye-relative positions avoid large world
+                                // coordinates and share the same reconstruction
+                                // convention as the main shadow ray.
+                                float3 casterOffset =
+                                    hitEyeRay * hitSurface.w -
+                                    IN.wsEyeRay * center.w;
+                                float receiverPlaneDistance =
+                                    abs(dot(casterOffset, receiverNormal));
+                                sameReceiverPlane =
+                                    dot(receiverNormal, casterNormal) > 0.965 &&
+                                    receiverPlaneDistance < max(0.03, bias * 1.25);
+                            }
+                        }
+
+                        // Keep v006's original half-pixel neighborhood intact
+                        // when "validated" is selected. "geometric" uses a
+                        // wider 1.5-pixel radius to reach distinct depth
+                        // texels even with point sampling.
+                        float2 offsetUv =
+                            (shadowHitModel >= 2.5 ? 1.5 : 0.5) *
+                            float2(abs(dx), abs(dy));
+                        float2 sampleUv[4] = {
+                            hitUv + float2(offsetUv.x, 0.0),
+                            hitUv - float2(offsetUv.x, 0.0),
+                            hitUv + float2(0.0, offsetUv.y),
+                            hitUv - float2(0.0, offsetUv.y)
+                        };
+                        float agreeingNeighbors = 0.0;
+                        float depthWindowWorld = max(thickness * 1.5, 0.15);
+                        [unroll]
+                        for (int neighbor = 0; neighbor < 4; ++neighbor)
+                        {
+                            if (any(sampleUv[neighbor] <= viewportMin) ||
+                                any(sampleUv[neighbor] >= viewportMax))
+                                continue;
+                            float neighborNdc = tex2Dlod(
+                                prepassDepthTex,
+                                float4(sampleUv[neighbor], 0.0, 0.0)).r;
+                            float neighborEyeDepth = realToEyeLinearDepth(
+                                ndcToRealDepth(neighborNdc, projParams.zw),
+                                projParams);
+                            if (neighborEyeDepth < 0.9999 &&
+                                abs(neighborEyeDepth - hitSceneDepth) *
+                                    projParams.y <= depthWindowWorld)
+                                agreeingNeighbors += 1.0;
+                        }
+                        if (!sameReceiverPlane && agreeingNeighbors >= 2.0)
+                        {
+                            // Nearby depths support a distinct caster.
+                            return beamrtShadowHitResult(
+                                highTravel, hitUv, hitDelta, tolerance,
+                                reach, nDotL, 1.0, center,
+                                IN.wsEyeRay, rayDu, rayDv, IN.uv0);
+                        }
+                        if (!sameReceiverPlane && agreeingNeighbors >= 1.0)
+                        {
+                            // Thin potential caster: preserve a low-confidence
+                            // magenta/purple candidate in classification.
+                            return beamrtShadowHitResult(
+                                highTravel, hitUv, hitDelta, tolerance,
+                                reach, nDotL, 0.45, center,
+                                IN.wsEyeRay, rayDu, rayDv, IN.uv0);
+                        }
+                        // Rejected self-plane hits and unsupported silhouettes
+                        // become UNKNOWN, not a confirmed shadow nor proof of
+                        // sunlight. Continue searching for a real occluder.
+                        uncertainDiscontinuity = true;
+                    }
+                }
+            }
+        }
+        lastDepthDelta = deltaWorld;
+        previousTravel = travel;
+        hadPreviousValidSample = true;
+    }
+
+    float finalCoverage = saturate(acceptedSamples / (float)stepCount);
+    if (shadowHitModel >= 1.5 && uncertainDiscontinuity)
+        finalCoverage = min(finalCoverage, 0.25);
+    return beamrtEmptyShadowResult(float4(1.0, finalCoverage, nDotL, 1.0));
+}
+
+PFXVertToPix mainV(PFXVert IN)
+{
+    return processPostFxVert(IN);
+}

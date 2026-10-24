@@ -1,0 +1,16 @@
+uniform float3 meshOrigin;
+uniform float3 meshInvX;
+uniform float3 meshInvY;
+uniform float3 meshInvZ;
+uniform float3 meshQuantMin;
+uniform float3 meshQuantExtent;
+uniform float meshNodeCount;
+uniform float meshTriangleCount;
+uniform float meshTriangleOffset;
+uniform float2 meshAtlasSize;
+uniform float meshMaterialPolicyEnabled;
+uniform float4 meshMaterialModes0;
+uniform float4 meshMaterialModes1;
+uniform float4 meshMaterialModes2;
+uniform float4 meshMaterialModes3;
+uniform float meshVisibilityEnabled;

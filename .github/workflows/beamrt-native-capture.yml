@@ -1,0 +1,32 @@
+name: BeamRT isolated D3D12 resource capture
+on:
+  push:
+    paths:
+      - 'native/capture/**'
+      - 'tools/tests/test_native_capture_contracts.py'
+      - '.github/workflows/beamrt-native-capture.yml'
+  pull_request:
+    paths:
+      - 'native/capture/**'
+      - 'tools/tests/test_native_capture_contracts.py'
+      - '.github/workflows/beamrt-native-capture.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-capture:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Resource-capture source safety contracts
+        run: python -B tools/tests/test_native_capture_contracts.py
+      - name: Strict build and real public-API interception in an isolated WARP process
+        shell: pwsh
+        run: ./native/capture/build.ps1 -RunTest -Warp
+      # Independent of the existing worker/adapter. No BeamNG files, device,
+      # loader, injection or renderer replacement are used by this job.
+      # A passing fixture is not live-game resource or lighting validation.

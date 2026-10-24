@@ -6,11 +6,17 @@
 // Candidates still require a physical depth crossing, binary refinement,
 // screen travel, and a front-facing hit; the first crossing owns the result.
 #include "beamrtReflectionTrace.h.hlsl"
+#ifdef BEAMRT_REFLECTION_SAFE_RADIANCE
+#include "beamrtReflectionRadianceSafety.h.hlsl"
+#endif
 #ifdef BEAMRT_REFLECTION_HIT_AWARE
 #include "beamrtReflectionHitPacking.h.hlsl"
 #endif
 #ifdef BEAMRT_REFLECTION_COLOR_FILTER
 #include "beamrtReflectionSourceFilter.h.hlsl"
+#endif
+#ifdef BEAMRT_REFLECTION_SOURCE_RECONSTRUCTION
+#include "beamrtReflectionSourceReconstruction.h.hlsl"
 #endif
 
 #ifdef SHADER_STAGE_VS
@@ -793,11 +799,35 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
             * distanceConfidence * facingConfidence * travelConfidence * continuityConfidence;
         float2 backbufferUv = beamrtPrepassUvToBackbufferUv(refinedUv);
         float3 reflectedLinear = hdrDecode(tex2Dlod(backBufferTex, float4(backbufferUv, 0.0, 0.0)).rgb);
+#ifdef BEAMRT_REFLECTION_SOURCE_RECONSTRUCTION
+        bool reconstructSource = reflectionSourceReconstructionEnabled > 0.5;
+        if (reconstructSource)
+        {
+            float sourceCoverage;
+            reflectedLinear = beamrtReflectionReconstructedSource(refinedUv, refinedSceneEyeDepth, sourceCoverage);
+        }
+#endif
+#ifdef BEAMRT_REFLECTION_SAFE_RADIANCE
+        // Preserve invalid-source evidence across optional source filtering;
+        // min/max or neighboring color must not silently rehabilitate it.
+        bool reflectionSourceFinite = beamrtReflectionRadianceIsFinite(reflectedLinear);
+        if (!reflectionSourceFinite) reflectedLinear = 0.0;
+#endif
 #ifdef BEAMRT_REFLECTION_COLOR_FILTER
-        [branch] if (reflectionColorFilterEnabled > 0.5 && useGGX && diagnosticMode == 0 && roughness > 0.04)
+        [branch] if (reflectionColorFilterEnabled > 0.5 && useGGX && diagnosticMode == 0 && roughness > 0.04
+#ifdef BEAMRT_REFLECTION_SOURCE_RECONSTRUCTION
+            && !reconstructSource
+#endif
+            )
             reflectedLinear = beamrtReflectionFilteredSource(reflectedLinear,
                 (refinedUv - rtParams0.xy) / rtParams0.zw,
                 refinedSceneEyeDepth * projParams.y, roughness, highTravel);
+#endif
+#ifdef BEAMRT_REFLECTION_SAFE_RADIANCE
+        // Keep invalid source components out of all weighted arithmetic. A
+        // rejected RGB source does not invalidate an accepted geometric hit.
+        reflectedLinear = reflectionSourceFinite
+            ? beamrtReflectionFiniteSource(reflectedLinear) : 0.0;
 #endif
         bestRadiance = max(reflectedLinear, 0.0) * confidence;
 #ifdef BEAMRT_REFLECTION_GGX
@@ -814,6 +844,12 @@ float4 mainP(PFXVertToPix IN) : SV_Target0
         break;
     }
 
+#ifdef BEAMRT_REFLECTION_SAFE_RADIANCE
+    // Temporal/history color must remain representable in RGBA16F, even if
+    // hit-aware tracing uses RGBA32F. Preserve alpha separately: confidence,
+    // packed hit UV and convergence categories are not radiance.
+    bestRadiance = beamrtReflectionSafeRadiance(bestRadiance);
+#endif
 #ifdef BEAMRT_REFLECTION_DIAGNOSTICS
     if (diagnosticMode > 0 && diagnosticMode != 6)
         return beamrtReflectionDiagnostic(diagnosticMode, diagnosticHadCrossing ? 2 : 1,

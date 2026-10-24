@@ -1,2 +1,5 @@
 
 .beamrt-validation/
+art/beamrt/alignment/
+shaders/beamrt/generated/
+.beamrt-validation/
